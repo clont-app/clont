@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clont"
+dynamic = ["version"]
+description = "Monitoring agent , under active development"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["monitoring", "observability", "agent", "infrastructure"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Topic :: System :: Monitoring",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/clont-app/clont"
+Repository = "https://github.com/clont-app/clont"
+
+[tool.hatch.version]
+path = "clont/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["clont"]
+
+[tool.hatch.build.targets.sdist]
+include = ["clont", "README.md", "LICENSE"]
