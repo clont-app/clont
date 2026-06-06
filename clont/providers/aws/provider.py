@@ -66,7 +66,7 @@ class AWSProvider:
 
     def __init__(self, alias: str, config: AWSConfig) -> None:
         self.alias = alias
-        self.account: str | None = None  # AWS account id, set in authenticate()
+        self.account_id: str | None = None  # AWS account id, set in authenticate()
         self._config = config
         self._session: boto3.Session | None = None
         self._clients: dict[tuple[str, str | None], Any] = {}
@@ -79,8 +79,8 @@ class AWSProvider:
         """
         self._session = _build_session(self._config)
         ident = self._session.client("sts").get_caller_identity()
-        self.account = ident["Account"]
-        log.info("authenticated %s as %s (%s)", self.alias, self.account, ident["Arn"])
+        self.account_id = ident["Account"]
+        log.info("authenticated %s as %s (%s)", self.alias, self.account_id, ident["Arn"])
 
     def regions(self) -> list[str]:
         """Regions in scope: the configured list, or every enabled region."""

@@ -15,7 +15,7 @@ class CostRecord:
     service: str
     period: Period
     cost: Money
-    account: str | None = None  # account alias
+    alias: str | None = None  # account alias the cost belongs to
     resource: CloudResource | None = None
     dimensions: dict[str, str] | None = None  # e.g. {"usage_type": "..."}
 

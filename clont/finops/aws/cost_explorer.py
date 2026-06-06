@@ -70,6 +70,6 @@ class CostExplorerCollector:
             cloud=str(Cloud.AWS),
             service=service,
             period=period,
-            account=self._provider.alias,
+            alias=self._provider.alias,
             cost=Money(amount=amount.amount, currency=amount.unit),
         )

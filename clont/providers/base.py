@@ -16,7 +16,7 @@ class Provider(Protocol):
 
     cloud: Cloud
     alias: str             # human account name from config (e.g. "prod")
-    account: str | None    # native account id (AWS account / GCP project )
+    account_id: str | None  # native account id (AWS account / GCP project), set after auth
 
     def authenticate(self) -> None:
         """Establish credentials (e.g. assume the read-only role)."""

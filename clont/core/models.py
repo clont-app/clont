@@ -42,4 +42,4 @@ class CloudResource:
     service: str          # e.g. "ec2", "s3"
     resource_id: str      # e.g. instance id, bucket name
     region: str | None = None
-    account: str | None = None
+    alias: str | None = None      # account alias (e.g. "prod") for attribution
