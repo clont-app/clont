@@ -64,7 +64,9 @@ def _build_session(config: AWSConfig) -> boto3.Session:
 class AWSProvider:
     cloud = Cloud.AWS
 
-    def __init__(self, config: AWSConfig) -> None:
+    def __init__(self, alias: str, config: AWSConfig) -> None:
+        self.alias = alias
+        self.account: str | None = None  # AWS account id, set in authenticate()
         self._config = config
         self._session: boto3.Session | None = None
         self._clients: dict[tuple[str, str | None], Any] = {}
@@ -72,13 +74,13 @@ class AWSProvider:
     def authenticate(self) -> None:
         """Assume `config.role_arn` and cache a refreshable session.
 
-        Fails fast: a bad role ARN, missing trust or denied ``sts:AssumeRole``
-        raises here so the agent stops at startup with a clear error, rather
-        than silently producing no data every cycle.
+        Raises on a bad role ARN, missing trust or denied ``sts:AssumeRole``;
+        the caller (bootstrap) decides whether one bad account is fatal.
         """
         self._session = _build_session(self._config)
         ident = self._session.client("sts").get_caller_identity()
-        log.info("authenticated as %s", ident["Arn"])
+        self.account = ident["Account"]
+        log.info("authenticated %s as %s (%s)", self.alias, self.account, ident["Arn"])
 
     def regions(self) -> list[str]:
         """Regions in scope: the configured list, or every enabled region."""

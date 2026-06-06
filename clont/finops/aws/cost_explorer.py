@@ -62,8 +62,7 @@ class CostExplorerCollector:
         # Cost Explorer gives spend, not rightsizing advice — no recommendations here.
         return [] # TODO
 
-    @staticmethod
-    def _to_record(raw: dict, period: Period) -> CostRecord:
+    def _to_record(self, raw: dict, period: Period) -> CostRecord:
         group = _CEGroup.model_validate(raw)
         service = group.keys[0] if group.keys else "unknown"
         amount = group.metrics[_METRIC]
@@ -71,5 +70,6 @@ class CostExplorerCollector:
             cloud=str(Cloud.AWS),
             service=service,
             period=period,
+            account=self._provider.alias,
             cost=Money(amount=amount.amount, currency=amount.unit),
         )

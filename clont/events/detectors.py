@@ -19,13 +19,14 @@ class RecommendationDetector:
         events: list[Event] = []
         for rec in recommendations:
             r = rec.resource
+            account = r.account or "-"
             events.append(
                 Event(
-                    key=f"finops:rec:{r.cloud}:{r.service}:{r.resource_id}",
+                    key=f"finops:rec:{account}:{r.cloud}:{r.service}:{r.resource_id}",
                     severity=EventSeverity.WARN,
                     domain="finops",
                     cloud=r.cloud,
-                    title=f"Cost recommendation: {rec.service}",
+                    title=f"[{account}] Cost recommendation: {rec.service}",
                     message=(
                         f"{rec.summary} "
                         f"(est. savings {rec.estimated_savings.amount} "
@@ -56,13 +57,14 @@ class HealthDetector:
             if severity is None:  # OK / UNKNOWN -> not an event
                 continue
             r = chk.resource
+            account = r.account or "-"
             events.append(
                 Event(
-                    key=f"monitoring:health:{r.cloud}:{r.service}:{r.resource_id}",
+                    key=f"monitoring:health:{account}:{r.cloud}:{r.service}:{r.resource_id}",
                     severity=severity,
                     domain="monitoring",
                     cloud=r.cloud,
-                    title=f"Health {chk.status}: {r.service}",
+                    title=f"[{account}] Health {chk.status}: {r.service}",
                     message=chk.summary,
                     resource=r,
                 )

@@ -80,14 +80,20 @@ overridable by environment variables. The only env var clont reads is
 - `log_level` (enum, default `info`) — the daemon's own operational log
   verbosity: `debug` / `info` / `warning` / `error` / `critical`. Distinct from
   `channels.log.min_severity`, which gates which detected *events* are logged.
-- `aws` (list, default `[]`) — read-only AWS accounts to monitor (see below).
+- `aws` (map, default `{}`) — read-only AWS accounts to monitor, keyed by alias
+  (see below).
 - `channels` (object, default log only) — outbound delivery channels (see below).
 
-**`aws[]`** — one entry per account
+**`aws.<alias>`** — one entry per account; the alias (the map key, e.g. `prod`,
+`staging`) is shown in notifications and used to attribute events, so two
+accounts never collide. Add a second account by adding another keyed entry.
 
 - `role_arn` (str, **required**) — read-only IAM role clont assumes (via IRSA on EKS).
 - `regions` (list of str, default `[]`) — regions to query.
 - `external_id` (str, default `null`) — optional STS external id for the assume-role.
+
+If one account's role can't be assumed at startup, clont logs a warning and
+keeps monitoring the rest; it aborts only if no account authenticates.
 
 **`channels.log`** — always on
 

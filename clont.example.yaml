@@ -6,12 +6,16 @@ interval_seconds: 300        # how often the agent runs a cycle
 lookback_days: 1             # window for cost / metric queries
 log_level: info              # daemon log verbosity: debug|info|warning|error|critical
 
-# Read-only access to one or more AWS accounts.
-# On EKS the pod's base identity comes from IRSA; clont assumes this role.
+# Read-only access to one or more AWS accounts, key is alias
+# (prod/staging/...). The alias is shown in notifications and attributes events.
+# On EKS the pod's base identity comes from IRSA; clont assumes each role.
 aws:
-  - role_arn: arn:aws:iam::111111111111:role/clont-readonly
+  prod:
+    role_arn: arn:aws:iam::111111111111:role/clont-readonly
     regions: [us-east-1, eu-west-1]
-    # external_id: optional-sts-external-id
+  staging:
+    role_arn: arn:aws:iam::222222222222:role/clont-readonly
+    regions: [us-east-1]
 
 channels:
   # Always on. Logs a new condition immediately, then re-logs a standing one

@@ -33,8 +33,9 @@ def check(
         )
         if val is not None
     ]
+    accounts = ", ".join(c.aws) if c.aws else "none"
     typer.echo(
-        f"OK: {len(c.aws)} AWS account(s); "
+        f"OK: {len(c.aws)} AWS account(s) [{accounts}]; "
         f"channels: log{''.join('+' + n for n in enabled)}; "
         f"interval={c.interval_seconds}s; log_level={c.log_level}"
     )

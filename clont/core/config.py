@@ -97,7 +97,7 @@ class Config(BaseSettings):
     interval_seconds: int = 300          # daemon cycle period
     lookback_days: int = 1               # window for cost/metric queries
     log_level: str = "info"              # daemon's own operational verbosity
-    aws: list[AWSConfig] = Field(default_factory=list)
+    aws: dict[str, AWSConfig] = Field(default_factory=dict)   # alias -> account
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
 
     @field_validator("log_level")
@@ -117,7 +117,8 @@ class Config(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         # The YAML file is the only source. `init_settings` is kept so values
-        # can still be passed explicitly (e.g. Config(aws=[...]) in tests); env,
+        # can still be passed explicitly (e.g. Config(aws=[...]) in tests); the
+        # env, dotenv and secrets sources are deliberately dropped.
         sources: list[PydanticBaseSettingsSource] = [init_settings]
         if config_path().is_file():
             sources.append(
@@ -135,9 +136,11 @@ interval_seconds: 300
 lookback_days: 1
 log_level: info             # daemon log verbosity: debug|info|warning|error|critical
 
-# Read-only AWS access — uncomment and fill in to start collecting:
+# Read-only AWS access — uncomment and fill in to start collecting.
+# Each account is keyed by an alias (prod/staging/...) shown in notifications:
 # aws:
-#   - role_arn: arn:aws:iam::111111111111:role/clont-readonly
+#   prod:
+#     role_arn: arn:aws:iam::111111111111:role/clont-readonly
 #     regions: [us-east-1]
 
 channels:
