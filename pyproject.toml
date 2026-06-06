@@ -18,6 +18,23 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
 ]
+dependencies = [
+    "typer>=0.12",
+    "boto3>=1.34",
+    "pydantic-settings[yaml]>=2.2",
+]
+
+[project.scripts]
+clont = "clont.cli.app:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "moto[ec2,sts]>=5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [project.urls]
 Homepage = "https://github.com/clont-app/clont"

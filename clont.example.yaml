@@ -1,0 +1,37 @@
+# clont configuration — copy to clont.yaml, or point $CLONT_CONFIG at this file.
+# In Kubernetes this file becomes a ConfigMap mounted into the pod.
+# Validated on startup; unknown keys are rejected.
+
+interval_seconds: 300        # how often the agent runs a cycle
+lookback_days: 1             # window for cost / metric queries
+log_level: info              # daemon log verbosity: debug|info|warning|error|critical
+
+# Read-only access to one or more AWS accounts.
+# On EKS the pod's base identity comes from IRSA; clont assumes this role.
+aws:
+  - role_arn: arn:aws:iam::111111111111:role/clont-readonly
+    regions: [us-east-1, eu-west-1]
+    # external_id: optional-sts-external-id
+
+channels:
+  # Always on. Logs a new condition immediately, then re-logs a standing one
+  # at most this often (so it isn't logged every cycle).
+  log:
+    repeat_hours: 3
+    min_severity: info
+
+  # Notification channels are optional. Omit `repeat_hours` to notify once per
+  # condition; set it to re-notify a still-open condition on that interval.
+  slack:
+    webhook_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+    min_severity: warn
+    repeat_hours: 24
+
+  discord:
+    webhook_url: https://discord.com/api/webhooks/XXX/YYY
+    min_severity: warn
+
+  telegram:
+    bot_token: "123456:ABC-DEF..."
+    chat_id: "-1001234567890"
+    min_severity: critical

@@ -1,0 +1,1 @@
+"""Cross-cutting, cloud-agnostic foundations: config, models, registry."""

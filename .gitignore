@@ -1,0 +1,120 @@
+.env
+.env.*
+!.env.example
+*.env
+secrets.*
+credentials.*
+# Local clont config may contain secrets; commit clont.example.yaml instead.
+clont.yaml
+!clont.example.yaml
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Cloud provider credentials
+.aws/
+.gcp/
+.azure/
+gcp-*.json
+*-service-account*.json
+service-account*.json
+client_secret*.json
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# Local agent state / collected data
+*.db
+*.sqlite
+*.sqlite3
+data/
+state/
+.cache/
+exports/
+billing-exports/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# Distribution / packaging build output
+# NOTE: dist/ holds built wheels/sdists; keep it out of git, publish via publish.sh
+dist/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Virtual environments
+# (the project root currently doubles as a venv — these keep its files out)
+# ─────────────────────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+bin/
+lib/
+lib64/
+include/
+share/
+pyvenv.cfg
+pip-selfcheck.json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Testing / coverage / type checking
+# ─────────────────────────────────────────────────────────────────────────────
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logs & runtime artifacts
+# ─────────────────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.pid
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Editors / IDEs
+# ─────────────────────────────────────────────────────────────────────────────
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OS
+# ─────────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
