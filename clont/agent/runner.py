@@ -9,7 +9,12 @@ from clont.channels.base import Channel
 from clont.core import registry
 from clont.core.logging import get_logger
 from clont.core.models import Period
-from clont.events.detectors import HealthDetector, RecommendationDetector
+from clont.events.detectors import (
+    HealthDetector,
+    RecommendationDetector,
+    SpendDigestDetector,
+    SpendSpikeDetector,
+)
 from clont.events.models import Event
 from clont.providers.base import Provider
 
@@ -33,17 +38,32 @@ class Agent:
         *,
         interval_seconds: int = 300,
         lookback_days: int = 1,
+        spend_baseline_days: int = 7,
+        spend_spike_pct: float = 50.0,
+        spend_min_dollars: float = 1.0,
     ) -> None:
         self._providers = providers
         self._channels = channels
         self._interval = interval_seconds
         self._lookback = lookback_days
+        self._spend_baseline_days = spend_baseline_days
         self._finops_detectors = [RecommendationDetector()]
+        self._finops_cost_detectors = [
+            SpendDigestDetector(),
+            SpendSpikeDetector(spend_spike_pct, spend_min_dollars),
+        ]
         self._monitoring_detectors = [HealthDetector()]
 
     def _period(self) -> Period:
         today = date.today()
         return Period(start=today - timedelta(days=self._lookback), end=today)
+
+    def _cost_period(self) -> Period:
+        # End at *yesterday*, the last complete day: today's Cost Explorer data
+        # is partial/estimated and would under-report the digest and mask spikes.
+        # Window is `spend_baseline_days` prior days + that anchor day.
+        end = date.today() - timedelta(days=1)
+        return Period(start=end - timedelta(days=self._spend_baseline_days), end=end)
 
     def collect_events(self) -> list[Event]:
         period = self._period()
@@ -55,14 +75,25 @@ class Agent:
 
     def _finops_events(self, provider: Provider, period: Period) -> list[Event]:
         out: list[Event] = []
+        cost_period = self._cost_period()
         for cls in registry.collectors_for("finops", provider.cloud):
+            collector = cls(provider)
+            # Spend (cost records -> digest + spike) and recommendations are
+            # collected independently so one failing can't drop the other.
             try:
-                recs = cls(provider).recommendations(period)
+                records = collector.collect(cost_period)
             except Exception as exc:  # noqa: BLE001 - one collector must not kill the loop
-                log.warning("finops collector %s failed: %s", cls.__name__, exc)
-                continue
-            for detector in self._finops_detectors:
-                out.extend(detector.detect(recs))
+                log.warning("finops collector %s collect failed: %s", cls.__name__, exc)
+            else:
+                for detector in self._finops_cost_detectors:
+                    out.extend(detector.detect(records))
+            try:
+                recs = collector.recommendations(period)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("finops collector %s recommendations failed: %s", cls.__name__, exc)
+            else:
+                for detector in self._finops_detectors:
+                    out.extend(detector.detect(recs))
         return out
 
     def _monitoring_events(self, provider: Provider, period: Period) -> list[Event]:
@@ -109,6 +140,6 @@ class Agent:
         while True:
             try:
                 self.run_once()
-            except Exception as exc:  # noqa: BLE001 - keep the daemon alive across cycles
+            except Exception as exc:  # keep the daemon alive across cycles
                 log.exception("cycle failed: %s", exc)
             time.sleep(self._interval)

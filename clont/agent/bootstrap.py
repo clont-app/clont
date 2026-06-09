@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import clont.finops.aws
+import clont.monitoring.aws
 from clont import channels
 from clont.agent.runner import Agent
 from clont.core.config import Config
@@ -37,4 +39,7 @@ def build_agent(config: Config) -> Agent:
         channels.build(config.channels),
         interval_seconds=config.interval_seconds,
         lookback_days=config.lookback_days,
+        spend_baseline_days=config.finops.spend_baseline_days,
+        spend_spike_pct=config.finops.spend_spike_pct,
+        spend_min_dollars=config.finops.spend_min_dollars,
     )

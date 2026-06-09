@@ -87,6 +87,17 @@ class AWSConfig(_Model):
     external_id: str | None = None
 
 
+# FinOps
+
+
+class FinOpsConfig(_Model):
+    """Cost-event thresholds (Cost Explorer spend digest + spike alerts)."""
+
+    spend_baseline_days: int = 7      # trailing days averaged as the spike baseline
+    spend_spike_pct: float = 50.0     # WARN when the latest day exceeds baseline by this %
+    spend_min_dollars: float = 1.0    # ignore services whose latest-day spend is below this
+
+
 # Config
 
 class Config(BaseSettings):
@@ -98,6 +109,7 @@ class Config(BaseSettings):
     lookback_days: int = 1               # window for cost/metric queries
     log_level: str = "info"              # daemon's own operational verbosity
     aws: dict[str, AWSConfig] = Field(default_factory=dict)   # alias -> account
+    finops: FinOpsConfig = Field(default_factory=FinOpsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
 
     @field_validator("log_level")
@@ -142,6 +154,12 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   prod:
 #     role_arn: arn:aws:iam::111111111111:role/clont-readonly
 #     regions: [us-east-1]
+
+# Cost-event thresholds (Cost Explorer spend digest + spike alerts).
+# finops:
+#   spend_baseline_days: 7    # trailing days averaged as the spike baseline
+#   spend_spike_pct: 50       # WARN when the latest day exceeds baseline by this %
+#   spend_min_dollars: 1      # ignore services below this latest-day spend
 
 channels:
   log:                      # always on

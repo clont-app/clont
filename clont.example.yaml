@@ -17,6 +17,13 @@ aws:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]
 
+# Cost-event thresholds (Cost Explorer). A daily spend digest (info) is emitted
+# every cycle; a spend spike (warn) fires when a service's latest-day spend
+finops:
+  spend_baseline_days: 7     # trailing days averaged as the spike baseline
+  spend_spike_pct: 50        # WARN when the latest day exceeds baseline by this %
+  spend_min_dollars: 1       # ignore services below this latest-day spend
+
 channels:
   # Always on. Logs a new condition immediately, then re-logs a standing one
   # at most this often (so it isn't logged every cycle).

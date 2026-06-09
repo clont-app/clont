@@ -6,7 +6,7 @@ account-level and does not iterate regions.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from clont.core.models import Cloud, Money, Period
 from clont.core.registry import register
@@ -49,8 +49,12 @@ class CostExplorerCollector:
 
             resp = ce.get_cost_and_usage(**kwargs)
             for result in resp.get("ResultsByTime", []):
+                # Stamp each record with its own DAILY bucket, not the whole
+                # query window — the spend detectors need per-day spend.
+                day = date.fromisoformat(result["TimePeriod"]["Start"])
+                day_period = Period(start=day, end=day)
                 for raw in result.get("Groups", []):
-                    records.append(self._to_record(raw, period))
+                    records.append(self._to_record(raw, day_period))
 
             next_token = resp.get("NextPageToken")
             if not next_token:
