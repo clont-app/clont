@@ -8,6 +8,7 @@ from clont import channels
 from clont.agent.runner import Agent
 from clont.core.config import Config
 from clont.core.logging import get_logger
+from clont.finops.base import FinOpsTuning
 from clont.providers.aws.provider import AWSProvider
 from clont.providers.base import Provider
 
@@ -42,4 +43,12 @@ def build_agent(config: Config) -> Agent:
         spend_baseline_days=config.finops.spend_baseline_days,
         spend_spike_pct=config.finops.spend_spike_pct,
         spend_min_dollars=config.finops.spend_min_dollars,
+        finops_tuning=FinOpsTuning(
+            idle_cpu_pct=config.finops.idle_cpu_pct,
+            idle_lookback_days=config.finops.idle_lookback_days,
+            idle_rds_max_connections=config.finops.idle_rds_max_connections,
+            snapshot_max_age_days=config.finops.snapshot_max_age_days,
+        ),
+        anomaly_sigma=config.monitoring.anomaly_sigma,
+        anomaly_min_points=config.monitoring.anomaly_min_points,
     )

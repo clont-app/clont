@@ -11,11 +11,13 @@ from clont.core.logging import get_logger
 from clont.core.models import Period
 from clont.events.detectors import (
     HealthDetector,
+    MetricAnomalyDetector,
     RecommendationDetector,
     SpendDigestDetector,
     SpendSpikeDetector,
 )
 from clont.events.models import Event
+from clont.finops.base import FinOpsTuning
 from clont.providers.base import Provider
 
 log = get_logger("clont.agent")
@@ -38,21 +40,28 @@ class Agent:
         *,
         interval_seconds: int = 300,
         lookback_days: int = 1,
-        spend_baseline_days: int = 7,
+        spend_baseline_days: int = 28,
         spend_spike_pct: float = 50.0,
         spend_min_dollars: float = 1.0,
+        finops_tuning: FinOpsTuning | None = None,
+        anomaly_sigma: float = 3.0,
+        anomaly_min_points: int = 6,
     ) -> None:
         self._providers = providers
         self._channels = channels
         self._interval = interval_seconds
         self._lookback = lookback_days
         self._spend_baseline_days = spend_baseline_days
+        self._finops_tuning = finops_tuning or FinOpsTuning()
         self._finops_detectors = [RecommendationDetector()]
         self._finops_cost_detectors = [
             SpendDigestDetector(),
             SpendSpikeDetector(spend_spike_pct, spend_min_dollars),
         ]
         self._monitoring_detectors = [HealthDetector()]
+        self._monitoring_metric_detectors = [
+            MetricAnomalyDetector(anomaly_sigma, anomaly_min_points)
+        ]
 
     def _period(self) -> Period:
         today = date.today()
@@ -77,7 +86,7 @@ class Agent:
         out: list[Event] = []
         cost_period = self._cost_period()
         for cls in registry.collectors_for("finops", provider.cloud):
-            collector = cls(provider)
+            collector = cls(provider, self._finops_tuning)
             # Spend (cost records -> digest + spike) and recommendations are
             # collected independently so one failing can't drop the other.
             try:
@@ -99,13 +108,26 @@ class Agent:
     def _monitoring_events(self, provider: Provider, period: Period) -> list[Event]:
         out: list[Event] = []
         for cls in registry.collectors_for("monitoring", provider.cloud):
+            collector = cls(provider)
+            # Health checks and metric-anomaly detection are independent: a
+            # collector may do one, the other, or both, and one failing must not
+            # drop the other.
             try:
-                checks = cls(provider).health()
+                checks = collector.health()
             except Exception as exc:  # noqa: BLE001
-                log.warning("monitoring collector %s failed: %s", cls.__name__, exc)
-                continue
-            for detector in self._monitoring_detectors:
-                out.extend(detector.detect(checks))
+                log.warning("monitoring collector %s health failed: %s", cls.__name__, exc)
+            else:
+                for detector in self._monitoring_detectors:
+                    out.extend(detector.detect(checks))
+            # Only some collectors expose metric series (e.g. EC2 CPU/network).
+            if hasattr(collector, "collect"):
+                try:
+                    points = collector.collect(period)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("monitoring collector %s collect failed: %s", cls.__name__, exc)
+                else:
+                    for detector in self._monitoring_metric_detectors:
+                        out.extend(detector.detect(points))
         return out
 
     def dispatch(self, events: list[Event]) -> int:

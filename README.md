@@ -29,10 +29,41 @@ region:
 - **ACM** — certificate expiry (warn ≤30d, critical ≤7d / expired).
 - **AWS Health** — open/upcoming account events (degrades gracefully without a
   Business/Enterprise support plan).
+- **Metric anomalies** — CloudWatch metric series (e.g. EC2 CPU / network) are
+  watched for statistical deviation: a `warn` fires when the latest sample sits
+  more than a configurable number of deviations from its baseline (anomaly
+  detection, not fixed thresholds). With enough history the baseline is
+  *seasonal* — the latest sample is compared against prior samples at the same
+  hour-of-day (robust median/MAD), so a daily load cycle isn't mistaken for an
+  anomaly.
 
-**FinOps** — account-wide spend via Cost Explorer (`GetCostAndUsage`), surfaced as
-a daily spend digest (`info`) plus a spend-spike alert (`warn`) when a service's
-latest-day cost jumps beyond a configurable % over its trailing baseline.
+**FinOps — spend** — account-wide spend via Cost Explorer (`GetCostAndUsage`),
+surfaced as a daily spend digest (`info`) plus a spend-spike alert (`warn`) when a
+service's latest-day cost jumps beyond a configurable % over its baseline. The
+baseline is the median of prior **same-weekday** spend, so normal weekly cycles
+(quiet weekends, busy Mondays) don't trip false spikes.
+
+**FinOps — recommendations** — read-only savings findings, each carrying a
+ballpark monthly dollar figure and emitted through the same event pipeline:
+
+- **Rightsizing** via AWS Compute Optimizer — EC2 instances, EBS volumes, Auto
+  Scaling groups, Lambda functions, ECS services and RDS databases, picking the
+  best savings option. Each resource type degrades independently when its
+  Compute Optimizer opt-in is missing.
+- **Commitment purchases** via Cost Explorer — Compute Savings Plans and Reserved
+  Instances (EC2 / RDS / ElastiCache / Redshift / OpenSearch), reported at
+  conservative one-year, no-upfront terms.
+- **Unattached EBS volumes** — `available` volumes still being billed.
+- **Unassociated Elastic IPs** — allocated public IPv4 not attached to anything.
+- **gp2 → gp3 migration** — in-use gp2 volumes, with the storage-rate saving.
+- **Idle EC2 / RDS** — instances or DBs with near-zero utilization (CPU/network,
+  or connections/CPU) over a configurable CloudWatch window.
+- **Idle NAT gateways** — ~zero bytes processed over the window.
+- **Idle load balancers** — ALB/NLB with no registered targets.
+- **Stale EBS snapshots** — orphaned (source volume deleted) or older than a
+  configurable age.
+
+Idle/stale thresholds are configurable (see `finops.*` below).
 
 **Platform**
 
@@ -139,12 +170,29 @@ keeps monitoring the rest; it aborts only if no account authenticates.
 
 **`finops`** — Cost Explorer spend-event thresholds
 
-- `spend_baseline_days` (int, default `7`) — trailing days averaged as the
-  baseline a spend spike is measured against.
+- `spend_baseline_days` (int, default `28`) — trailing window the spike baseline
+  is built from. ~4 weeks gives several same-weekday samples; the baseline is the
+  median of prior same-weekday spend (falls back to the flat mean on short
+  windows).
 - `spend_spike_pct` (float, default `50`) — emit a `warn` spike event when a
   service's latest-day spend exceeds the baseline by more than this percentage.
 - `spend_min_dollars` (float, default `1`) — ignore services whose latest-day
   spend is below this, so trivial amounts don't trip the spike alert.
+- `idle_cpu_pct` (float, default `5`) — average CPU % below which an EC2/RDS
+  resource counts as idle.
+- `idle_lookback_days` (int, default `14`) — trailing window the idle averages
+  (CPU / network / connections / NAT bytes) are taken over.
+- `idle_rds_max_connections` (float, default `1`) — average DB connections below
+  which an RDS instance counts as idle.
+- `snapshot_max_age_days` (int, default `90`) — EBS snapshots older than this are
+  flagged as "old".
+
+**`monitoring`** — metric-anomaly detection
+
+- `anomaly_sigma` (float, default `3`) — emit a `warn` anomaly when the latest
+  metric sample is more than this many standard deviations from its baseline.
+- `anomaly_min_points` (int, default `6`) — minimum baseline samples a series
+  needs before it can flag an anomaly.
 
 **`channels.log`** — always on
 
@@ -164,5 +212,5 @@ keeps monitoring the rest; it aborts only if no account authenticates.
 
 ## Status
 
-- Development status: Planning
+- Development status: Active
 - License: Apache-2.0

@@ -12,8 +12,13 @@ from decimal import Decimal
 
 from clont.core.models import Cloud, CloudResource
 from clont.events.models import Event, EventSeverity
+from clont.events.stats import mean, median, modified_zscore
 from clont.finops.models import CostRecord, Recommendation
-from clont.monitoring.models import HealthCheck, HealthStatus
+from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
+
+# Minimum same-phase samples (same weekday / same hour-of-day) before a detector
+# trusts a seasonal baseline; below this it falls back to the flat baseline.
+_MIN_SEASONAL_SAMPLES = 2
 
 
 class RecommendationDetector:
@@ -24,22 +29,25 @@ class RecommendationDetector:
         for rec in recommendations:
             r = rec.resource
             alias = r.alias or "-"
+            savings = rec.estimated_savings
+            # Some recommendations (e.g. idle instances) have no per-resource
+            savings_txt = (
+                f" (est. savings {savings.amount} {savings.currency}/mo)"
+                if savings.amount > 0
+                else ""
+            )
             events.append(
                 Event(
-                    key=f"finops:rec:{alias}:{r.cloud}:{r.service}:{r.resource_id}",
+                    key=f"finops:rec:{alias}:{r.cloud}:{r.service}:{rec.kind}:{r.resource_id}",
                     severity=EventSeverity.WARN,
                     domain="finops",
                     cloud=r.cloud,
                     title=f"[{alias}] Cost recommendation: {rec.service}",
-                    message=(
-                        f"{rec.summary} "
-                        f"(est. savings {rec.estimated_savings.amount} "
-                        f"{rec.estimated_savings.currency})"
-                    ),
+                    message=f"{rec.summary}{savings_txt}",
                     resource=r,
                     payload={
-                        "estimated_savings": str(rec.estimated_savings.amount),
-                        "currency": rec.estimated_savings.currency,
+                        "estimated_savings": str(savings.amount),
+                        "currency": savings.currency,
                     },
                 )
             )
@@ -120,7 +128,21 @@ class SpendSpikeDetector:
                 prior = [amt for day, amt in by_day.items() if day < anchor]
                 if not prior:
                     continue
-                baseline = sum(prior, Decimal(0)) / len(prior)
+
+                # Seasonal baseline: compare the anchor day against prior days of
+                # the *same weekday* (a normal Monday vs other Mondays) so weekly
+                # cycles don't read as spikes.
+                same_weekday = [
+                    amt for day, amt in by_day.items()
+                    if day < anchor and day.weekday() == anchor.weekday()
+                ]
+                if len(same_weekday) >= _MIN_SEASONAL_SAMPLES:
+                    baseline = median(same_weekday)
+                    basis = "same-weekday median"
+                else:
+                    baseline = mean(prior)
+                    basis = "avg"
+
                 if baseline <= 0 or latest < self._min or latest <= baseline * self._factor:
                     continue
 
@@ -134,7 +156,7 @@ class SpendSpikeDetector:
                         domain="finops",
                         cloud=Cloud.AWS,
                         title=f"[{alias}] Spend spike: {service}",
-                        message=f"{latest} {cur} vs {baseline:.2f} avg (+{pct:.0f}%)",
+                        message=f"{latest} {cur} vs {baseline:.2f} {basis} (+{pct:.0f}%)",
                         resource=CloudResource(
                             cloud=Cloud.AWS,
                             service=service,
@@ -148,6 +170,91 @@ class SpendSpikeDetector:
                         },
                     )
                 )
+        return events
+
+
+class MetricAnomalyDetector:
+    """Monitoring metric series -> WARN when the latest point deviates sharply.
+
+    Anomaly (not rule-based threshold) detection: per (resource, metric) series,
+    flag the latest point if it sits more than `sigma` deviations from its
+    baseline — two-sided (a sharp drop is as notable as a spike).
+
+
+    A series needs at least `min_points` baseline samples, and a baseline/cohort
+    with zero spread is skipped (no meaningful σ — alerting on every micro-change
+    would be pure noise).
+    """
+
+    def __init__(self, sigma: float = 3.0, min_points: int = 6) -> None:
+        self._sigma = sigma
+        self._min_points = min_points
+
+    def detect(self, points: list[MetricPoint]) -> list[Event]:
+        series: dict[tuple, list[MetricPoint]] = defaultdict(list)
+        for p in points:
+            r = p.resource
+            if r is None:
+                continue  # can't key an anomaly without a resource
+            series[(r.alias, r.cloud, r.service, r.resource_id, p.name)].append(p)
+
+        events: list[Event] = []
+        for (alias_key, cloud, service, rid, metric), pts in series.items():
+            if len(pts) <= self._min_points:  # need a baseline plus the latest
+                continue
+            pts.sort(key=lambda p: p.timestamp)
+            latest = pts[-1]
+            baseline = pts[:-1]
+
+            # Seasonal cohort: score the latest sample against prior samples at
+            # the *same hour-of-day* (handles daily cycles — business hours vs
+            # night) using a robust median+MAD score. Fall back to a flat
+            # mean/std z-score when there isn't enough same-hour history (e.g. a
+            # single day of points), which preserves the original behaviour.
+            cohort = [p.value for p in baseline if p.timestamp.hour == latest.timestamp.hour]
+            if len(cohort) >= _MIN_SEASONAL_SAMPLES:
+                score = modified_zscore(latest.value, cohort)
+                if score is None:  # flat cohort -> no meaningful deviation
+                    continue
+                center = median(cohort)
+                basis = "same-hour"
+            else:
+                values = [p.value for p in baseline]
+                avg = mean(values)
+                std = (sum((v - avg) ** 2 for v in values) / len(values)) ** 0.5
+                if std <= 0:  # flat baseline -> no meaningful deviation
+                    continue
+                score = (latest.value - avg) / std
+                center = avg
+                basis = "baseline"
+
+            if abs(score) < self._sigma:
+                continue
+
+            alias = alias_key or "-"
+            direction = "above" if score > 0 else "below"
+            events.append(
+                Event(
+                    key=f"monitoring:anomaly:{alias}:{cloud}:{service}:{rid}:{metric}",
+                    severity=EventSeverity.WARN,
+                    domain="monitoring",
+                    cloud=cloud,
+                    title=f"[{alias}] Metric anomaly: {service} {metric}",
+                    message=(
+                        f"{metric} {latest.value:.2f} {latest.unit} is "
+                        f"{abs(score):.1f}σ {direction} {basis} {center:.2f} "
+                        f"(n={len(baseline)})"
+                    ),
+                    resource=latest.resource,
+                    payload={
+                        "metric": metric,
+                        "latest": str(latest.value),
+                        "baseline_center": f"{center:.4f}",
+                        "sigma": f"{score:.2f}",
+                        "basis": basis,
+                    },
+                )
+            )
         return events
 
 

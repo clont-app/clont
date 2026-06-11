@@ -17,12 +17,17 @@ aws:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]
 
-# Cost-event thresholds (Cost Explorer). A daily spend digest (info) is emitted
-# every cycle; a spend spike (warn) fires when a service's latest-day spend
+# FinOps. Spend events: a daily spend digest (info) every cycle, and a spend
+# spike (warn) when a service's latest-day spend jumps over its baseline. The
+# idle/snapshot thresholds tune the rightsizing/waste recommendations.
 finops:
-  spend_baseline_days: 7     # trailing days averaged as the spike baseline
-  spend_spike_pct: 50        # WARN when the latest day exceeds baseline by this %
-  spend_min_dollars: 1       # ignore services below this latest-day spend
+  spend_baseline_days: 28        # trailing window (~4 wks); spike baseline = same-weekday median
+  spend_spike_pct: 50            # WARN when the latest day exceeds baseline by this %
+  spend_min_dollars: 1           # ignore services below this latest-day spend
+  idle_cpu_pct: 5                # avg CPU % below which a resource is idle
+  idle_lookback_days: 14         # trailing window the idle averages span
+  idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
+  snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
 
 channels:
   # Always on. Logs a new condition immediately, then re-logs a standing one

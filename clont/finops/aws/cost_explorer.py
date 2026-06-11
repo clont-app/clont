@@ -22,7 +22,7 @@ class CostExplorerCollector:
     cloud = Cloud.AWS
     service = "cost_explorer"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, tuning=None) -> None:
         self._provider = provider
 
     def collect(self, period: Period) -> list[CostRecord]:

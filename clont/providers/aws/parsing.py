@@ -118,6 +118,175 @@ class _ACMCertificate(BaseModel):
     not_after: datetime | None = Field(default=None, validation_alias="NotAfter")
 
 
+class _EBSVolume(BaseModel):
+    """One ``describe_volumes`` entry (for waste detection, not health)."""
+
+    volume_id: str = Field(validation_alias="VolumeId")
+    size: int = Field(default=0, validation_alias="Size")
+    volume_type: str = Field(default="", validation_alias="VolumeType")
+    state: str = Field(default="", validation_alias="State")
+
+
+class _EIP(BaseModel):
+    """One ``describe_addresses`` entry; unassociated if ``association_id`` is empty."""
+
+    public_ip: str = Field(default="", validation_alias="PublicIp")
+    allocation_id: str = Field(default="", validation_alias="AllocationId")
+    association_id: str = Field(default="", validation_alias="AssociationId")
+
+
+class _NatGateway(BaseModel):
+    """One ``describe_nat_gateways`` entry (for idle detection)."""
+
+    nat_gateway_id: str = Field(validation_alias="NatGatewayId")
+    state: str = Field(default="", validation_alias="State")
+
+
+class _LoadBalancer(BaseModel):
+    """One ``describe_load_balancers`` entry (ELBv2: ALB/NLB)."""
+
+    arn: str = Field(default="", validation_alias="LoadBalancerArn")
+    name: str = Field(default="", validation_alias="LoadBalancerName")
+    lb_type: str = Field(default="", validation_alias="Type")
+    state: str = Field(default="", validation_alias=AliasPath("State", "Code"))
+
+
+class _Snapshot(BaseModel):
+    """One ``describe_snapshots`` entry (self-owned EBS snapshots)."""
+
+    snapshot_id: str = Field(validation_alias="SnapshotId")
+    volume_id: str = Field(default="", validation_alias="VolumeId")
+    volume_size: int = Field(default=0, validation_alias="VolumeSize")
+    start_time: datetime | None = Field(default=None, validation_alias="StartTime")
+
+
+class _COOption(BaseModel):
+    """One Compute Optimizer recommendationOption: target + monthly savings.
+
+    Shared by EC2 and EBS responses (EBS has no ``instanceType``, so it defaults
+    to empty). Savings are nested under ``savingsOpportunity``.
+    """
+
+    rank: int = Field(default=0, validation_alias="rank")
+    instance_type: str = Field(default="", validation_alias="instanceType")
+    savings: Decimal = Field(
+        default=Decimal(0),
+        validation_alias=AliasPath("savingsOpportunity", "estimatedMonthlySavings", "value"),
+    )
+    currency: str = Field(
+        default="USD",
+        validation_alias=AliasPath("savingsOpportunity", "estimatedMonthlySavings", "currency"),
+    )
+    pct: float = Field(
+        default=0.0,
+        validation_alias=AliasPath("savingsOpportunity", "savingsOpportunityPercentage"),
+    )
+
+
+class _COInstanceRec(BaseModel):
+    """One ``get_ec2_instance_recommendations`` entry."""
+
+    arn: str = Field(default="", validation_alias="instanceArn")
+    name: str = Field(default="", validation_alias="instanceName")
+    current_type: str = Field(default="", validation_alias="currentInstanceType")
+    finding: str = Field(default="", validation_alias="finding")
+    options: list[_COOption] = Field(default_factory=list, validation_alias="recommendationOptions")
+
+
+class _COVolumeRec(BaseModel):
+    """One ``get_ebs_volume_recommendations`` entry."""
+
+    arn: str = Field(default="", validation_alias="volumeArn")
+    finding: str = Field(default="", validation_alias="finding")
+    options: list[_COOption] = Field(
+        default_factory=list, validation_alias="volumeRecommendationOptions"
+    )
+
+
+class _COASGRec(BaseModel):
+    """One ``get_auto_scaling_group_recommendations`` entry."""
+
+    arn: str = Field(default="", validation_alias="autoScalingGroupArn")
+    finding: str = Field(default="", validation_alias="finding")
+    options: list[_COOption] = Field(
+        default_factory=list, validation_alias="recommendationOptions"
+    )
+
+
+class _COLambdaRec(BaseModel):
+    """One ``get_lambda_function_recommendations`` entry."""
+
+    arn: str = Field(default="", validation_alias="functionArn")
+    finding: str = Field(default="", validation_alias="finding")
+    options: list[_COOption] = Field(
+        default_factory=list, validation_alias="memorySizeRecommendationOptions"
+    )
+
+
+class _COECSRec(BaseModel):
+    """One ``get_ecs_service_recommendations`` entry."""
+
+    arn: str = Field(default="", validation_alias="serviceArn")
+    finding: str = Field(default="", validation_alias="finding")
+    options: list[_COOption] = Field(
+        default_factory=list, validation_alias="recommendationOptions"
+    )
+
+
+class _CORDSRec(BaseModel):
+    """One ``get_rds_database_recommendations`` entry (instance rightsizing).
+
+    RDS uses ``instanceFinding`` (not ``finding``) and a separate
+    ``instanceRecommendationOptions`` list; storage recommendations are ignored.
+    """
+
+    arn: str = Field(default="", validation_alias="resourceArn")
+    finding: str = Field(default="", validation_alias="instanceFinding")
+    options: list[_COOption] = Field(
+        default_factory=list, validation_alias="instanceRecommendationOptions"
+    )
+
+
+class _SPSummary(BaseModel):
+    """The aggregate summary of a Savings Plans purchase recommendation.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    estimated_monthly_savings: Decimal = Field(
+        default=Decimal(0), validation_alias="EstimatedMonthlySavingsAmount"
+    )
+    savings_pct: Decimal = Field(
+        default=Decimal(0), validation_alias="EstimatedSavingsPercentage"
+    )
+    hourly_commitment: Decimal = Field(
+        default=Decimal(0), validation_alias="HourlyCommitmentToPurchase"
+    )
+    currency: str = Field(default="USD", validation_alias="CurrencyCode")
+
+
+class _RIRecommendation(BaseModel):
+    """One ``get_reservation_purchase_recommendation`` entry (its summary).
+
+    Savings live under the nested ``RecommendationSummary`` object.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    estimated_monthly_savings: Decimal = Field(
+        default=Decimal(0),
+        validation_alias=AliasPath("RecommendationSummary", "TotalEstimatedMonthlySavingsAmount"),
+    )
+    savings_pct: Decimal = Field(
+        default=Decimal(0),
+        validation_alias=AliasPath("RecommendationSummary", "TotalEstimatedMonthlySavingsPercentage"),
+    )
+    currency: str = Field(
+        default="USD",
+        validation_alias=AliasPath("RecommendationSummary", "CurrencyCode"),
+    )
+
+
 class _HealthEvent(BaseModel):
     """One ``describe_events`` entry (AWS Health). Lowercase keys."""
 

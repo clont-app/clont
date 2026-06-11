@@ -91,11 +91,24 @@ class AWSConfig(_Model):
 
 
 class FinOpsConfig(_Model):
-    """Cost-event thresholds (Cost Explorer spend digest + spike alerts)."""
+    """Cost-event thresholds (spend digest + spike) and recommendation tuning."""
 
-    spend_baseline_days: int = 7      # trailing days averaged as the spike baseline
+    spend_baseline_days: int = 28     # trailing window (≈4 wks) for the same-weekday spike baseline
     spend_spike_pct: float = 50.0     # WARN when the latest day exceeds baseline by this %
     spend_min_dollars: float = 1.0    # ignore services whose latest-day spend is below this
+
+    # Idle / stale recommendation thresholds (shared by the idle + snapshot collectors)
+    idle_cpu_pct: float = 5.0              # avg CPU % below which a resource is idle
+    idle_lookback_days: int = 14           # trailing window the idle averages span
+    idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
+    snapshot_max_age_days: int = 90        # EBS snapshots older than this are "old"
+
+
+class MonitoringConfig(_Model):
+    """Monitoring metric-anomaly detection (baseline + deviation, not thresholds)."""
+
+    anomaly_sigma: float = 3.0    # WARN when the latest sample is this many σ off baseline
+    anomaly_min_points: int = 6   # min baseline samples before a series can flag
 
 
 # Config
@@ -110,6 +123,7 @@ class Config(BaseSettings):
     log_level: str = "info"              # daemon's own operational verbosity
     aws: dict[str, AWSConfig] = Field(default_factory=dict)   # alias -> account
     finops: FinOpsConfig = Field(default_factory=FinOpsConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
 
     @field_validator("log_level")
@@ -155,11 +169,20 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #     role_arn: arn:aws:iam::111111111111:role/clont-readonly
 #     regions: [us-east-1]
 
-# Cost-event thresholds (Cost Explorer spend digest + spike alerts).
+# FinOps: spend-event thresholds + idle/stale recommendation tuning.
 # finops:
-#   spend_baseline_days: 7    # trailing days averaged as the spike baseline
-#   spend_spike_pct: 50       # WARN when the latest day exceeds baseline by this %
-#   spend_min_dollars: 1      # ignore services below this latest-day spend
+#   spend_baseline_days: 28        # trailing window (~4 wks) for same-weekday spike baseline
+#   spend_spike_pct: 50            # WARN when the latest day exceeds baseline by this %
+#   spend_min_dollars: 1           # ignore services below this latest-day spend
+#   idle_cpu_pct: 5                # avg CPU % below which a resource is idle
+#   idle_lookback_days: 14         # trailing window the idle averages span
+#   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
+#   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
+
+# Monitoring metric-anomaly detection (baseline + deviation, not thresholds).
+# monitoring:
+#   anomaly_sigma: 3              # WARN when the latest sample is this many σ off baseline
+#   anomaly_min_points: 6         # min baseline samples before a series can flag
 
 channels:
   log:                      # always on

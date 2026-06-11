@@ -22,10 +22,12 @@ class CostRecord:
 
 @dataclass(frozen=True, slots=True)
 class Recommendation:
-    """A cost-saving suggestion (e.g. idle resource, rightsizing)."""
+    """A cost-saving suggestion (e.g. idle resource, rightsizing).
+    """
 
     cloud: str
     service: str
     resource: CloudResource
     summary: str
     estimated_savings: Money
+    kind: str = "rec"

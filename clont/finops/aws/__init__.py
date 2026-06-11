@@ -2,4 +2,14 @@
 """
 
 from __future__ import annotations
-from clont.finops.aws import cost_explorer  # noqa: F401 - imported for registration
+from clont.finops.aws import (  # noqa: F401 - imported for registration
+    commitments,
+    compute_optimizer,
+    cost_explorer,
+    idle,
+    idle_elb,
+    idle_nat,
+    idle_rds,
+    snapshots,
+    waste,
+)
