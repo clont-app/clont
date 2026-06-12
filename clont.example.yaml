@@ -65,6 +65,10 @@ monitoring:
   swap_usage_max_mb: 50        # WARN when ElastiCache swap usage exceeds this (MB)
   disk_full_forecast_days: 14  # WARN when storage is projected full within this many days
 
+# Optional API uplink (paid tier). When present, each cycle ships the full batch
+# — metrics, cost records, recommendations, health checks, events — to  clont
+# server, and dispatches the events it returns (server-side forecasts / recommen-
+# dations) through the channels below.
 channels:
   # Always on. Logs a new condition immediately, then re-logs a standing one
   # at most this often (so it isn't logged every cycle).

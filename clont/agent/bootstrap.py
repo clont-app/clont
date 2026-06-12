@@ -6,6 +6,7 @@ import clont.finops.aws
 import clont.monitoring.aws
 from clont import channels
 from clont.agent.runner import Agent
+from clont.api.uplink import ApiUplink
 from clont.core.config import Config
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
@@ -35,6 +36,12 @@ def build_agent(config: Config) -> Agent:
     if config.aws and not providers:
         raise RuntimeError("no configured accounts could be authenticated")
 
+    uplink = (
+        ApiUplink(config.api.url, config.api.api_key, timeout=config.api.timeout_seconds)
+        if config.api is not None
+        else None
+    )
+
     return Agent(
         providers,
         channels.build(config.channels),
@@ -63,4 +70,5 @@ def build_agent(config: Config) -> Agent:
         cpu_credit_min_balance=config.monitoring.cpu_credit_min_balance,
         swap_usage_max_mb=config.monitoring.swap_usage_max_mb,
         disk_full_forecast_days=config.monitoring.disk_full_forecast_days,
+        uplink=uplink,
     )

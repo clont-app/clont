@@ -73,6 +73,22 @@ class ChannelsConfig(_Model):
     telegram: TelegramConfig | None = None
 
 
+# --- API uplink (optional; paid tier)
+
+
+class ApiConfig(_Model):
+    """Two-way uplink to a clont server.
+
+    When set, each cycle the agent ships its full batch (metrics, costs,
+    recommendations, health, events) to `url` and dispatches the events the
+    server returns through the local channels.
+    """
+
+    url: str
+    api_key: str
+    timeout_seconds: float = 10.0
+
+
 # --- Clouds (read-only)
 
 
@@ -160,6 +176,7 @@ class Config(BaseSettings):
     finops: FinOpsConfig = Field(default_factory=FinOpsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    api: ApiConfig | None = None         # optional uplink to a clont server (paid tier)
 
     @field_validator("log_level")
     @classmethod
@@ -236,6 +253,14 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   cpu_credit_min_balance: 20   # WARN when a burstable CPU-credit balance falls below this
 #   swap_usage_max_mb: 50        # WARN when swap usage exceeds this in MB (ElastiCache)
 #   disk_full_forecast_days: 14  # WARN when storage is projected full within this many days
+
+# Optional API uplink (paid tier). When set, each cycle ships the full batch
+# (metrics, costs, recommendations, health, events) to your server and dispatches
+# the events it returns through the channels below. Omit it to stay fully local.
+# api:
+#   url: https://api.example.com/ingest
+#   api_key: "REDACTED"          # secret — keep this YAML readable only by the agent
+#   timeout_seconds: 10
 
 channels:
   log:                      # always on

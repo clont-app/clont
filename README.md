@@ -102,6 +102,11 @@ all configurable (see `finops.*` below).
   expiry without restarts.
 - **Channels** — log (always on) plus optional Slack, Discord, and Telegram, each
   with its own severity floor and repeat throttling (see below).
+- **API uplink** (optional, paid tier) — with an `api:` block, each cycle ships
+  the full batch (metrics, costs, recommendations, health, events) to your clont
+  server and dispatches the events it returns through the same channels. Two-way
+  by design: channel tokens never leave the agent, so server-side findings ride
+  back on the response. Omit the block to stay fully local. See [docs/api.md](docs/api.md).
 
 ## How events work
 

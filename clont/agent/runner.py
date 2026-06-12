@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from datetime import date, timedelta
 
+from clont.api.uplink import ApiUplink, Batch
 from clont.channels.base import Channel
 from clont.core import registry
 from clont.core.logging import get_logger
@@ -59,9 +60,11 @@ class Agent:
         cpu_credit_min_balance: float = 20.0,
         swap_usage_max_mb: float = 50.0,
         disk_full_forecast_days: float = 14.0,
+        uplink: ApiUplink | None = None,
     ) -> None:
         self._providers = providers
         self._channels = channels
+        self._uplink = uplink
         self._interval = interval_seconds
         self._lookback = lookback_days
         self._spend_baseline_days = spend_baseline_days
@@ -101,15 +104,23 @@ class Agent:
         return Period(start=start, end=end)
 
     def collect_events(self) -> list[Event]:
-        period = self._period()
-        events: list[Event] = []
-        for provider in self._providers:
-            events.extend(self._finops_events(provider, period))
-            events.extend(self._monitoring_events(provider, period))
-        return events
+        return self._collect_batch().events
 
-    def _finops_events(self, provider: Provider, period: Period) -> list[Event]:
-        out: list[Event] = []
+    def _collect_batch(self) -> Batch:
+        """Run every collector once per provider, gathering the cycle's raw data
+        and the events its detectors fire into a single `Batch`.
+
+        The raw data (metrics/costs/recommendations/health) is what the API
+        uplink ships.
+        """
+        period = self._period()
+        batch = Batch()
+        for provider in self._providers:
+            self._finops_collect(provider, period, batch)
+            self._monitoring_collect(provider, period, batch)
+        return batch
+
+    def _finops_collect(self, provider: Provider, period: Period, batch: Batch) -> None:
         cost_period = self._cost_period()
         for cls in registry.collectors_for("finops", provider.cloud):
             collector = cls(provider, self._finops_tuning)
@@ -120,19 +131,19 @@ class Agent:
             except Exception as exc:  # noqa: BLE001 - one collector must not kill the loop
                 log.warning("finops collector %s collect failed: %s", cls.__name__, exc)
             else:
+                batch.costs.extend(records)
                 for detector in self._finops_cost_detectors:
-                    out.extend(detector.detect(records))
+                    batch.events.extend(detector.detect(records))
             try:
                 recs = collector.recommendations(period)
             except Exception as exc:  # noqa: BLE001
                 log.warning("finops collector %s recommendations failed: %s", cls.__name__, exc)
             else:
+                batch.recommendations.extend(recs)
                 for detector in self._finops_detectors:
-                    out.extend(detector.detect(recs))
-        return out
+                    batch.events.extend(detector.detect(recs))
 
-    def _monitoring_events(self, provider: Provider, period: Period) -> list[Event]:
-        out: list[Event] = []
+    def _monitoring_collect(self, provider: Provider, period: Period, batch: Batch) -> None:
         for cls in registry.collectors_for("monitoring", provider.cloud):
             collector = cls(provider)
             # Health checks and metric-anomaly detection are independent: a
@@ -143,8 +154,9 @@ class Agent:
             except Exception as exc:  # noqa: BLE001
                 log.warning("monitoring collector %s health failed: %s", cls.__name__, exc)
             else:
+                batch.health.extend(checks)
                 for detector in self._monitoring_detectors:
-                    out.extend(detector.detect(checks))
+                    batch.events.extend(detector.detect(checks))
             # Only some collectors expose metric series (e.g. EC2 CPU/network).
             if hasattr(collector, "collect"):
                 try:
@@ -152,9 +164,9 @@ class Agent:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("monitoring collector %s collect failed: %s", cls.__name__, exc)
                 else:
+                    batch.metrics.extend(points)
                     for detector in self._monitoring_metric_detectors:
-                        out.extend(detector.detect(points))
-        return out
+                        batch.events.extend(detector.detect(points))
 
     def dispatch(self, events: list[Event]) -> int:
         """Hand every event to every channel
@@ -173,8 +185,19 @@ class Agent:
         return delivered
 
     def run_once(self) -> int:
-        """Run a single collect -> detect -> dispatch cycle."""
-        events = self.collect_events()
+        """Run a single collect -> detect -> (ship) -> dispatch cycle.
+
+        When an API uplink is configured, the cycle's full batch is shipped to
+        the server and any events it returns (server-side forecasts/recommen-
+        dations) are dispatched alongside the local ones.
+        """
+        batch = self._collect_batch()
+        events = list(batch.events)
+        if self._uplink is not None:
+            try:
+                events.extend(self._uplink.ship(batch))
+            except Exception as exc:  # noqa: BLE001 - the server must not break local dispatch
+                log.warning("api uplink failed: %s", exc)
         delivered = self.dispatch(events)
         log.info(
             "cycle complete: %d event(s) evaluated, %d deliver(ies)",
