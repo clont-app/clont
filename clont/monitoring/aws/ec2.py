@@ -20,7 +20,14 @@ from clont.providers.aws.parsing import _EC2Status
 from clont.providers.base import Provider
 
 # CloudWatch EC2 metrics to collect, with their unit. Averaged hourly.
-_METRICS = (("CPUUtilization", "Percent"), ("NetworkIn", "Bytes"), ("NetworkOut", "Bytes"))
+# CPUCreditBalance is only published by burstable (T-family) instances; others
+# return no datapoints and are skipped naturally, so it's safe to always request.
+_METRICS = (
+    ("CPUUtilization", "Percent"),
+    ("NetworkIn", "Bytes"),
+    ("NetworkOut", "Bytes"),
+    ("CPUCreditBalance", "Count"),
+)
 _PERIOD_SECONDS = 3600
 _MAX_QUERIES = 500  # GetMetricData allows up to 500 queries per call.
 

@@ -36,12 +36,31 @@ region:
   *seasonal* — the latest sample is compared against prior samples at the same
   hour-of-day (robust median/MAD), so a daily load cycle isn't mistaken for an
   anomaly.
+- **Capacity & pressure default rules** — opinionated threshold + trend rules over
+  native CloudWatch metrics (deterministic, one global default each, operator-tunable):
+  - **Predicted disk-full** — a least-squares trend over RDS free storage / Redshift
+    disk-used that `warn`s when storage is projected to hit capacity within N days.
+  - **Low free storage** (`warn` below 10%, RDS) and **high disk used** (`warn` above
+    90%, Redshift).
+  - **CPU-credit depletion** — burstable EC2/RDS instances whose `CPUCreditBalance`
+    falls below the floor.
+  - **Swap pressure** — ElastiCache `SwapUsage` above the threshold.
+  *Scope:* "disk-full" covers AWS-native storage metrics (RDS, Redshift). EC2 root /
+  EBS *filesystem* fill needs the CloudWatch agent's guest metrics and is not covered
+  (clont reads only what AWS exposes without an agent).
 
 **FinOps — spend** — account-wide spend via Cost Explorer (`GetCostAndUsage`),
 surfaced as a daily spend digest (`info`) plus a spend-spike alert (`warn`) when a
 service's latest-day cost jumps beyond a configurable % over its baseline. The
 baseline is the median of prior **same-weekday** spend, so normal weekly cycles
 (quiet weekends, busy Mondays) don't trip false spikes.
+
+**FinOps — budgets & forecast** — a month-end spend **forecast** (`info`), a
+run-rate projection (month-to-date plus an exponentially-weighted daily rate over
+the remaining days), and **budget alerts** against operator-defined monthly
+ceilings (whole-account or per-service, set in config): `warn` as the forecast
+approaches or is projected to exceed a budget, `critical` once spend has already
+breached it. Pure arithmetic — no model, no extra API calls.
 
 **FinOps — recommendations** — read-only savings findings, each carrying a
 ballpark monthly dollar figure and emitted through the same event pipeline:
@@ -53,6 +72,9 @@ ballpark monthly dollar figure and emitted through the same event pipeline:
 - **Commitment purchases** via Cost Explorer — Compute Savings Plans and Reserved
   Instances (EC2 / RDS / ElastiCache / Redshift / OpenSearch), reported at
   conservative one-year, no-upfront terms.
+- **Commitment utilization & coverage** via Cost Explorer — Savings Plans / RIs
+  you already hold that are under-used (committed spend going to waste) or
+  under-covering (eligible on-demand a commitment would discount).
 - **Unattached EBS volumes** — `available` volumes still being billed.
 - **Unassociated Elastic IPs** — allocated public IPv4 not attached to anything.
 - **gp2 → gp3 migration** — in-use gp2 volumes, with the storage-rate saving.
@@ -62,8 +84,13 @@ ballpark monthly dollar figure and emitted through the same event pipeline:
 - **Idle load balancers** — ALB/NLB with no registered targets.
 - **Stale EBS snapshots** — orphaned (source volume deleted) or older than a
   configurable age.
+- **Off-hours scheduling** — always-on non-prod EC2 instances (identified by a
+  configurable tag convention) that could be stopped nights and weekends.
+- **Tag hygiene** — EC2 instances and EBS volumes missing operator-required tags,
+  the root cause of unattributable spend.
 
-Idle/stale thresholds are configurable (see `finops.*` below).
+Idle/stale thresholds, the non-prod tag convention, and the required-tag list are
+all configurable (see `finops.*` below).
 
 **Platform**
 
@@ -178,6 +205,15 @@ keeps monitoring the rest; it aborts only if no account authenticates.
   service's latest-day spend exceeds the baseline by more than this percentage.
 - `spend_min_dollars` (float, default `1`) — ignore services whose latest-day
   spend is below this, so trivial amounts don't trip the spike alert.
+- `budgets` (list, default `[]`) — monthly spend ceilings. Each entry has
+  `monthly_limit` (required), `account` (alias, or `"*"` for every account,
+  default `"*"`), optional `service` (a Cost Explorer service name; omit for a
+  whole-account budget), and `currency` (default `USD`).
+- `budget_warn_pct` (float, default `80`) — emit a `warn` when the month-end
+  forecast reaches this percentage of a budget (a `critical` fires once spend has
+  actually breached it).
+- `forecast_alpha` (float, default `0.5`) — EWMA recency weight for the
+  daily-rate month-end forecast (higher = more weight on recent days).
 - `idle_cpu_pct` (float, default `5`) — average CPU % below which an EC2/RDS
   resource counts as idle.
 - `idle_lookback_days` (int, default `14`) — trailing window the idle averages
@@ -186,6 +222,15 @@ keeps monitoring the rest; it aborts only if no account authenticates.
   which an RDS instance counts as idle.
 - `snapshot_max_age_days` (int, default `90`) — EBS snapshots older than this are
   flagged as "old".
+- `ri_sp_min_utilization` (float, default `90`) — flag a Savings Plan / Reserved
+  Instance used below this percentage (paying for unused commitment).
+- `ri_sp_min_coverage` (float, default `70`) — flag when eligible usage is covered
+  below this percentage (on-demand spend a commitment would discount).
+- `nonprod_tags` (map of tag key → values, default `{}`) — tags marking
+  schedulable non-prod resources, e.g. `Environment: [dev, staging, test, qa]`.
+  Empty disables the off-hours collector (it never guesses which boxes are non-prod).
+- `required_tags` (list of str, default `[]`) — tag keys every cost-bearing
+  resource must carry; empty disables the tag-hygiene collector.
 
 **`monitoring`** — metric-anomaly detection
 
@@ -193,6 +238,16 @@ keeps monitoring the rest; it aborts only if no account authenticates.
   metric sample is more than this many standard deviations from its baseline.
 - `anomaly_min_points` (int, default `6`) — minimum baseline samples a series
   needs before it can flag an anomaly.
+- `free_storage_min_pct` (float, default `10`) — `warn` when RDS free storage drops
+  below this percentage.
+- `disk_used_max_pct` (float, default `90`) — `warn` when Redshift disk used rises
+  above this percentage.
+- `cpu_credit_min_balance` (float, default `20`) — `warn` when a burstable EC2/RDS
+  `CPUCreditBalance` falls below this.
+- `swap_usage_max_mb` (float, default `50`) — `warn` when ElastiCache swap usage
+  exceeds this (MB).
+- `disk_full_forecast_days` (float, default `14`) — `warn` when the storage trend is
+  projected to hit capacity within this many days.
 
 **`channels.log`** — always on
 

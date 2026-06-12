@@ -8,13 +8,18 @@ from datetime import date, timedelta
 from clont.channels.base import Channel
 from clont.core import registry
 from clont.core.logging import get_logger
+from clont.core.config import BudgetRule
 from clont.core.models import Period
 from clont.events.detectors import (
+    BudgetDetector,
+    CapacityForecastDetector,
     HealthDetector,
     MetricAnomalyDetector,
     RecommendationDetector,
     SpendDigestDetector,
+    SpendForecastDetector,
     SpendSpikeDetector,
+    ThresholdRuleDetector,
 )
 from clont.events.models import Event
 from clont.finops.base import FinOpsTuning
@@ -43,9 +48,17 @@ class Agent:
         spend_baseline_days: int = 28,
         spend_spike_pct: float = 50.0,
         spend_min_dollars: float = 1.0,
+        budgets: list[BudgetRule] | None = None,
+        budget_warn_pct: float = 80.0,
+        forecast_alpha: float = 0.5,
         finops_tuning: FinOpsTuning | None = None,
         anomaly_sigma: float = 3.0,
         anomaly_min_points: int = 6,
+        free_storage_min_pct: float = 10.0,
+        disk_used_max_pct: float = 90.0,
+        cpu_credit_min_balance: float = 20.0,
+        swap_usage_max_mb: float = 50.0,
+        disk_full_forecast_days: float = 14.0,
     ) -> None:
         self._providers = providers
         self._channels = channels
@@ -57,10 +70,19 @@ class Agent:
         self._finops_cost_detectors = [
             SpendDigestDetector(),
             SpendSpikeDetector(spend_spike_pct, spend_min_dollars),
+            SpendForecastDetector(forecast_alpha),
+            BudgetDetector(budgets or [], budget_warn_pct, forecast_alpha),
         ]
         self._monitoring_detectors = [HealthDetector()]
         self._monitoring_metric_detectors = [
-            MetricAnomalyDetector(anomaly_sigma, anomaly_min_points)
+            MetricAnomalyDetector(anomaly_sigma, anomaly_min_points),
+            ThresholdRuleDetector(
+                free_storage_min_pct,
+                disk_used_max_pct,
+                cpu_credit_min_balance,
+                swap_usage_max_mb,
+            ),
+            CapacityForecastDetector(disk_full_forecast_days),
         ]
 
     def _period(self) -> Period:
@@ -70,9 +92,13 @@ class Agent:
     def _cost_period(self) -> Period:
         # End at *yesterday*, the last complete day: today's Cost Explorer data
         # is partial/estimated and would under-report the digest and mask spikes.
-        # Window is `spend_baseline_days` prior days + that anchor day.
+        # Window is `spend_baseline_days` prior days + that anchor day, but always
+        # reaches back to the 1st so the same single pull covers the full
+        # month-to-date the forecast + budget detectors need (late in the month
+        # the trailing window alone would miss the first days).
         end = date.today() - timedelta(days=1)
-        return Period(start=end - timedelta(days=self._spend_baseline_days), end=end)
+        start = min(end - timedelta(days=self._spend_baseline_days), end.replace(day=1))
+        return Period(start=start, end=end)
 
     def collect_events(self) -> list[Event]:
         period = self._period()

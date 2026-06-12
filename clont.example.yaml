@@ -17,17 +17,53 @@ aws:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]
 
-# FinOps. Spend events: a daily spend digest (info) every cycle, and a spend
-# spike (warn) when a service's latest-day spend jumps over its baseline. The
-# idle/snapshot thresholds tune the rightsizing/waste recommendations.
+# FinOps. Spend events: a daily spend digest (info) every cycle, a spend spike
+# (warn) when a service's latest-day spend jumps over its baseline, a month-end
+# forecast (info), and budget alerts (warn/critical). The idle/snapshot
+# thresholds tune the rightsizing/waste recommendations; ri_sp_* tune the
+# commitment utilization/coverage advice; nonprod_tags/required_tags drive the
+# off-hours and tag-hygiene recommendations.
 finops:
   spend_baseline_days: 28        # trailing window (~4 wks); spike baseline = same-weekday median
   spend_spike_pct: 50            # WARN when the latest day exceeds baseline by this %
   spend_min_dollars: 1           # ignore services below this latest-day spend
+
+  # Budgets + month-end forecast (run-rate projection over the daily spend stream).
+  budget_warn_pct: 80            # WARN when the forecast reaches this % of a budget
+  forecast_alpha: 0.5            # EWMA recency weight for the daily-rate forecast
+  budgets:                       # monthly ceilings; account "*" = every account
+    - account: prod
+      monthly_limit: 5000        # whole-account budget (omit `service`)
+    - account: prod
+      service: Amazon Elastic Compute Cloud - Compute
+      monthly_limit: 2000        # per-service budget (Cost Explorer service name)
+
   idle_cpu_pct: 5                # avg CPU % below which a resource is idle
   idle_lookback_days: 14         # trailing window the idle averages span
   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
+
+  # Commitment (Reserved Instance / Savings Plans) utilization & coverage.
+  ri_sp_min_utilization: 90      # WARN when a commitment is used less than this %
+  ri_sp_min_coverage: 70         # WARN when eligible spend is covered less than this %
+
+  # Governance. nonprod_tags marks schedulable non-prod resources (off-hours);
+  # required_tags lists keys every cost-bearing resource must carry (tag hygiene).
+  # Both are empty by default, which disables their collectors (no false alarms).
+  nonprod_tags:
+    Environment: [dev, staging, test, qa]
+  required_tags: [Owner, Environment]
+
+# Monitoring. Metric-anomaly detection (baseline + deviation) plus Tier-1 default
+# rules: disk-full forecast, low free storage, CPU-credit depletion, swap pressure.
+monitoring:
+  anomaly_sigma: 3              # WARN when the latest sample is this many σ off baseline
+  anomaly_min_points: 6         # min baseline samples before a series can flag
+  free_storage_min_pct: 10     # WARN when RDS free storage drops below this %
+  disk_used_max_pct: 90        # WARN when Redshift disk used rises above this %
+  cpu_credit_min_balance: 20   # WARN when a burstable CPU-credit balance falls below this
+  swap_usage_max_mb: 50        # WARN when ElastiCache swap usage exceeds this (MB)
+  disk_full_forecast_days: 14  # WARN when storage is projected full within this many days
 
 channels:
   # Always on. Logs a new condition immediately, then re-logs a standing one

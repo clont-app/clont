@@ -27,7 +27,12 @@ resource-level scoping, so `Resource` is `*`; they are all read-only.
         "ce:GetCostAndUsage",
         "ce:GetSavingsPlansPurchaseRecommendation",
         "ce:GetReservationPurchaseRecommendation",
+        "ce:GetSavingsPlansUtilization",
+        "ce:GetSavingsPlansCoverage",
+        "ce:GetReservationUtilization",
+        "ce:GetReservationCoverage",
         "ec2:DescribeRegions",
+        "ec2:DescribeInstances",
         "ec2:DescribeInstanceStatus",
         "cloudwatch:GetMetricData",
         "rds:DescribeDBInstances",
@@ -71,6 +76,12 @@ implemented collector needs:
   `ce:GetSavingsPlansPurchaseRecommendation`,
   `ce:GetReservationPurchaseRecommendation` (skipped gracefully when Cost Explorer
   has too little usage data to recommend a purchase)
+- **Commitment utilization & coverage** (under-used or under-covering SP/RIs) —
+  `ce:GetSavingsPlansUtilization`, `ce:GetSavingsPlansCoverage`,
+  `ce:GetReservationUtilization`, `ce:GetReservationCoverage` (skipped gracefully
+  when no commitments are held or Cost Explorer has no data)
+- **Budgets + month-end forecast** (run-rate projection vs operator budgets) —
+  no extra grant; reuses the `ce:GetCostAndUsage` daily spend stream
 - **EC2 health** (instance reachability) — `ec2:DescribeInstanceStatus`
 - **EC2 metrics** (CPU / network) — `cloudwatch:GetMetricData` (instances are
   discovered via `ec2:DescribeInstanceStatus`)
@@ -110,6 +121,17 @@ implemented collector needs:
   `elasticloadbalancing:DescribeLoadBalancers`,
   `elasticloadbalancing:DescribeTargetGroups`,
   `elasticloadbalancing:DescribeTargetHealth` (last two already listed for ELB health)
+- **Off-hours scheduling recommendations** (always-on non-prod instances) —
+  `ec2:DescribeInstances` (reads instance state + tags; gated on `nonprod_tags`)
+- **Tag-hygiene recommendations** (resources missing required tags) —
+  `ec2:DescribeInstances`, `ec2:DescribeVolumes` (reads tags; gated on `required_tags`)
+- **Monitoring default rules** (disk-full forecast, low free storage, CPU-credit
+  depletion, swap pressure) — **no extra grant**: `cloudwatch:GetMetricData` over the
+  `AWS/RDS` (`FreeStorageSpace`, `CPUCreditBalance`), `AWS/Redshift`
+  (`PercentageDiskSpaceUsed`), `AWS/ElastiCache` (`SwapUsage`, `FreeableMemory`) and
+  `AWS/EC2` (`CPUCreditBalance`) namespaces, with resources discovered via the
+  already-listed `rds:DescribeDBInstances` / `redshift:DescribeClusters` /
+  `elasticache:DescribeCacheClusters` / `ec2:DescribeInstanceStatus`
 - **Region discovery / preflight** — `ec2:DescribeRegions`
 
 (`sts:GetCallerIdentity`, used at startup to confirm the assumed identity,

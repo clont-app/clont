@@ -6,7 +6,7 @@ Each finops service module implements one collector and registers it via
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from clont.core.models import Cloud, Period
@@ -24,6 +24,10 @@ class FinOpsTuning:
     idle_lookback_days: int = 14           # trailing window the averages span
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # snapshots older than this are "old"
+    ri_sp_min_utilization: float = 90.0    # commitment used below this % -> wasted spend
+    ri_sp_min_coverage: float = 70.0       # eligible spend covered below this % -> opportunity
+    nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
+    required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
 
 
 class CostCollector(Protocol):

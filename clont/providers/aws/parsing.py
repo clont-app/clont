@@ -33,10 +33,11 @@ class _EC2Status(BaseModel):
 
 
 class _RDSInstance(BaseModel):
-    """One ``describe_db_instances`` entry: identity + lifecycle status."""
+    """One ``describe_db_instances`` entry: identity + lifecycle status + size."""
 
     instance_id: str = Field(validation_alias="DBInstanceIdentifier")
     status: str = Field(validation_alias="DBInstanceStatus")
+    allocated_storage: int = Field(default=0, validation_alias="AllocatedStorage")  # GiB
 
 
 class _CacheCluster(BaseModel):
@@ -125,6 +126,10 @@ class _EBSVolume(BaseModel):
     size: int = Field(default=0, validation_alias="Size")
     volume_type: str = Field(default="", validation_alias="VolumeType")
     state: str = Field(default="", validation_alias="State")
+    tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
+
+    def tag_map(self) -> dict[str, str]:
+        return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
 
 
 class _EIP(BaseModel):
@@ -285,6 +290,72 @@ class _RIRecommendation(BaseModel):
         default="USD",
         validation_alias=AliasPath("RecommendationSummary", "CurrencyCode"),
     )
+
+
+class _SPUtilization(BaseModel):
+    """The ``Total`` of ``get_savings_plans_utilization`` (commitment usage)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    utilization_pct: Decimal = Field(
+        default=Decimal(0), validation_alias=AliasPath("Utilization", "UtilizationPercentage")
+    )
+    total_commitment: Decimal = Field(
+        default=Decimal(0), validation_alias=AliasPath("Utilization", "TotalCommitment")
+    )
+    unused_commitment: Decimal = Field(
+        default=Decimal(0), validation_alias=AliasPath("Utilization", "UnusedCommitment")
+    )
+    currency: str = Field(default="USD", validation_alias=AliasPath("Savings", "CurrencyCode"))
+
+
+class _SPCoverage(BaseModel):
+    """One ``SavingsPlansCoverages`` entry of ``get_savings_plans_coverage``."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    coverage_pct: Decimal = Field(
+        default=Decimal(0), validation_alias=AliasPath("Coverage", "CoveragePercentage")
+    )
+    on_demand_cost: Decimal = Field(
+        default=Decimal(0), validation_alias=AliasPath("Coverage", "OnDemandCost")
+    )
+
+
+class _RIUtilization(BaseModel):
+    """The ``Total`` of ``get_reservation_utilization`` (reservation usage)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    utilization_pct: Decimal = Field(default=Decimal(0), validation_alias="UtilizationPercentage")
+    purchased_hours: Decimal = Field(default=Decimal(0), validation_alias="PurchasedHours")
+    unused_hours: Decimal = Field(default=Decimal(0), validation_alias="UnusedHours")
+    net_savings: Decimal = Field(default=Decimal(0), validation_alias="NetRISavings")
+
+
+class _RICoverage(BaseModel):
+    """The ``Total`` of ``get_reservation_coverage`` (reservation coverage)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    coverage_pct: Decimal = Field(
+        default=Decimal(0),
+        validation_alias=AliasPath("CoverageHours", "CoverageHoursPercentage"),
+    )
+    on_demand_hours: Decimal = Field(
+        default=Decimal(0), validation_alias=AliasPath("CoverageHours", "OnDemandHours")
+    )
+
+
+class _Instance(BaseModel):
+    """One ``describe_instances`` entry: identity, state, tags (off-hours/tag-hygiene)."""
+
+    instance_id: str = Field(validation_alias="InstanceId")
+    state: str = Field(default="", validation_alias=AliasPath("State", "Name"))
+    tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
+
+    def tag_map(self) -> dict[str, str]:
+        return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
 
 
 class _HealthEvent(BaseModel):

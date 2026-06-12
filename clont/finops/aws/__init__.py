@@ -10,6 +10,9 @@ from clont.finops.aws import (  # noqa: F401 - imported for registration
     idle_elb,
     idle_nat,
     idle_rds,
+    offhours,
     snapshots,
+    tags,
+    utilization,
     waste,
 )

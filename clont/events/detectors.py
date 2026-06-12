@@ -7,12 +7,22 @@ the relevant detectors every cycle.
 
 from __future__ import annotations
 
+import calendar
 from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
+from clont.core.config import BudgetRule
 from clont.core.models import Cloud, CloudResource
 from clont.events.models import Event, EventSeverity
-from clont.events.stats import mean, median, modified_zscore
+from clont.events.stats import (
+    mean,
+    median,
+    modified_zscore,
+    periods_to_cross,
+    project_month_end,
+)
 from clont.finops.models import CostRecord, Recommendation
 from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
 
@@ -173,6 +183,191 @@ class SpendSpikeDetector:
         return events
 
 
+@dataclass(frozen=True, slots=True)
+class _AccountMonth:
+    """Per-account current-month spend, bucketed by day (for forecast/budgets)."""
+
+    alias: str | None
+    anchor: date                                   # latest day seen for the account
+    currency: str
+    account_daily: dict[date, Decimal]             # day -> account total
+    service_daily: dict[str, dict[date, Decimal]]  # service -> {day -> total}
+
+    def days_in_month(self) -> int:
+        return calendar.monthrange(self.anchor.year, self.anchor.month)[1]
+
+
+def _account_months(records: list[CostRecord]) -> list[_AccountMonth]:
+    """Reduce the daily cost stream to each account's current-(latest-)month spend.
+
+    The "current month" is the month of the most recent day present for that
+    account, so partial trailing days from the prior month are dropped — the
+    forecast and budgets only reason about the month in progress.
+    """
+    by_alias: dict[str | None, list[CostRecord]] = defaultdict(list)
+    for rec in records:
+        by_alias[rec.alias].append(rec)
+
+    out: list[_AccountMonth] = []
+    for alias_key, recs in by_alias.items():
+        anchor = max(r.period.end for r in recs)
+        ym = (anchor.year, anchor.month)
+        account_daily: dict[date, Decimal] = defaultdict(Decimal)
+        service_daily: dict[str, dict[date, Decimal]] = defaultdict(
+            lambda: defaultdict(Decimal)
+        )
+        currency = "USD"
+        for rec in recs:
+            day = rec.period.end
+            if (day.year, day.month) != ym:
+                continue
+            account_daily[day] += rec.cost.amount
+            service_daily[rec.service][day] += rec.cost.amount
+            currency = rec.cost.currency
+        if not account_daily:
+            continue
+        out.append(
+            _AccountMonth(
+                alias=alias_key,
+                anchor=anchor,
+                currency=currency,
+                account_daily=dict(account_daily),
+                service_daily={s: dict(d) for s, d in service_daily.items()},
+            )
+        )
+    return out
+
+
+def _ordered(daily: dict[date, Decimal]) -> list[Decimal]:
+    """Daily totals ordered oldest-first (the shape `project_month_end` wants)."""
+    return [daily[d] for d in sorted(daily)]
+
+
+class SpendForecastDetector:
+    """Daily spend -> one INFO month-end forecast per account.
+
+    Run-rate projection: month-to-date actual plus an EWMA daily rate applied to
+    the remaining days of the calendar month.
+    """
+
+    def __init__(self, alpha: float = 0.5) -> None:
+        self._alpha = alpha
+
+    def detect(self, records: list[CostRecord]) -> list[Event]:
+        events: list[Event] = []
+        for acc in _account_months(records):
+            days = acc.days_in_month()
+            mtd = sum(acc.account_daily.values(), Decimal(0))
+            forecast = project_month_end(_ordered(acc.account_daily), days, self._alpha)
+            alias = acc.alias or "-"
+            cur = acc.currency
+            events.append(
+                Event(
+                    key=f"finops:spend:forecast:{alias}",
+                    severity=EventSeverity.INFO,
+                    domain="finops",
+                    cloud=Cloud.AWS,
+                    title=f"[{alias}] Month-end forecast: ~{forecast:.0f} {cur}",
+                    message=(
+                        f"{acc.anchor.year}-{acc.anchor.month:02d}: {mtd:.2f} {cur} "
+                        f"MTD over {len(acc.account_daily)}/{days} days "
+                        f"-> ~{forecast:.0f} {cur} projected"
+                    ),
+                    payload={
+                        "mtd": str(mtd),
+                        "forecast": str(forecast),
+                        "currency": cur,
+                        "days_elapsed": str(len(acc.account_daily)),
+                        "days_in_month": str(days),
+                    },
+                )
+            )
+        return events
+
+
+class BudgetDetector:
+    """Daily spend vs operator-defined monthly budgets.
+
+    For each budget rule, compares month-to-date spend (whole account or one
+    service) against the limit and its run-rate forecast:
+      * MTD already at/over the limit  -> CRITICAL (actual breach)
+      * forecast at/over the limit      -> WARN (projected breach)
+      * forecast at/over `warn_pct`% of limit -> WARN (approaching)
+    A `"*"` rule fans out to every account; a null `service` budgets the account.
+    """
+
+    def __init__(
+        self, budgets: list[BudgetRule], warn_pct: float = 80.0, alpha: float = 0.5
+    ) -> None:
+        self._budgets = budgets
+        self._warn = Decimal(str(warn_pct)) / Decimal(100)
+        self._alpha = alpha
+
+    def detect(self, records: list[CostRecord]) -> list[Event]:
+        if not self._budgets:
+            return []
+        accounts = _account_months(records)
+        events: list[Event] = []
+        for rule in self._budgets:
+            for acc in accounts:
+                if rule.account not in ("*", acc.alias):
+                    continue
+                daily = (
+                    acc.account_daily
+                    if rule.service is None
+                    else acc.service_daily.get(rule.service)
+                )
+                if not daily:  # this account has no spend for the budgeted service
+                    continue
+                event = self._evaluate(rule, acc, daily)
+                if event is not None:
+                    events.append(event)
+        return events
+
+    def _evaluate(
+        self, rule: BudgetRule, acc: _AccountMonth, daily: dict[date, Decimal]
+    ) -> Event | None:
+        limit = rule.monthly_limit
+        if limit <= 0:
+            return None
+        mtd = sum(daily.values(), Decimal(0))
+        forecast = project_month_end(_ordered(daily), acc.days_in_month(), self._alpha)
+
+        if mtd >= limit:
+            severity = EventSeverity.CRITICAL
+            state = f"over budget — {mtd:.2f} of {limit} {rule.currency} spent"
+        elif forecast >= limit:
+            severity = EventSeverity.WARN
+            state = f"forecast {forecast:.0f} {rule.currency} exceeds {limit} budget"
+        elif forecast >= limit * self._warn:
+            severity = EventSeverity.WARN
+            pct = forecast / limit * 100
+            state = f"forecast {forecast:.0f} {rule.currency} is {pct:.0f}% of {limit} budget"
+        else:
+            return None
+
+        alias = acc.alias or "-"
+        scope = rule.service or "account"
+        return Event(
+            key=f"finops:budget:{alias}:{scope}",
+            severity=severity,
+            domain="finops",
+            cloud=Cloud.AWS,
+            title=f"[{alias}] Budget {scope}: {state}",
+            message=(
+                f"{scope}: {mtd:.2f} {rule.currency} MTD, "
+                f"~{forecast:.0f} forecast vs {limit} {rule.currency} budget"
+            ),
+            payload={
+                "scope": scope,
+                "mtd": str(mtd),
+                "forecast": str(forecast),
+                "limit": str(limit),
+                "currency": rule.currency,
+            },
+        )
+
+
 class MetricAnomalyDetector:
     """Monitoring metric series -> WARN when the latest point deviates sharply.
 
@@ -252,6 +447,146 @@ class MetricAnomalyDetector:
                         "baseline_center": f"{center:.4f}",
                         "sigma": f"{score:.2f}",
                         "basis": basis,
+                    },
+                )
+            )
+        return events
+
+
+@dataclass(frozen=True, slots=True)
+class _Rule:
+    """One threshold rule: fire when the latest value breaches `limit`."""
+
+    metric: str
+    over: bool          # True -> fire when value > limit; False -> when value < limit
+    limit: float
+    label: str          # human phrase, e.g. "free storage"
+
+
+class ThresholdRuleDetector:
+    """Monitoring metric series -> WARN when the latest point breaches a default rule.
+
+    Opinionated, deterministic threshold checks (not anomaly detection) over the
+    normalized capacity/pressure metrics the collectors emit: low free storage,
+    high disk used, depleted CPU credits, swap pressure. One global threshold per
+    metric (operator-tunable) rather than a per-resource number, per the Tier-1
+    "curated defaults" principle. Only the latest sample of each series is judged.
+    """
+
+    def __init__(
+        self,
+        free_storage_min_pct: float = 10.0,
+        disk_used_max_pct: float = 90.0,
+        cpu_credit_min_balance: float = 20.0,
+        swap_usage_max_mb: float = 50.0,
+    ) -> None:
+        self._rules = [
+            _Rule("FreeStoragePercent", False, free_storage_min_pct, "free storage"),
+            _Rule("PercentageDiskSpaceUsed", True, disk_used_max_pct, "disk used"),
+            _Rule("CPUCreditBalance", False, cpu_credit_min_balance, "CPU credit balance"),
+            _Rule("SwapUsage", True, swap_usage_max_mb, "swap usage"),
+        ]
+        self._by_metric = {r.metric: r for r in self._rules}
+
+    def detect(self, points: list[MetricPoint]) -> list[Event]:
+        series: dict[tuple, list[MetricPoint]] = defaultdict(list)
+        for p in points:
+            if p.resource is None or p.name not in self._by_metric:
+                continue
+            r = p.resource
+            series[(r.alias, r.cloud, r.service, r.resource_id, p.name)].append(p)
+
+        events: list[Event] = []
+        for (alias_key, cloud, service, rid, metric), pts in series.items():
+            rule = self._by_metric[metric]
+            latest = max(pts, key=lambda p: p.timestamp)
+            breached = latest.value > rule.limit if rule.over else latest.value < rule.limit
+            if not breached:
+                continue
+            alias = alias_key or "-"
+            cmp = "above" if rule.over else "below"
+            events.append(
+                Event(
+                    key=f"monitoring:rule:{alias}:{cloud}:{service}:{rid}:{metric}",
+                    severity=EventSeverity.WARN,
+                    domain="monitoring",
+                    cloud=cloud,
+                    title=f"[{alias}] {service} {rule.label}: {latest.value:.1f} {latest.unit}",
+                    message=(
+                        f"{rule.label} {latest.value:.1f} {latest.unit} is {cmp} the "
+                        f"{rule.limit:g} threshold"
+                    ),
+                    resource=latest.resource,
+                    payload={
+                        "metric": metric,
+                        "value": str(latest.value),
+                        "threshold": str(rule.limit),
+                    },
+                )
+            )
+        return events
+
+
+class CapacityForecastDetector:
+    """Monitoring storage series -> WARN when a linear trend predicts exhaustion soon.
+
+    "Predicted disk-full in N days": for fill metrics it fits a least-squares line
+    over the recent window and projects when the trend reaches capacity
+    (`FreeStoragePercent` -> 0, `PercentageDiskSpaceUsed` -> 100). Fires only when
+    the projected crossing is within `forecast_days` *and* the series is genuinely
+    heading there (a flat or improving trend is silent — no false alarms). Needs at
+    least `min_points` samples so a noisy two-point slope can't fire.
+    """
+
+    _SECONDS_PER_DAY = 86400.0
+    # metric -> the value it is "full" at.
+    _CAPACITY = {"FreeStoragePercent": 0.0, "PercentageDiskSpaceUsed": 100.0}
+
+    def __init__(self, forecast_days: float = 14.0, min_points: int = 4) -> None:
+        self._forecast_days = forecast_days
+        self._min_points = min_points
+
+    def detect(self, points: list[MetricPoint]) -> list[Event]:
+        series: dict[tuple, list[MetricPoint]] = defaultdict(list)
+        for p in points:
+            if p.resource is None or p.name not in self._CAPACITY:
+                continue
+            r = p.resource
+            series[(r.alias, r.cloud, r.service, r.resource_id, p.name)].append(p)
+
+        events: list[Event] = []
+        for (alias_key, cloud, service, rid, metric), pts in series.items():
+            if len(pts) < self._min_points:
+                continue
+            pts.sort(key=lambda p: p.timestamp)
+            xs = [p.timestamp.timestamp() for p in pts]
+            ys = [p.value for p in pts]
+            capacity = self._CAPACITY[metric]
+            lead_seconds = periods_to_cross(xs, ys, capacity)
+            if lead_seconds is None:
+                continue
+            lead_days = lead_seconds / self._SECONDS_PER_DAY
+            if lead_days > self._forecast_days:
+                continue
+            latest = pts[-1]
+            alias = alias_key or "-"
+            events.append(
+                Event(
+                    key=f"monitoring:forecast:{alias}:{cloud}:{service}:{rid}:{metric}",
+                    severity=EventSeverity.WARN,
+                    domain="monitoring",
+                    cloud=cloud,
+                    title=f"[{alias}] {service} predicted full in ~{lead_days:.0f}d",
+                    message=(
+                        f"{metric} at {latest.value:.1f} {latest.unit} and trending to "
+                        f"capacity — projected full in ~{lead_days:.1f} days "
+                        f"(n={len(pts)})"
+                    ),
+                    resource=latest.resource,
+                    payload={
+                        "metric": metric,
+                        "latest": str(latest.value),
+                        "days_to_full": f"{lead_days:.2f}",
                     },
                 )
             )

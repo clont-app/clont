@@ -11,6 +11,7 @@ On startup clont validates the file; if none exists it writes one with defaults
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -90,6 +91,20 @@ class AWSConfig(_Model):
 # FinOps
 
 
+class BudgetRule(_Model):
+    """One operator-defined monthly spend budget.
+
+    Matched against month-to-date spend: a `"*"` account matches every account,
+    and a null `service` budgets the whole account (otherwise just that one
+    Cost Explorer service name).
+    """
+
+    account: str = "*"             # account alias, or "*" = every account
+    service: str | None = None     # Cost Explorer service name, or None = whole account
+    monthly_limit: Decimal         # the budget ceiling for the calendar month
+    currency: str = "USD"
+
+
 class FinOpsConfig(_Model):
     """Cost-event thresholds (spend digest + spike) and recommendation tuning."""
 
@@ -97,18 +112,38 @@ class FinOpsConfig(_Model):
     spend_spike_pct: float = 50.0     # WARN when the latest day exceeds baseline by this %
     spend_min_dollars: float = 1.0    # ignore services whose latest-day spend is below this
 
+    # Budgets + month-end forecast (run-rate projection over the daily spend stream)
+    budgets: list[BudgetRule] = Field(default_factory=list)  # operator-defined monthly ceilings
+    budget_warn_pct: float = 80.0     # WARN when the forecast reaches this % of a budget
+    forecast_alpha: float = 0.5       # EWMA recency weight for the daily-rate forecast
+
     # Idle / stale recommendation thresholds (shared by the idle + snapshot collectors)
     idle_cpu_pct: float = 5.0              # avg CPU % below which a resource is idle
     idle_lookback_days: int = 14           # trailing window the idle averages span
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # EBS snapshots older than this are "old"
 
+    # Commitment (RI/SP) utilization & coverage thresholds
+    ri_sp_min_utilization: float = 90.0    # WARN when a commitment is used less than this %
+    ri_sp_min_coverage: float = 70.0       # WARN when eligible spend is covered less than this %
+
+    # Governance: non-prod identification (off-hours) + required tag keys (tag hygiene)
+    nonprod_tags: dict[str, list[str]] = Field(default_factory=dict)  # tag key -> non-prod values
+    required_tags: list[str] = Field(default_factory=list)            # tag keys every resource must carry
+
 
 class MonitoringConfig(_Model):
-    """Monitoring metric-anomaly detection (baseline + deviation, not thresholds)."""
+    """Monitoring metric-anomaly detection """
 
     anomaly_sigma: float = 3.0    # WARN when the latest sample is this many σ off baseline
     anomaly_min_points: int = 6   # min baseline samples before a series can flag
+
+    # Default rules: capacity/pressure thresholds + disk-full forecast horizon.
+    free_storage_min_pct: float = 10.0    # WARN when free storage drops below this %
+    disk_used_max_pct: float = 90.0       # WARN when disk used rises above this %
+    cpu_credit_min_balance: float = 20.0  # WARN when a burstable CPU-credit balance falls below this
+    swap_usage_max_mb: float = 50.0       # WARN when swap usage exceeds this (MB)
+    disk_full_forecast_days: float = 14.0  # WARN when storage is projected full within this many days
 
 
 # Config
@@ -174,15 +209,33 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   spend_baseline_days: 28        # trailing window (~4 wks) for same-weekday spike baseline
 #   spend_spike_pct: 50            # WARN when the latest day exceeds baseline by this %
 #   spend_min_dollars: 1           # ignore services below this latest-day spend
+#   budget_warn_pct: 80            # WARN when the month-end forecast reaches this % of a budget
+#   forecast_alpha: 0.5            # EWMA recency weight for the daily-rate forecast
+#   budgets:                       # monthly ceilings; account "*" = every account
+#     - account: prod
+#       monthly_limit: 5000        # whole-account budget (omit `service`)
+#     - account: prod
+#       service: Amazon Elastic Compute Cloud - Compute
+#       monthly_limit: 2000        # per-service budget
 #   idle_cpu_pct: 5                # avg CPU % below which a resource is idle
 #   idle_lookback_days: 14         # trailing window the idle averages span
 #   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
 #   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
+#   ri_sp_min_utilization: 90      # WARN when a commitment is used less than this %
+#   ri_sp_min_coverage: 70         # WARN when eligible spend is covered less than this %
+#   nonprod_tags:                  # tags marking schedulable non-prod resources (off-hours)
+#     Environment: [dev, staging, test, qa]
+#   required_tags: [Owner, Environment]   # tag keys every cost-bearing resource must carry
 
-# Monitoring metric-anomaly detection (baseline + deviation, not thresholds).
+# Monitoring metric-anomaly detection + Tier-1 default rules (thresholds + forecast).
 # monitoring:
 #   anomaly_sigma: 3              # WARN when the latest sample is this many σ off baseline
 #   anomaly_min_points: 6         # min baseline samples before a series can flag
+#   free_storage_min_pct: 10     # WARN when free storage drops below this % (RDS)
+#   disk_used_max_pct: 90        # WARN when disk used rises above this % (Redshift)
+#   cpu_credit_min_balance: 20   # WARN when a burstable CPU-credit balance falls below this
+#   swap_usage_max_mb: 50        # WARN when swap usage exceeds this in MB (ElastiCache)
+#   disk_full_forecast_days: 14  # WARN when storage is projected full within this many days
 
 channels:
   log:                      # always on
