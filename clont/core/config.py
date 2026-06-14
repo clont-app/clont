@@ -88,6 +88,16 @@ class ApiConfig(_Model):
     api_key: str
     timeout_seconds: float = 10.0
 
+    @field_validator("url")
+    @classmethod
+    def _require_https(cls, v: str) -> str:
+        # The api_key rides on this request as a Bearer token; http:// would put
+        # it on the wire in cleartext, breaking the "secrets never leave the box
+        # unprotected" rule.
+        if not v.strip().lower().startswith("https://"):
+            raise ValueError("api.url must use https:// (the API key is sent as a Bearer token)")
+        return v.strip()
+
 
 # --- Clouds (read-only)
 

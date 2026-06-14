@@ -38,6 +38,8 @@ class _RDSInstance(BaseModel):
     instance_id: str = Field(validation_alias="DBInstanceIdentifier")
     status: str = Field(validation_alias="DBInstanceStatus")
     allocated_storage: int = Field(default=0, validation_alias="AllocatedStorage")  # GiB
+    # Present only when storage autoscaling is enabled; 0 = off.
+    max_allocated_storage: int = Field(default=0, validation_alias="MaxAllocatedStorage")  # GiB
 
 
 class _CacheCluster(BaseModel):
@@ -172,7 +174,10 @@ class _COOption(BaseModel):
     to empty). Savings are nested under ``savingsOpportunity``.
     """
 
-    rank: int = Field(default=0, validation_alias="rank")
+    # Default to a high sentinel (not 0): CO ranks start at 1, and "unranked"
+    # should sort *last* when picking the best option. A real rank of 0 would
+
+    rank: int = Field(default=999, validation_alias="rank")
     instance_type: str = Field(default="", validation_alias="instanceType")
     savings: Decimal = Field(
         default=Decimal(0),

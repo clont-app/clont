@@ -66,9 +66,17 @@ monitoring:
   disk_full_forecast_days: 14  # WARN when storage is projected full within this many days
 
 # Optional API uplink (paid tier). When present, each cycle ships the full batch
-# — metrics, cost records, recommendations, health checks, events — to  clont
+# — metrics, cost records, recommendations, health checks, events — to your clont
 # server, and dispatches the events it returns (server-side forecasts / recommen-
-# dations) through the channels below.
+# dations) through the channels below. Omit the whole block to stay fully local.
+# The api_key is a secret (sent as a Bearer token) and never leaves over anything
+# but this HTTPS request — give this YAML the same protection as the channel
+# tokens below. `url` MUST be https:// (the key would otherwise go in cleartext).
+# api:
+#   url: https://api.example.com/ingest
+#   api_key: "REPLACE_ME"        # secret — keep this file readable only by the agent
+#   timeout_seconds: 10
+
 channels:
   # Always on. Logs a new condition immediately, then re-logs a standing one
   # at most this often (so it isn't logged every cycle).
