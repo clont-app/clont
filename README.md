@@ -1,12 +1,13 @@
 # clont
 
-Monitoring agent — **under active development.**
+A long-running, strictly **read-only** monitoring and FinOps agent for the cloud.
 
-This package currently reserves the `clont` name on PyPI. It exposes no public
-Functionality will land in future releases.
+clont watches your cloud accounts (AWS today) for health issues and cost waste,
+emitting `warn`/`critical` events to the channels you configure. Every cloud call
+is a `Describe`/`Get`/`List` — the agent never mutates cloud state.
 
 For the product vision, tier model (free local vs paid hosted intelligence), and
-roadmap, see [docs/architecture.md](docs/architecture.md).
+architecture, see [docs/architecture.md](docs/architecture.md).
 
 ## Features
 

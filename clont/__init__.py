@@ -1,8 +1,9 @@
-"""clont — placeholder package.
+"""clont — a long-running, strictly read-only monitoring and FinOps agent.
 
-This distribution currently reserves the name on PyPI while the project is
-under active development. There is no public API yet.
+Collects metrics, cost data, and recommendations from cloud accounts (AWS today)
+and emits health/FinOps events to local channels. Every cloud call is a
+Describe/Get/List — the agent never mutates cloud state.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 

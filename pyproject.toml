@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "clont"
 dynamic = ["version"]
-description = "Monitoring agent , under active development"
+description = "A long-running, strictly read-only monitoring and FinOps agent for the cloud"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["monitoring", "observability", "agent", "infrastructure"]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Topic :: System :: Monitoring",
     "Programming Language :: Python :: 3",
