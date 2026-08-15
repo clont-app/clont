@@ -1,0 +1,43 @@
+# Keep the build context to the source that goes into the wheel.
+# NOTE: the project root doubles as a virtualenv locally (bin/, lib/, pyvenv.cfg)
+# — those must never enter the context, they'd break the image and bloat it.
+.venv/
+venv/
+bin/
+lib/
+lib64/
+include/
+share/
+pyvenv.cfg
+
+.git/
+.gitignore
+.github/
+
+# Local config / secrets — must not be baked into an image.
+clont.yaml
+.env
+.env.*
+*.pem
+*.key
+*.crt
+.aws/
+
+# Tests, docs, tooling: not part of the runtime image.
+tests/
+functests/
+docs/
+publish.sh
+Dockerfile
+.dockerignore
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+dist/
+build/
+*.log
