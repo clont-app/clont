@@ -41,6 +41,9 @@ Implemented today in:
   alias is folded into the event **key** and **title**.
 - `clont/channels/` — outbound delivery with per-channel severity gate +
   repeat/throttle.
+- `clont/reporting/summary.py` — the ad-hoc read path over one cycle's `Batch`
+  (`clont run --summary`): a rollup rendered as text or JSON. It summarizes what
+  the loop already collected; it never collects anything itself.
 
 **Design rule to protect:** events are **source-agnostic** and collectors stay
 **dumb** (they gather; they don't decide). That single seam is what lets the same

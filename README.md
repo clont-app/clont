@@ -158,6 +158,28 @@ All severity and repeat settings are per-channel configuration. Channels live
 outside the monitored clouds and use their own credentials (webhook URLs, bot
 tokens), kept separate from the read-only cloud role.
 
+### One-shot scan
+
+Channels only tell you what's *wrong*. Once the read-only role is in place, the
+quickest way to see what clont actually found is a single cycle with a summary:
+
+```
+clont run --summary -                  # one cycle, print the summary, exit
+clont run --summary scan.json          # ...or write it to a file (JSON)
+clont run --summary scan.txt           # extension picks the format
+clont run --summary out --format json  # ...or set it explicitly
+```
+
+The summary reports the accounts scanned, how much was collected (metrics,
+costs, recommendations, health checks), events broken down by severity and
+domain, the non-`ok` health checks, estimated monthly savings (per currency),
+the top services by spend, and any collector that failed — so an empty result
+can be told apart from a role that couldn't read anything.
+
+`--summary` runs exactly one cycle, so events still reach the channels as usual.
+Add `--fail-on-critical` to exit `2` when the cycle produced a critical event,
+which makes the command usable as a CI gate.
+
 ## Configuration
 
 clont is configured by a single YAML file (see `clont.example.yaml` for the full

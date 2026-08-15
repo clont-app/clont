@@ -4,6 +4,7 @@ clont is a long-running agent; the CLI exists only to start it and to validate
 config. The container ENTRYPOINT is `clont run`.
 
     clont run                 # start the agent loop (the daemon)
+    clont run --summary -     # one cycle, print what it saw (ad-hoc scan)
     clont config check        # validate config / verify read-only access
 """
 

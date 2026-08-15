@@ -36,6 +36,10 @@ class Batch:
     recommendations: list[Recommendation] = field(default_factory=list)
     health: list[HealthCheck] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
+    # Collector failures the cycle swallowed. Not shipped to the server; it
+    # exists so a summary can say "0 events *because* every collector failed"
+    # instead of reporting a cheerful, misleading all-clear.
+    errors: list[str] = field(default_factory=list)
 
 
 class ApiUplink:

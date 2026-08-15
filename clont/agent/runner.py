@@ -120,6 +120,12 @@ class Agent:
             self._monitoring_collect(provider, period, batch)
         return batch
 
+    @staticmethod
+    def _record_error(batch: Batch, what: str, exc: Exception) -> None:
+        """Log a swallowed collector failure and keep it on the batch."""
+        log.warning("%s failed: %s", what, exc)
+        batch.errors.append(f"{what} failed: {exc}")
+
     def _finops_collect(self, provider: Provider, period: Period, batch: Batch) -> None:
         cost_period = self._cost_period()
         for cls in registry.collectors_for("finops", provider.cloud):
@@ -129,7 +135,7 @@ class Agent:
             try:
                 records = collector.collect(cost_period)
             except Exception as exc:  # noqa: BLE001 - one collector must not kill the loop
-                log.warning("finops collector %s collect failed: %s", cls.__name__, exc)
+                self._record_error(batch, f"finops {cls.__name__} collect", exc)
             else:
                 batch.costs.extend(records)
                 for detector in self._finops_cost_detectors:
@@ -137,7 +143,7 @@ class Agent:
             try:
                 recs = collector.recommendations(period)
             except Exception as exc:  # noqa: BLE001
-                log.warning("finops collector %s recommendations failed: %s", cls.__name__, exc)
+                self._record_error(batch, f"finops {cls.__name__} recommendations", exc)
             else:
                 batch.recommendations.extend(recs)
                 for detector in self._finops_detectors:
@@ -152,7 +158,7 @@ class Agent:
             try:
                 checks = collector.health()
             except Exception as exc:  # noqa: BLE001
-                log.warning("monitoring collector %s health failed: %s", cls.__name__, exc)
+                self._record_error(batch, f"monitoring {cls.__name__} health", exc)
             else:
                 batch.health.extend(checks)
                 for detector in self._monitoring_detectors:
@@ -162,7 +168,7 @@ class Agent:
                 try:
                     points = collector.collect(period)
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("monitoring collector %s collect failed: %s", cls.__name__, exc)
+                    self._record_error(batch, f"monitoring {cls.__name__} collect", exc)
                 else:
                     batch.metrics.extend(points)
                     for detector in self._monitoring_metric_detectors:
@@ -185,11 +191,18 @@ class Agent:
         return delivered
 
     def run_once(self) -> int:
+        """Run a single cycle, returning the number of deliveries."""
+        return self.run_cycle()[1]
+
+    def run_cycle(self) -> tuple[Batch, int]:
         """Run a single collect -> detect -> (ship) -> dispatch cycle.
 
         When an API uplink is configured, the cycle's full batch is shipped to
         the server and any events it returns (server-side forecasts/recommen-
         dations) are dispatched alongside the local ones.
+
+        Returns the cycle's batch (so callers can summarize it) and the number
+        of (event, channel) deliveries that went out.
         """
         batch = self._collect_batch()
         events = list(batch.events)
@@ -204,7 +217,10 @@ class Agent:
             len(events),
             delivered,
         )
-        return delivered
+        # The server's reply rides home on the batch too, so a summary built
+        # from it sees exactly the events that were dispatched.
+        batch.events = events
+        return batch, delivered
 
     def run_forever(self) -> None:
         log.info("agent starting: interval=%ds, providers=%d", self._interval, len(self._providers))

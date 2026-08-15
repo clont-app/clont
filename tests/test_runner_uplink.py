@@ -1,8 +1,12 @@
-"""Agent.run_once uplink wiring: ship the batch, dispatch the server's reply,
-and never let an uplink failure drop the locally-detected events."""
+"""Agent cycle wiring: ship the batch, dispatch the server's reply, never let
+an uplink failure drop the locally-detected events, and keep swallowed
+collector failures visible on the batch."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from clont.agent import runner as runner_mod
 from clont.agent.runner import Agent
 from clont.api.uplink import Batch
 from clont.core.models import Cloud
@@ -74,3 +78,44 @@ def test_uplink_failure_still_dispatches_local_events(monkeypatch):
 
     assert [e.key for e in channel.received] == ["local:1"]
     assert delivered == 1
+
+# --- cycle seam: the batch a summary is built from --------------------------
+
+
+def test_run_cycle_returns_batch_carrying_server_events(monkeypatch):
+    local = _event("local:1")
+    server = _event("server:1", title="from server")
+    agent = Agent([], [_RecordingChannel()], uplink=_FakeUplink(returns=[server]))
+    monkeypatch.setattr(agent, "_collect_batch", lambda: Batch(events=[local]))
+
+    batch, delivered = agent.run_cycle()
+
+    # A summary built from the batch must see exactly what was dispatched.
+    assert {e.key for e in batch.events} == {"local:1", "server:1"}
+    assert delivered == 2
+
+
+def test_collector_failures_are_recorded_on_the_batch(monkeypatch):
+    class _Boom:
+        def __init__(self, *args) -> None: ...
+
+        def collect(self, period):
+            raise RuntimeError("AccessDenied")
+
+        def recommendations(self, period):
+            raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(
+        runner_mod.registry,
+        "collectors_for",
+        lambda kind, cloud: [_Boom] if kind == "finops" else [],
+    )
+    agent = Agent([SimpleNamespace(cloud=Cloud.AWS)], [])
+
+    batch = agent._collect_batch()
+
+    # Swallowed so the loop survives, but not silent: a "0 events" summary
+    # would otherwise read as an all-clear.
+    assert batch.events == []
+    assert len(batch.errors) == 2
+    assert all("AccessDenied" in e and "_Boom" in e for e in batch.errors)
