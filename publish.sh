@@ -2,22 +2,27 @@
 # publish.sh — build and publish the `clont` package to PyPI.
 #
 # Usage:
-#   ./publish.sh <TOKEN>             Build and upload to PyPI (pypi.org)
-#   ./publish.sh --test <TOKEN>      Build and upload to TestPyPI (test.pypi.org)
-#   ./publish.sh --no-build <TOKEN>  Upload the existing dist/ without rebuilding
+#   ./publish.sh                     Build and upload to PyPI (pypi.org)
+#   ./publish.sh --test              Build and upload to TestPyPI (test.pypi.org)
+#   ./publish.sh --no-build          Upload the existing dist/ without rebuilding
+#   ./publish.sh --token-file PATH   Read the API token from PATH
 #
-# <TOKEN> is your API token, e.g. "pypi-AgEI...". The upload username is always
-# "__token__" and is set automatically.
+# The token is read from a FILE, never from argv: command lines are visible to
+# every user on the box via `ps`. Default path is $PYPI_TOKEN_FILE, falling back
+# to /dev/shm/pypi-token (tmpfs). Unlock it before, lock it after:
 #
-# Note: a token passed as a CLI argument is visible to other local processes via
-# `ps` and may land in your shell history. Prefer running this with a leading
-# space (so it is not saved) or via Claude Code's `!` prefix.
+#   /root/.secrets/bin/secret-unlock.sh pypi 5
+#   ./publish.sh
+#   /root/.secrets/bin/secret-lock.sh pypi
+#
+# Build/upload tooling is run through `uv` (uv build / uvx twine), so nothing is
+# installed into the project venv.
 set -euo pipefail
 
 DO_BUILD=1
 REPO_ARGS=()
 REPO_LABEL="PyPI (pypi.org)"
-TOKEN=""
+TOKEN_FILE="${PYPI_TOKEN_FILE:-/dev/shm/pypi-token}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,42 +31,30 @@ while [[ $# -gt 0 ]]; do
       REPO_LABEL="TestPyPI (test.pypi.org)"
       shift ;;
     --no-build) DO_BUILD=0; shift ;;
+    --token-file)
+      TOKEN_FILE="${2:?--token-file needs a path}"; shift 2 ;;
     -h|--help)
-      sed -n '2,14p' "$0" | sed 's/^# \?//'
+      sed -n '2,18p' "$0" | sed 's/^# \?//'
       exit 0 ;;
-    -*) echo "error: unknown option: $1" >&2; exit 2 ;;
-    *)
-      if [[ -n "$TOKEN" ]]; then
-        echo "error: unexpected extra argument: $1" >&2; exit 2
-      fi
-      TOKEN="$1"; shift ;;
+    *) echo "error: unexpected argument: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ -z "$TOKEN" ]]; then
-  echo "error: no API token provided." >&2
-  echo "usage: $0 [--test] [--no-build] <token>" >&2
+cd "$(dirname "$0")"
+
+UV="$(command -v uv || echo /root/.local/bin/uv)"
+[[ -x "$UV" ]] || { echo "error: uv not found (needed to build and upload)." >&2; exit 1; }
+
+if [[ ! -r "$TOKEN_FILE" ]]; then
+  echo "error: no readable token file at ${TOKEN_FILE}." >&2
+  echo "hint: /root/.secrets/bin/secret-unlock.sh pypi 5" >&2
   exit 2
 fi
 
-# Run from the project root (where this script lives) and use the local venv.
-cd "$(dirname "$0")"
-PY="./bin/python"
-if [[ ! -x "$PY" ]]; then
-  echo "error: venv python not found at $PY" >&2; exit 1
-fi
-
-# Make sure the tooling is present.
-"$PY" -m pip show twine >/dev/null 2>&1 || "$PY" -m pip install --quiet twine
 if [[ "$DO_BUILD" -eq 1 ]]; then
-  "$PY" -m pip show build >/dev/null 2>&1 || "$PY" -m pip install --quiet build
-
-  echo ">> building from a clean staging dir"
+  echo ">> building sdist + wheel"
   rm -rf dist
-  STAGE="$(mktemp -d)"
-  trap 'rm -rf "$STAGE"' EXIT
-  cp -r clont README.md LICENSE pyproject.toml "$STAGE"/
-  "$PY" -m build --outdir "$PWD/dist" "$STAGE"
+  "$UV" build --out-dir dist
 fi
 
 if ! compgen -G "dist/*" >/dev/null; then
@@ -70,10 +63,10 @@ if ! compgen -G "dist/*" >/dev/null; then
 fi
 
 echo ">> validating artifacts"
-"$PY" -m twine check dist/*
+"$UV" tool run twine check dist/*
 
 echo ">> uploading to ${REPO_LABEL}"
-TWINE_USERNAME="__token__" TWINE_PASSWORD="$TOKEN" \
-  "$PY" -m twine upload "${REPO_ARGS[@]+"${REPO_ARGS[@]}"}" dist/*
+TWINE_USERNAME="__token__" TWINE_PASSWORD="$(<"$TOKEN_FILE")" \
+  "$UV" tool run twine upload "${REPO_ARGS[@]+"${REPO_ARGS[@]}"}" dist/*
 
 echo ">> done."

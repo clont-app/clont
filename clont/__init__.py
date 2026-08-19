@@ -5,5 +5,5 @@ and emits health/FinOps events to local channels. Every cloud call is a
 Describe/Get/List — the agent never mutates cloud state.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
