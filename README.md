@@ -203,7 +203,7 @@ with the headline number and puts the evidence under it:
     $14,757.00 / year
 
   12 finding(s) across 2 account(s): prod, staging
-  scanned 2026-08-20 11:04 UTC  |  clont 0.2.0  |  4.216s
+  scanned 2026-08-20 11:04 UTC  |  clont 0.2.2  |  4.216s
 
 --------------------------------------------------------------------
  WHERE THE MONEY GOES
