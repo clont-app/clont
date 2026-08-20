@@ -14,15 +14,20 @@ from clont.core.logging import configure, resolve_level, set_level
 from clont.reporting.summary import SummaryFormat, render, summarize
 
 
+# writing to a file usually means sending it to someone, so .txt gets the
+# shareable rendering; stdout stays the terse operator dump
+_BY_SUFFIX = {".json": SummaryFormat.JSON, ".txt": SummaryFormat.REPORT}
+
+
 def _resolve_format(fmt: str | None, output: str) -> SummaryFormat:
     """Explicit `--format` wins; otherwise infer from the output extension."""
     if fmt:
         try:
             return SummaryFormat(fmt.lower())
         except ValueError as exc:
-            raise typer.BadParameter(f"unknown format {fmt!r} (json|text)") from exc
-    if output != "-" and Path(output).suffix.lower() == ".json":
-        return SummaryFormat.JSON
+            raise typer.BadParameter(f"unknown format {fmt!r} (json|text|report)") from exc
+    if output != "-":
+        return _BY_SUFFIX.get(Path(output).suffix.lower(), SummaryFormat.TEXT)
     return SummaryFormat.TEXT
 
 
@@ -60,7 +65,8 @@ def run(
     fmt: str = typer.Option(
         None,
         "--format",
-        help="Summary format: json or text (default: from the output extension).",
+        help="Summary format: json, text or report (default: from the output "
+        "extension - .json is json, .txt is report).",
     ),
     fail_on_critical: bool = typer.Option(
         False,

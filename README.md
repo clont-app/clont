@@ -165,10 +165,18 @@ quickest way to see what clont actually found is a single cycle with a summary:
 
 ```
 clont run --summary -                  # one cycle, print the summary, exit
-clont run --summary scan.json          # ...or write it to a file (JSON)
-clont run --summary scan.txt           # extension picks the format
-clont run --summary out --format json  # ...or set it explicitly
+clont run --summary scan.txt           # shareable report (see below)
+clont run --summary scan.json          # machine-readable
+clont run --summary out --format json  # extension picks the format; this overrides
 ```
+
+Three formats, three audiences:
+
+| Format | From | For |
+|---|---|---|
+| `text` | `-`, any other extension | you, right after the run — terse counts |
+| `report` | `.txt` | the person you send it to |
+| `json` | `.json` | scripts, dashboards |
 
 The summary reports the accounts scanned, how much was collected (metrics,
 costs, recommendations, health checks), events broken down by severity and
@@ -179,6 +187,42 @@ can be told apart from a role that couldn't read anything.
 `--summary` runs exactly one cycle, so events still reach the channels as usual.
 Add `--fail-on-critical` to exit `2` when the cycle produced a critical event,
 which makes the command usable as a CI gate.
+
+### The shareable report
+
+`.txt` gets a report meant to be sent to someone who wasn't there — it leads
+with the headline number and puts the evidence under it:
+
+```
+====================================================================
+ CLOUD WASTE REPORT
+====================================================================
+
+  you're wasting
+    $1,229.75 / month
+    $14,757.00 / year
+
+  12 finding(s) across 2 account(s): prod, staging
+  scanned 2026-08-20 11:04 UTC  |  clont 0.2.0  |  4.216s
+
+--------------------------------------------------------------------
+ WHERE THE MONEY GOES
+--------------------------------------------------------------------
+
+  $412.80/mo   x1    idle_rds (rds)
+                 - db-analytics-old [eu-west-1]  $412.80/mo  0 connections for 21d
+
+  $388.80/mo   x4    idle_nat (ec2)
+                 - nat-0a1b2c3d [eu-west-1]  $97.20/mo  no traffic for 30d
+                 ... and 3 more
+```
+
+Findings are grouped by kind and sorted by money, biggest first, with the top
+resources named under each. Then top spend, health, and any collector errors.
+
+Two things it will not do: sum across currencies, or print an all-clear it
+can't back. If collectors failed, the report says the figure is a floor and
+lists the failures; if nothing was configured, it says that instead.
 
 ## Configuration
 

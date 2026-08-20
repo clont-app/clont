@@ -81,14 +81,43 @@ def test_summary_file_written_and_recap_echoed(agent_for, tmp_path):
     assert "1 account(s): 1 event(s) (0 critical)" in result.output
 
 
-def test_format_inferred_from_extension(agent_for, tmp_path):
+def test_txt_extension_gets_the_shareable_report(agent_for, tmp_path):
     agent_for()
     out = tmp_path / "scan.txt"
 
     result = runner.invoke(app, ["run", "--summary", str(out)])
 
     assert result.exit_code == 0, result.output
+    assert "CLOUD WASTE REPORT" in out.read_text()
+
+
+def test_unknown_extension_falls_back_to_text(agent_for, tmp_path):
+    agent_for()
+    out = tmp_path / "scan.log"
+
+    result = runner.invoke(app, ["run", "--summary", str(out)])
+
+    assert result.exit_code == 0, result.output
     assert out.read_text().startswith("clont scan summary")
+
+
+def test_stdout_stays_the_operator_dump(agent_for):
+    agent_for()
+
+    result = runner.invoke(app, ["run", "--summary", "-"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("clont scan summary")
+
+
+def test_report_format_can_be_asked_for_explicitly(agent_for, tmp_path):
+    agent_for()
+    out = tmp_path / "scan.json"
+
+    result = runner.invoke(app, ["run", "--summary", str(out), "--format", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "CLOUD WASTE REPORT" in out.read_text()
 
 
 def test_explicit_format_overrides_extension(agent_for, tmp_path):

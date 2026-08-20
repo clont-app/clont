@@ -15,7 +15,14 @@ from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.events.models import Event, EventSeverity
 from clont.finops.models import CostRecord, Recommendation
 from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
-from clont.reporting.summary import SummaryFormat, render, render_json, render_text, summarize
+from clont.reporting.summary import (
+    SummaryFormat,
+    render,
+    render_json,
+    render_report,
+    render_text,
+    summarize,
+)
 
 
 def _resource(rid: str = "i-1") -> CloudResource:
@@ -152,3 +159,102 @@ def test_render_dispatches_on_format():
     s = summarize(Batch())
     assert render(s, SummaryFormat.JSON).lstrip().startswith("{")
     assert render(s, SummaryFormat.TEXT).startswith("clont scan summary")
+    assert "CLOUD WASTE REPORT" in render(s, SummaryFormat.REPORT)
+
+
+def _rec(kind: str, rid: str, amount: str, service: str = "ec2") -> Recommendation:
+    return Recommendation(
+        cloud="aws", service=service, resource=_resource(rid), summary=f"{kind} finding",
+        estimated_savings=Money(amount=Decimal(amount)), kind=kind,
+    )
+
+
+def test_findings_group_by_kind_and_sort_by_money():
+    batch = Batch(recommendations=[
+        _rec("waste", "eip-1", "3.60"),
+        _rec("idle_nat", "nat-1", "97.20"),
+        _rec("idle_nat", "nat-2", "97.20"),
+    ])
+    findings = summarize(batch).findings
+
+    assert [(f.kind, f.count, f.amount) for f in findings] == [
+        ("idle_nat", 2, Decimal("194.40")),        # biggest first
+        ("waste", 1, Decimal("3.60")),
+    ]
+
+
+def test_findings_never_group_across_currencies():
+    batch = Batch(recommendations=[
+        Recommendation(cloud="aws", service="ec2", resource=_resource(), summary="idle",
+                       estimated_savings=Money(amount=Decimal("1"), currency="USD"), kind="idle"),
+        Recommendation(cloud="aws", service="ec2", resource=_resource(), summary="idle",
+                       estimated_savings=Money(amount=Decimal("2"), currency="EUR"), kind="idle"),
+    ])
+    findings = summarize(batch).findings
+
+    assert len(findings) == 2
+    assert {(f.currency, f.amount) for f in findings} == {
+        ("USD", Decimal("1")), ("EUR", Decimal("2")),
+    }
+
+
+def test_finding_examples_are_capped_at_the_biggest():
+    batch = Batch(recommendations=[_rec("idle_nat", f"nat-{i}", str(i)) for i in range(1, 8)])
+    finding = summarize(batch).findings[0]
+
+    assert finding.count == 7
+    assert [e.resource_id for e in finding.examples] == ["nat-7", "nat-6", "nat-5"]
+
+
+def test_report_leads_with_monthly_and_annual_money():
+    batch = Batch(recommendations=[_rec("idle_nat", "nat-1", "1229.75")])
+    report = render_report(summarize(batch, accounts=["prod"]))
+
+    assert "you're wasting" in report
+    assert "$1,229.75 / month" in report                 # thousands separator, 2dp
+    assert "$14,757.00 / year" in report                 # x12
+
+
+def test_report_names_the_resources():
+    report = render_report(summarize(Batch(recommendations=[_rec("idle_nat", "nat-0a1b", "97.20")])))
+
+    assert "idle_nat (ec2)" in report
+    assert "nat-0a1b" in report
+    assert "eu-west-1" in report
+
+
+def test_report_truncates_long_finding_lists():
+    batch = Batch(recommendations=[_rec("idle_nat", f"nat-{i}", "10") for i in range(9)])
+
+    assert "... and 6 more" in render_report(summarize(batch))   # 9 total, 3 shown
+
+
+def test_report_flags_partial_scans_next_to_the_number():
+    batch = Batch(recommendations=[_rec("idle_nat", "nat-1", "10")],
+                  errors=["ce:GetCostAndUsage AccessDenied"])
+
+    headline, _, rest = render_report(summarize(batch)).partition("WHERE THE MONEY GOES")
+
+    assert "floor, not a total" in headline              # warning sits above the detail
+    assert "AccessDenied" in rest
+
+
+def test_report_does_not_claim_all_clear_when_the_scan_failed():
+    report = render_report(summarize(Batch(errors=["boom"])))
+
+    assert "did not complete" in report
+    assert "no recoverable waste" not in report
+
+
+def test_report_handles_an_empty_batch():
+    report = render_report(summarize(Batch(), accounts=["prod"]))
+
+    assert "no recoverable waste found" in report
+    assert "WHERE THE MONEY GOES" not in report          # no empty section headers
+
+
+def test_report_says_so_when_nothing_was_configured():
+    report = render_report(summarize(Batch()))
+
+    assert "no accounts configured" in report
+    assert "no recoverable waste" not in report
