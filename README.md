@@ -18,7 +18,8 @@ events through the pipeline below, each attributed to its account alias and
 region:
 
 - **EC2** — instance reachability (`DescribeInstanceStatus`), plus CPU / network
-  metrics via CloudWatch `GetMetricData`.
+  metrics via CloudWatch `GetMetricData` (billed per metric, so off until you set
+  `monitoring.metrics.enabled`).
 - **RDS** — DB instance status (storage-full / failed / incompatible states).
 - **ElastiCache** — cache cluster status.
 - **EKS** — cluster status and reported `health.issues`.
@@ -50,9 +51,11 @@ region:
   EBS *filesystem* fill needs the CloudWatch agent's guest metrics and is not covered
   (clont reads only what AWS exposes without an agent).
 
-**FinOps — spend** — account-wide spend via Cost Explorer (`GetCostAndUsage`),
-surfaced as a daily spend digest (`info`) plus a spend-spike alert (`warn`) when a
-service's latest-day cost jumps beyond a configurable % over its baseline. The
+**FinOps — spend** — account-wide daily spend read from the account's **Cost and
+Usage Report** in S3 (free; Cost Explorer bills $0.01 per request and the daemon
+polls every cycle), surfaced as a daily spend digest (`info`) plus a spend-spike
+alert (`warn`) when a service's latest-day cost jumps beyond a configurable % over
+its baseline. The
 baseline is the median of prior **same-weekday** spend, so normal weekly cycles
 (quiet weekends, busy Mondays) don't trip false spikes.
 
@@ -70,18 +73,27 @@ ballpark monthly dollar figure and emitted through the same event pipeline:
   Scaling groups, Lambda functions, ECS services and RDS databases, picking the
   best savings option. Each resource type degrades independently when its
   Compute Optimizer opt-in is missing.
-- **Commitment purchases** via Cost Explorer — Compute Savings Plans and Reserved
-  Instances (EC2 / RDS / ElastiCache / Redshift / OpenSearch), reported at
-  conservative one-year, no-upfront terms.
-- **Commitment utilization & coverage** via Cost Explorer — Savings Plans / RIs
-  you already hold that are under-used (committed spend going to waste) or
-  under-covering (eligible on-demand a commitment would discount).
+- **Commitment purchases** — Compute Savings Plans and EC2 Reserved Instances,
+  reported at conservative one-year, no-upfront terms.
+- **Commitment utilization & coverage** — Savings Plans / RIs you already hold
+  that are under-used (committed spend going to waste) or under-covering
+  (eligible on-demand a commitment would discount).
+
+  Both are derived from what the account actually runs (`DescribeInstances`,
+  `DescribeReservedInstances`, `DescribeSavingsPlans` — all free) rather than
+  Cost Explorer's billed recommendation APIs, which cost 10 requests a cycle.
+  The trade-off: it's a snapshot of current usage, not a 30-day average, so the
+  figures won't match the console. Only 70% of uncovered spend is ever advised
+  as a commitment, so a momentary spike can't become a year-long one.
 - **Unattached EBS volumes** — `available` volumes still being billed.
 - **Unassociated Elastic IPs** — allocated public IPv4 not attached to anything.
 - **gp2 → gp3 migration** — in-use gp2 volumes, with the storage-rate saving.
-- **Idle EC2 / RDS** — instances or DBs with near-zero utilization (CPU/network,
-  or connections/CPU) over a configurable CloudWatch window.
-- **Idle NAT gateways** — ~zero bytes processed over the window.
+- **Idle resources** — EC2 instances, Auto Scaling groups, EBS volumes, ECS
+  services, RDS databases and NAT gateways that Compute Optimizer reports as
+  idle/unattached/unused, each with its monthly saving. Free, and it replaces the
+  metric-based detectors that could only report the evidence — those remain as an
+  opt-in fallback (`finops.allow_cloudwatch_metrics`) for accounts not enrolled in
+  Compute Optimizer.
 - **Idle load balancers** — ALB/NLB with no registered targets.
 - **Stale EBS snapshots** — orphaned (source volume deleted) or older than a
   configurable age.
@@ -98,7 +110,10 @@ all configurable (see `finops.*` below).
 - **Multi-account** — monitor any number of AWS accounts, keyed by alias; a
   failed account is skipped, not fatal.
 - **Read-only by construction** — every call is a `Describe*`/`Get*`; clont never
-  writes to your cloud. See [docs/iam.md](docs/iam.md).
+  writes to your cloud. See [docs/iam.md](docs/iam.md), which also lists the two
+  billed grants (`ce:GetCostAndUsage`, `cloudwatch:GetMetricData`) clont leaves
+  out of the policy on purpose, and what each costs if you opt in. The default
+  configuration makes no billed API call at all.
 - **Refreshable assume-role credentials** — the daemon survives credential
   expiry without restarts.
 - **Channels** — log (always on) plus optional Slack, Discord, and Telegram, each
@@ -263,12 +278,28 @@ accounts never collide. Add a second account by adding another keyed entry.
 - `role_arn` (str, **required**) — read-only IAM role clont assumes (via IRSA on EKS).
 - `regions` (list of str, default `[]`) — regions to query.
 - `external_id` (str, default `null`) — optional STS external id for the assume-role.
+- `cur` (map, default `null`) — the account's Cost and Usage Report in S3, the
+  free spend source: `bucket`, `report_name`, `prefix`, `region` (default
+  `us-east-1`), `refresh_minutes` (default `60`) and `include_linked` (default
+  `false`, keep only this account's rows out of a payer report). Legacy CUR
+  (gzip csv) only — setup in [docs/iam.md](docs/iam.md). Without it, and without
+  `finops.allow_cost_explorer`, there is no spend data.
 
 If one account's role can't be assumed at startup, clont logs a warning and
 keeps monitoring the rest; it aborts only if no account authenticates.
 
-**`finops`** — Cost Explorer spend-event thresholds
+**`finops`** — spend-event thresholds
 
+- `allow_cost_explorer` (bool, default `false`) — read spend from
+  `ce:GetCostAndUsage` instead of the CUR. Billed: $0.01 per request, ~$0.30/mo
+  per account at the default daily cadence. Off means clont makes no paid Cost
+  Explorer call at all.
+- `collect_interval_seconds` (int, default `86400`) — how often spend is
+  actually fetched, however fast `interval_seconds` ticks. The cached records
+  still reach the detectors every cycle, so lowering this buys freshness, not
+  coverage; `clont run --summary` always forces a full refresh.
+- `recommend_interval_seconds` (int, default `3600`) — the same, for
+  recommendations.
 - `spend_baseline_days` (int, default `28`) — trailing window the spike baseline
   is built from. ~4 weeks gives several same-weekday samples; the baseline is the
   median of prior same-weekday spend (falls back to the flat mean on short
@@ -279,13 +310,19 @@ keeps monitoring the rest; it aborts only if no account authenticates.
   spend is below this, so trivial amounts don't trip the spike alert.
 - `budgets` (list, default `[]`) — monthly spend ceilings. Each entry has
   `monthly_limit` (required), `account` (alias, or `"*"` for every account,
-  default `"*"`), optional `service` (a Cost Explorer service name; omit for a
-  whole-account budget), and `currency` (default `USD`).
+  default `"*"`), optional `service` (the name as it appears in the spend source
+  — CUR `product/ProductName`; omit for a whole-account budget), and `currency` (default `USD`).
 - `budget_warn_pct` (float, default `80`) — emit a `warn` when the month-end
   forecast reaches this percentage of a budget (a `critical` fires once spend has
   actually breached it).
 - `forecast_alpha` (float, default `0.5`) — EWMA recency weight for the
   daily-rate month-end forecast (higher = more weight on recent days).
+- `allow_cloudwatch_metrics` (bool, default `false`) — fall back to the
+  CloudWatch idle detectors (EC2 / RDS / NAT) instead of relying on Compute
+  Optimizer. Billed: `GetMetricData` costs $0.01 per thousand *metrics*, and these
+  ask for one per resource per cycle, so the bill grows with the fleet. Only worth
+  it on an account not enrolled in Compute Optimizer. The three settings below
+  apply to that fallback.
 - `idle_cpu_pct` (float, default `5`) — average CPU % below which an EC2/RDS
   resource counts as idle.
 - `idle_lookback_days` (int, default `14`) — trailing window the idle averages
@@ -306,6 +343,15 @@ keeps monitoring the rest; it aborts only if no account authenticates.
 
 **`monitoring`** — metric-anomaly detection
 
+- `metrics` (map) — the CloudWatch metric collection everything in this section
+  runs on, and the only paid call left: `enabled` (bool, default `false`),
+  `services` (list, default `[]` = every collector that has metrics), `metrics`
+  (list, default `[]` = whatever the collectors ask for), `period_seconds` (int,
+  default `null` = the collectors' own granularity) and `max_metrics_per_cycle`
+  (int, default `1000`, ≈$0.01 per cycle) and `collect_every_seconds` (int,
+  default `null` = read every cycle) — `max_metrics_per_cycle` caps one cycle's
+  spend, `collect_every_seconds` caps the day's. Disabled, the detectors below
+  have no input and stay inert — clont says so once at startup.
 - `anomaly_sigma` (float, default `3`) — emit a `warn` anomaly when the latest
   metric sample is more than this many standard deviations from its baseline.
 - `anomaly_min_points` (int, default `6`) — minimum baseline samples a series
@@ -336,6 +382,24 @@ keeps monitoring the rest; it aborts only if no account authenticates.
   value re-notifies a still-open one that often.
 
 `min_severity` accepts `info`, `warn`, or `critical`.
+
+## Savings figures
+
+Every dollar amount comes from `clont/finops/aws/prices.json` — public on-demand
+list prices, generated offline from the AWS Price List bulk API. Nothing is
+fetched at runtime and no IAM grant is involved.
+
+They are estimates, and clont says which ones. One rate per instance family at
+`.large`, scaled by size; commitment discounts and provisioned IOPS aren't
+modelled. A resource whose region isn't in the table is priced at us-east-1
+rates and marked approximate, so the report reads "estimated at us-east-1 rates"
+instead of passing a guess off as a quote.
+
+Regenerate at release time — prices drift:
+
+```sh
+python tools/gen_prices.py          # ~15 min, no credentials needed
+```
 
 ## Status
 

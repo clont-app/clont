@@ -87,7 +87,9 @@ def run(
         summary_format = _resolve_format(fmt, summary)   # validate before collecting
         started = time.monotonic()
         generated_at = datetime.now(UTC)
-        batch, _delivered = agent.run_cycle()
+        # the ad-hoc scan is the one caller that must see today's numbers, so it
+        # pays for a full refresh instead of reusing the daemon's cadence cache
+        batch, _delivered = agent.run_cycle(force=True)
         report = summarize(
             batch,
             accounts=list(settings.aws),

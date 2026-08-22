@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import time
 from datetime import date, timedelta
+from typing import Callable
 
+from clont.agent.cadence import (
+    DEFAULT_COLLECT_SECONDS,
+    DEFAULT_RECOMMEND_SECONDS,
+    Due,
+    ttl_for,
+)
 from clont.api.uplink import ApiUplink, Batch
 from clont.channels.base import Channel
 from clont.core import registry
@@ -24,9 +31,32 @@ from clont.events.detectors import (
 )
 from clont.events.models import Event
 from clont.finops.base import FinOpsTuning
+from clont.monitoring.base import MetricsPolicy
 from clont.providers.base import Provider
 
 log = get_logger("clont.agent")
+
+
+def _key(rec) -> tuple:
+    return (rec.cloud, rec.service, rec.kind, rec.resource.resource_id, rec.resource.alias)
+
+
+def _dedupe(recs: list, seen_in: list) -> list:
+    """Drop recs already produced this cycle for the same resource.
+
+    Two collectors can legitimately reach the same conclusion — Compute Optimizer
+    and the CloudWatch fallback both report idle EC2 — and without this the
+    operator gets the finding twice.
+    """
+    seen = {_key(r) for r in seen_in}
+    out = []
+    for rec in recs:
+        k = _key(rec)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(rec)
+    return out
 
 
 class Agent:
@@ -60,12 +90,25 @@ class Agent:
         cpu_credit_min_balance: float = 20.0,
         swap_usage_max_mb: float = 50.0,
         disk_full_forecast_days: float = 14.0,
+        metrics: MetricsPolicy | None = None,
+        metrics_interval_seconds: int | None = None,
+        collect_interval_seconds: int = DEFAULT_COLLECT_SECONDS,
+        recommend_interval_seconds: int = DEFAULT_RECOMMEND_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
         uplink: ApiUplink | None = None,
     ) -> None:
         self._providers = providers
         self._channels = channels
         self._uplink = uplink
+        # None = CloudWatch metric collection is off, so the metric detectors
+        # below never see a point. Health checks are unaffected (they're free).
+        self._metrics = metrics
         self._interval = interval_seconds
+        # collectors are polled far less often than the loop ticks; see cadence.py
+        self._due = Due(clock)
+        self._collect_interval = collect_interval_seconds
+        self._recommend_interval = recommend_interval_seconds
+        self._metrics_interval = metrics_interval_seconds
         self._lookback = lookback_days
         self._spend_baseline_days = spend_baseline_days
         self._finops_tuning = finops_tuning or FinOpsTuning()
@@ -93,8 +136,8 @@ class Agent:
         return Period(start=today - timedelta(days=self._lookback), end=today)
 
     def _cost_period(self) -> Period:
-        # End at *yesterday*, the last complete day: today's Cost Explorer data
-        # is partial/estimated and would under-report the digest and mask spikes.
+        # End at *yesterday*, the last complete day: today's billing data is
+        # partial/estimated and would under-report the digest and mask spikes.
         # Window is `spend_baseline_days` prior days + that anchor day, but always
         # reaches back to the 1st so the same single pull covers the full
         # month-to-date the forecast + budget detectors need (late in the month
@@ -106,7 +149,7 @@ class Agent:
     def collect_events(self) -> list[Event]:
         return self._collect_batch().events
 
-    def _collect_batch(self) -> Batch:
+    def _collect_batch(self, force: bool = False) -> Batch:
         """Run every collector once per provider, gathering the cycle's raw data
         and the events its detectors fire into a single `Batch`.
 
@@ -115,9 +158,11 @@ class Agent:
         """
         period = self._period()
         batch = Batch()
+        if self._metrics is not None:
+            self._metrics.reset()  # fresh CloudWatch budget for this cycle
         for provider in self._providers:
-            self._finops_collect(provider, period, batch)
-            self._monitoring_collect(provider, period, batch)
+            self._finops_collect(provider, period, batch, force)
+            self._monitoring_collect(provider, period, batch, force)
         return batch
 
     @staticmethod
@@ -126,32 +171,52 @@ class Agent:
         log.warning("%s failed: %s", what, exc)
         batch.errors.append(f"{what} failed: {exc}")
 
-    def _finops_collect(self, provider: Provider, period: Period, batch: Batch) -> None:
+    def _finops_collect(
+        self, provider: Provider, period: Period, batch: Batch, force: bool = False
+    ) -> None:
         cost_period = self._cost_period()
         for cls in registry.collectors_for("finops", provider.cloud):
             collector = cls(provider, self._finops_tuning)
             # Spend (cost records -> digest + spike) and recommendations are
             # collected independently so one failing can't drop the other.
+            cost_key = (provider.alias, cls.__name__, "collect")
             try:
-                records = collector.collect(cost_period)
+                records = self._due.get_or_reuse(
+                    cost_key,
+                    ttl_for(cls, "collect_every_seconds", self._collect_interval),
+                    lambda: collector.collect(cost_period),
+                    force=force,
+                )
             except Exception as exc:  # noqa: BLE001 - one collector must not kill the loop
                 self._record_error(batch, f"finops {cls.__name__} collect", exc)
-            else:
+                # one throttled call must not blank the spend for the rest of the day
+                records = self._due.last(cost_key)
+            if records is not None:
                 batch.costs.extend(records)
                 for detector in self._finops_cost_detectors:
                     batch.events.extend(detector.detect(records))
+            rec_key = (provider.alias, cls.__name__, "recommendations")
             try:
-                recs = collector.recommendations(period)
+                recs = self._due.get_or_reuse(
+                    rec_key,
+                    ttl_for(cls, "recommend_every_seconds", self._recommend_interval),
+                    lambda: collector.recommendations(period),
+                    force=force,
+                )
             except Exception as exc:  # noqa: BLE001
                 self._record_error(batch, f"finops {cls.__name__} recommendations", exc)
-            else:
+                recs = self._due.last(rec_key)
+            if recs is not None:
+                recs = _dedupe(recs, batch.recommendations)
                 batch.recommendations.extend(recs)
                 for detector in self._finops_detectors:
                     batch.events.extend(detector.detect(recs))
 
-    def _monitoring_collect(self, provider: Provider, period: Period, batch: Batch) -> None:
+    def _monitoring_collect(
+        self, provider: Provider, period: Period, batch: Batch, force: bool = False
+    ) -> None:
         for cls in registry.collectors_for("monitoring", provider.cloud):
-            collector = cls(provider)
+            collector = cls(provider, self._metrics)
             # Health checks and metric-anomaly detection are independent: a
             # collector may do one, the other, or both, and one failing must not
             # drop the other.
@@ -163,13 +228,31 @@ class Agent:
                 batch.health.extend(checks)
                 for detector in self._monitoring_detectors:
                     batch.events.extend(detector.detect(checks))
-            # Only some collectors expose metric series (e.g. EC2 CPU/network).
-            if hasattr(collector, "collect"):
+            # Only some collectors expose metric series (e.g. EC2 CPU/network),
+            # and those cost money — skipped entirely unless the operator opted
+            # in and allowlisted this service.
+            if (
+                self._metrics is not None
+                and self._metrics.allows(collector.service)
+                and hasattr(collector, "collect")
+            ):
+                # a reused series costs nothing, so it must not spend the cycle's
+                # metric budget either - that only moves on a real refresh
+                key = (provider.alias, cls.__name__, "metrics")
                 try:
-                    points = collector.collect(period)
+                    if self._metrics_interval is None:
+                        points = collector.collect(period)  # unthrottled, as before
+                    else:
+                        points = self._due.get_or_reuse(
+                            key,
+                            self._metrics_interval,
+                            lambda: collector.collect(period),
+                            force=force,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     self._record_error(batch, f"monitoring {cls.__name__} collect", exc)
-                else:
+                    points = None if self._metrics_interval is None else self._due.last(key)
+                if points is not None:
                     batch.metrics.extend(points)
                     for detector in self._monitoring_metric_detectors:
                         batch.events.extend(detector.detect(points))
@@ -190,21 +273,24 @@ class Agent:
                     log.warning("channel %s failed: %s", channel.name, exc)
         return delivered
 
-    def run_once(self) -> int:
+    def run_once(self, force: bool = False) -> int:
         """Run a single cycle, returning the number of deliveries."""
-        return self.run_cycle()[1]
+        return self.run_cycle(force=force)[1]
 
-    def run_cycle(self) -> tuple[Batch, int]:
+    def run_cycle(self, force: bool = False) -> tuple[Batch, int]:
         """Run a single collect -> detect -> (ship) -> dispatch cycle.
 
         When an API uplink is configured, the cycle's full batch is shipped to
         the server and any events it returns (server-side forecasts/recommen-
         dations) are dispatched alongside the local ones.
 
+        `force` bypasses the collector cadence cache — the ad-hoc scan must see
+        today's numbers, the daemon loop must not pay for them every cycle.
+
         Returns the cycle's batch (so callers can summarize it) and the number
         of (event, channel) deliveries that went out.
         """
-        batch = self._collect_batch()
+        batch = self._collect_batch(force)
         events = list(batch.events)
         if self._uplink is not None:
             try:

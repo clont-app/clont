@@ -9,10 +9,19 @@ log_level: info              # daemon log verbosity: debug|info|warning|error|cr
 # Read-only access to one or more AWS accounts, key is alias
 # (prod/staging/...). The alias is shown in notifications and attributes events.
 # On EKS the pod's base identity comes from IRSA; clont assumes each role.
+# `cur` points at the account's Cost and Usage Report in S3 — the free spend
+# source. Without it there is no spend data (see docs/iam.md).
 aws:
   prod:
     role_arn: arn:aws:iam::111111111111:role/clont-readonly
     regions: [us-east-1, eu-west-1]
+    cur:
+      bucket: my-billing-bucket    # bucket the report is delivered to
+      report_name: clont-cur       # report name = its folder in the bucket
+      prefix: reports              # s3 prefix given when the report was created
+      region: us-east-1            # bucket region
+      refresh_minutes: 60          # AWS rewrites it a few times a day
+      include_linked: false        # true = payer report, count linked accounts too
   staging:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]
@@ -24,7 +33,21 @@ aws:
 # commitment utilization/coverage advice; nonprod_tags/required_tags drive the
 # off-hours and tag-hygiene recommendations.
 finops:
-  spend_baseline_days: 28        # trailing window (~4 wks); spike baseline = same-weekday median
+  allow_cost_explorer: false     # true = spend via ce:GetCostAndUsage, billed $0.01 per cycle
+  # Idle detection comes from Compute Optimizer (free, and it carries a savings
+  # figure). Turn this on only on an account not enrolled in CO: it falls back to
+  # CloudWatch, which bills per metric — one per resource per cycle.
+  allow_cloudwatch_metrics: false
+
+  # How often collectors are actually called, however fast interval_seconds
+  # ticks. Spend lands once a day upstream, so polling every cycle spends 288
+  # requests on one day of data. A cached result is still fed to the detectors
+  # every cycle, so lowering these buys freshness, not coverage — and
+  # `clont run --summary` forces a full refresh regardless.
+  collect_interval_seconds: 86400   # spend
+  recommend_interval_seconds: 3600  # recommendations
+
+  spend_baseline_days: 28       # trailing window (~4 wks); spike baseline = same-weekday median
   spend_spike_pct: 50            # WARN when the latest day exceeds baseline by this %
   spend_min_dollars: 1           # ignore services below this latest-day spend
 
@@ -35,8 +58,8 @@ finops:
     - account: prod
       monthly_limit: 5000        # whole-account budget (omit `service`)
     - account: prod
-      service: Amazon Elastic Compute Cloud - Compute
-      monthly_limit: 2000        # per-service budget (Cost Explorer service name)
+      service: Amazon Elastic Compute Cloud
+      monthly_limit: 2000        # per-service budget (name as it appears in the CUR)
 
   idle_cpu_pct: 5                # avg CPU % below which a resource is idle
   idle_lookback_days: 14         # trailing window the idle averages span
@@ -57,6 +80,20 @@ finops:
 # Monitoring. Metric-anomaly detection (baseline + deviation) plus Tier-1 default
 # rules: disk-full forecast, low free storage, CPU-credit depletion, swap pressure.
 monitoring:
+  # The metric series those detectors run on: CloudWatch GetMetricData, billed
+  # $0.01 per thousand metrics requested. Off by default, which leaves anomaly,
+  # threshold and disk-full forecasting inert — turn it on to accept the bill.
+  metrics:
+    enabled: false
+    services: []                # empty = every collector that has metrics
+    metrics: []                 # empty = whatever the collectors ask for
+    period_seconds: 3600        # override the collectors' own granularity
+    max_metrics_per_cycle: 1000 # hard ceiling; ~$0.01 per cycle at 1000
+    # null = read every cycle. max_metrics_per_cycle caps the per-cycle spend,
+    # this caps the day: at 3600 you pay 24 reads instead of 288. The cost is
+    # latency — the detectors re-see an unchanged series until the next refresh.
+    collect_every_seconds: null
+
   anomaly_sigma: 3              # WARN when the latest sample is this many σ off baseline
   anomaly_min_points: 6         # min baseline samples before a series can flag
   free_storage_min_pct: 10     # WARN when RDS free storage drops below this %

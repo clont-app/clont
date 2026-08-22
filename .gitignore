@@ -118,3 +118,5 @@ logs/
 # ─────────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+# working plan notes, not shipped
+docs/plans/
