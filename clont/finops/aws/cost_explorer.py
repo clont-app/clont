@@ -2,6 +2,11 @@
 
 Cost Explorer is a global endpoint (pinned to us-east-1), so this collector is
 account-level and does not iterate regions.
+
+**Billed, so opt-in.** $0.01 per request, once per cycle — ~$86/mo per account at
+the default 300s interval, whatever the fleet size. The CUR collector reads the
+same numbers out of S3 for free, so this one stays dormant unless the operator
+sets `finops.allow_cost_explorer: true` and accepts the charge.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from datetime import date, timedelta
 
 from clont.core.models import Cloud, Money, Period
 from clont.core.registry import register
+from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
 from clont.providers.aws.parsing import _CEGroup
 from clont.providers.base import Provider
@@ -22,10 +28,14 @@ class CostExplorerCollector:
     cloud = Cloud.AWS
     service = "cost_explorer"
 
-    def __init__(self, provider: Provider, tuning=None) -> None:
+    def __init__(self, provider: Provider, tuning: FinOpsTuning | None = None) -> None:
         self._provider = provider
+        self._allowed = (tuning or FinOpsTuning()).allow_cost_explorer
 
     def collect(self, period: Period) -> list[CostRecord]:
+        if not self._allowed:
+            return []
+
         ce = self._provider.client("ce", "us-east-1")
 
         # Our Period is inclusive [start, end]; Cost Explorer's End is

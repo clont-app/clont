@@ -16,6 +16,10 @@ from botocore.stub import Stubber
 
 from clont.core.models import Period
 from clont.finops.aws.cost_explorer import CostExplorerCollector
+from clont.finops.base import FinOpsTuning
+
+# the collector is dormant unless the operator accepts the per-request charge
+BILLED = FinOpsTuning(allow_cost_explorer=True)
 
 PERIOD = Period(start=date(2024, 1, 1), end=date(2024, 1, 1))
 # Inclusive [1 Jan, 1 Jan] -> CE exclusive End is the next day.
@@ -88,7 +92,7 @@ def test_collect_paginates_and_maps_records(ce_client):
         "get_cost_and_usage", page2, {**_BASE_PARAMS, "NextPageToken": "page2"}
     )
 
-    records = CostExplorerCollector(_FakeProvider(client, alias="staging")).collect(PERIOD)
+    records = CostExplorerCollector(_FakeProvider(client, alias="staging"), BILLED).collect(PERIOD)
 
     assert [(r.service, r.cost.amount, r.cost.currency) for r in records] == [
         ("Amazon EC2", Decimal("12.34"), "USD"),
@@ -121,7 +125,7 @@ def test_collect_stamps_each_record_with_its_own_day(ce_client):
     }
     stubber.add_response("get_cost_and_usage", resp, params)
 
-    records = CostExplorerCollector(_FakeProvider(client)).collect(multi_day)
+    records = CostExplorerCollector(_FakeProvider(client), BILLED).collect(multi_day)
 
     # One record per (service, day), each stamped with its own single-day period.
     assert [(r.period.start, r.period.end, r.cost.amount) for r in records] == [
@@ -139,5 +143,13 @@ def test_collect_handles_empty_result(ce_client):
         _BASE_PARAMS,
     )
 
-    records = CostExplorerCollector(_FakeProvider(client)).collect(PERIOD)
+    records = CostExplorerCollector(_FakeProvider(client), BILLED).collect(PERIOD)
     assert records == []
+
+
+def test_collector_is_dormant_unless_allowed(ce_client):
+    client, _ = ce_client  # no stubbed response: any call would raise
+
+    # default tuning = no opt-in, so the billed call is never made
+    assert CostExplorerCollector(_FakeProvider(client)).collect(PERIOD) == []
+    assert CostExplorerCollector(_FakeProvider(client), FinOpsTuning()).collect(PERIOD) == []

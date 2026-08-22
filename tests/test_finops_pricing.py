@@ -92,3 +92,98 @@ def test_cloudresource_typing_kept_importable():
     # Sanity: the stubs' return types are importable value objects.
     r = CloudResource(Cloud.AWS, "s3", "my-bucket")
     assert r.resource_id == "my-bucket"
+
+
+# --- ec2 instance rates -----------------------------------------------------
+
+
+def test_instance_hourly_known_family_scales_by_size():
+    assert pricing.instance_hourly("m5.large") == Decimal("0.096")
+    assert pricing.instance_hourly("m5.4xlarge") == Decimal("0.096") * 8
+    assert pricing.instance_hourly("m5.medium") == Decimal("0.096") / 2
+
+
+def test_instance_hourly_unknown_family_falls_back():
+    # A family we've never priced still costs something, scaled by its size.
+    assert pricing.instance_hourly("zz9.2xlarge") == pricing._FAMILY_DEFAULT_HOURLY * 4
+
+
+def test_instance_hourly_never_returns_zero():
+    # A zero here would silently erase an instance from the uncovered-spend total.
+    for itype in ("m5.large", "zz9.mystery", "garbage", "", "c5"):
+        assert pricing.instance_hourly(itype) > 0
+
+
+def test_commitment_helpers_under_commit():
+    hourly = Decimal("10")
+    assert pricing.commitment_hourly(hourly) == hourly * pricing.COMMIT_SAFETY
+    saving = pricing.commitment_monthly_saving(hourly, pricing.SP_DISCOUNT_PCT)
+    assert saving == hourly * pricing.COMMIT_SAFETY * pricing.SP_DISCOUNT_PCT * Decimal("730")
+    assert saving < hourly * pricing.HOURS_PER_MONTH
+
+
+def test_commitment_discounts_are_conservative():
+    assert Decimal(0) < pricing.SP_DISCOUNT_PCT < pricing.RI_DISCOUNT_PCT < Decimal("0.5")
+    assert Decimal(0) < pricing.COMMIT_SAFETY < Decimal(1)
+
+
+# --- the region axis --------------------------------------------------------
+
+
+def test_every_region_in_the_table_resolves():
+    # a region present but empty would silently price everything at us-east-1
+    for region in pricing.regions():
+        quote = pricing.ebs_quote("gp3", 100, region)
+        assert quote.region == region, f"{region} fell back"
+        assert not quote.approximate
+        assert quote.amount > 0
+
+
+def test_a_region_we_price_differs_from_virginia_somewhere():
+    # the whole point of the table: sao paulo is not northern virginia
+    if "sa-east-1" not in pricing.regions():
+        pytest.skip("sa-east-1 not in the table")
+    assert pricing.ebs_quote("gp3", 100, "sa-east-1").amount != pricing.ebs_quote(
+        "gp3", 100, "us-east-1"
+    ).amount
+
+
+def test_unknown_region_falls_back_and_says_so():
+    quote = pricing.instance_quote("m5.large", "mars-west-1")
+    assert quote.region == pricing.BASE_REGION
+    assert quote.approximate
+    assert quote.amount == pricing.instance_quote("m5.large", pricing.BASE_REGION).amount
+
+
+def test_no_region_at_all_is_also_approximate():
+    # the old callers pass nothing; the number is a us-east-1 guess, not a quote
+    assert pricing.nat_gateway_quote().approximate
+    assert pricing.nat_gateway_quote(pricing.BASE_REGION).approximate is False
+
+
+def test_an_unpriced_instance_family_is_marked_approximate():
+    known = pricing.instance_quote("m5.large", pricing.BASE_REGION)
+    assert not known.approximate
+    assert pricing.instance_quote("zz9.large", pricing.BASE_REGION).approximate
+
+
+def test_no_rate_in_the_table_is_zero_or_negative():
+    # a zero erases the resource from every savings total without an error
+    for region in pricing.regions():
+        row = pricing._REGIONS[region]
+        for key, value in row.items():
+            rates = value.values() if isinstance(value, dict) else [value]
+            for rate in rates:
+                assert Decimal(rate) > 0, f"{region}/{key} = {rate}"
+
+
+def test_the_table_carries_provenance():
+    assert pricing.GENERATED_AT.endswith("Z")
+    assert pricing.BASE_REGION in pricing.regions()
+
+
+def test_spot_check_published_us_east_1_rates():
+    # published on-demand list prices; if these drift the table is stale
+    assert pricing.ebs_quote("gp3", 1, "us-east-1").amount == Decimal("0.08")
+    assert pricing.instance_quote("m5.large", "us-east-1").amount == Decimal("0.096")
+    assert pricing.nat_gateway_quote("us-east-1").amount == Decimal("0.045") * Decimal("730")

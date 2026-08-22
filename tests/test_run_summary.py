@@ -36,8 +36,9 @@ class _FakeAgent:
         self.cycles = 0
         self.forever = 0
 
-    def run_cycle(self) -> tuple[Batch, int]:
+    def run_cycle(self, force: bool = False) -> tuple[Batch, int]:
         self.cycles += 1
+        self.forced = force
         return self._batch, 0
 
     def run_once(self) -> int:

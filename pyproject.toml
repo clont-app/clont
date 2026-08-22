@@ -30,7 +30,7 @@ clont = "clont.cli.app:app"
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "moto[ec2,sts]>=5",
+    "moto[ec2,s3,sts]>=5",
 ]
 
 [tool.pytest.ini_options]

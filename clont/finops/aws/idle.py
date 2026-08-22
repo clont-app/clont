@@ -9,11 +9,15 @@ evidence instead.
 The CPU threshold and lookback window come from `FinOpsTuning` (operator config);
 the network guard stays a fixed backstop. `idle_rds` reuses this machinery with
 AWS/RDS metrics.
+
+Off by default: `GetMetricData` bills per metric requested, and Compute Optimizer
+answers the same question for free (see `compute_optimizer.py`). This stays as an
+opt-in fallback for accounts not enrolled in CO — set
+`finops.allow_cloudwatch_metrics`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -21,6 +25,7 @@ from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
+from clont.providers.aws.metrics import metric_query, metric_values, run_metric_queries
 from clont.providers.aws.regions import for_each_region
 from clont.providers.base import Provider
 
@@ -29,14 +34,8 @@ _PERIOD = 86400              # 1-day granularity (averaged across the window)
 # is the real signal; this just keeps a busy-but-low-CPU box (e.g. a pure I/O
 # mover) from being called idle. Deliberately lenient.
 _NET_GUARD_BYTES = 5_000_000
-_MAX_QUERIES = 500
 _METRICS = ("CPUUtilization", "NetworkIn", "NetworkOut")
 _KIND = "idle"
-
-
-def _chunks[T](items: list[T], size: int) -> Iterator[list[T]]:
-    for i in range(0, len(items), size):
-        yield items[i : i + size]
 
 
 def _mean(values: list[float]) -> float | None:
@@ -47,6 +46,8 @@ def _mean(values: list[float]) -> float | None:
 class IdleCollector:
     cloud = Cloud.AWS
     service = "idle"
+    # 14-day averages - nothing moves inside a day
+    recommend_every_seconds = 86400
 
     def __init__(self, provider: Provider, tuning: FinOpsTuning | None = None) -> None:
         self._provider = provider
@@ -56,6 +57,8 @@ class IdleCollector:
         return []
 
     def recommendations(self, period: Period) -> list[Recommendation]:
+        if not self._tuning.allow_cloudwatch_metrics:
+            return []  # compute optimizer covers this for free
         return for_each_region(self._provider, self._region, what="idle ec2")
 
     def _region(self, region: str) -> list[Recommendation]:
@@ -88,35 +91,15 @@ class IdleCollector:
         ):
             qid = f"q{n}"
             id_map[qid] = (iid, metric)
-            queries.append({
-                "Id": qid,
-                "MetricStat": {
-                    "Metric": {
-                        "Namespace": "AWS/EC2",
-                        "MetricName": metric,
-                        "Dimensions": [{"Name": "InstanceId", "Value": iid}],
-                    },
-                    "Period": _PERIOD,
-                    "Stat": "Average",
-                },
-                "ReturnData": True,
-            })
+            queries.append(
+                metric_query(qid, "AWS/EC2", metric, "InstanceId", iid, _PERIOD)
+            )
 
         cw = self._provider.client("cloudwatch", region)
+        series = run_metric_queries(cw, queries, start, end)
         stats: dict[str, dict] = {iid: {} for iid in instance_ids}
-        for batch in _chunks(queries, _MAX_QUERIES):
-            token: str | None = None
-            while True:
-                kwargs = {"MetricDataQueries": batch, "StartTime": start, "EndTime": end}
-                if token:
-                    kwargs["NextToken"] = token
-                resp = cw.get_metric_data(**kwargs)
-                for res in resp.get("MetricDataResults", []):
-                    iid, metric = id_map[res["Id"]]
-                    stats[iid][metric] = _mean(res.get("Values", []))
-                token = resp.get("NextToken")
-                if not token:
-                    break
+        for qid, (iid, metric) in id_map.items():
+            stats[iid][metric] = _mean(metric_values(series, qid))
         return stats
 
     def _is_idle(self, avg: dict) -> bool:

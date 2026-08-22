@@ -257,106 +257,86 @@ class _CORDSRec(BaseModel):
     )
 
 
-class _SPSummary(BaseModel):
-    """The aggregate summary of a Savings Plans purchase recommendation.
+class _COIdleMetric(BaseModel):
+    """One ``utilizationMetrics`` entry on an idle recommendation."""
+
+    name: str = Field(default="", validation_alias="name")
+    statistic: str = Field(default="", validation_alias="statistic")
+    value: float = Field(default=0.0, validation_alias="value")
+
+
+class _COIdleRec(BaseModel):
+    """One ``get_idle_recommendations`` entry.
+
+    Unlike the rightsizing responses there are no options to choose between —
+    the resource is idle, and ``savingsOpportunity`` is what stopping it saves.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
-
-    estimated_monthly_savings: Decimal = Field(
-        default=Decimal(0), validation_alias="EstimatedMonthlySavingsAmount"
+    arn: str = Field(default="", validation_alias="resourceArn")
+    resource_id: str = Field(default="", validation_alias="resourceId")
+    resource_type: str = Field(default="", validation_alias="resourceType")
+    finding: str = Field(default="", validation_alias="finding")
+    description: str = Field(default="", validation_alias="findingDescription")
+    lookback_days: float = Field(default=0.0, validation_alias="lookBackPeriodInDays")
+    metrics: list[_COIdleMetric] = Field(
+        default_factory=list, validation_alias="utilizationMetrics"
     )
-    savings_pct: Decimal = Field(
-        default=Decimal(0), validation_alias="EstimatedSavingsPercentage"
-    )
-    hourly_commitment: Decimal = Field(
-        default=Decimal(0), validation_alias="HourlyCommitmentToPurchase"
-    )
-    currency: str = Field(default="USD", validation_alias="CurrencyCode")
-
-
-class _RIRecommendation(BaseModel):
-    """One ``get_reservation_purchase_recommendation`` entry (its summary).
-
-    Savings live under the nested ``RecommendationSummary`` object.
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    estimated_monthly_savings: Decimal = Field(
+    savings: Decimal = Field(
         default=Decimal(0),
-        validation_alias=AliasPath("RecommendationSummary", "TotalEstimatedMonthlySavingsAmount"),
-    )
-    savings_pct: Decimal = Field(
-        default=Decimal(0),
-        validation_alias=AliasPath("RecommendationSummary", "TotalEstimatedMonthlySavingsPercentage"),
+        validation_alias=AliasPath("savingsOpportunity", "estimatedMonthlySavings", "value"),
     )
     currency: str = Field(
         default="USD",
-        validation_alias=AliasPath("RecommendationSummary", "CurrencyCode"),
+        validation_alias=AliasPath("savingsOpportunity", "estimatedMonthlySavings", "currency"),
     )
 
 
-class _SPUtilization(BaseModel):
-    """The ``Total`` of ``get_savings_plans_utilization`` (commitment usage)."""
+class _SavingsPlan(BaseModel):
+    """One ``savingsplans:describe_savings_plans`` entry. Lowercase keys.
+
+    ``commitment`` is the hourly dollar amount the plan locks in.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    utilization_pct: Decimal = Field(
-        default=Decimal(0), validation_alias=AliasPath("Utilization", "UtilizationPercentage")
-    )
-    total_commitment: Decimal = Field(
-        default=Decimal(0), validation_alias=AliasPath("Utilization", "TotalCommitment")
-    )
-    unused_commitment: Decimal = Field(
-        default=Decimal(0), validation_alias=AliasPath("Utilization", "UnusedCommitment")
-    )
-    currency: str = Field(default="USD", validation_alias=AliasPath("Savings", "CurrencyCode"))
+    plan_id: str = Field(default="", validation_alias="savingsPlanId")
+    state: str = Field(default="", validation_alias="state")
+    plan_type: str = Field(default="", validation_alias="savingsPlanType")
+    commitment: Decimal = Field(default=Decimal(0), validation_alias="commitment")
+    ec2_instance_family: str = Field(default="", validation_alias="ec2InstanceFamily")
+    currency: str = Field(default="USD", validation_alias="currency")
 
 
-class _SPCoverage(BaseModel):
-    """One ``SavingsPlansCoverages`` entry of ``get_savings_plans_coverage``."""
+class _ReservedInstance(BaseModel):
+    """One ``describe_reserved_instances`` entry.
 
-    model_config = ConfigDict(populate_by_name=True)
+    ``scope`` is ``Region`` or ``Availability Zone``; only the latter pins
+    ``availability_zone``, and a regional RI floats across the whole region.
+    """
 
-    coverage_pct: Decimal = Field(
-        default=Decimal(0), validation_alias=AliasPath("Coverage", "CoveragePercentage")
-    )
-    on_demand_cost: Decimal = Field(
-        default=Decimal(0), validation_alias=AliasPath("Coverage", "OnDemandCost")
-    )
-
-
-class _RIUtilization(BaseModel):
-    """The ``Total`` of ``get_reservation_utilization`` (reservation usage)."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    utilization_pct: Decimal = Field(default=Decimal(0), validation_alias="UtilizationPercentage")
-    purchased_hours: Decimal = Field(default=Decimal(0), validation_alias="PurchasedHours")
-    unused_hours: Decimal = Field(default=Decimal(0), validation_alias="UnusedHours")
-    net_savings: Decimal = Field(default=Decimal(0), validation_alias="NetRISavings")
-
-
-class _RICoverage(BaseModel):
-    """The ``Total`` of ``get_reservation_coverage`` (reservation coverage)."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    coverage_pct: Decimal = Field(
-        default=Decimal(0),
-        validation_alias=AliasPath("CoverageHours", "CoverageHoursPercentage"),
-    )
-    on_demand_hours: Decimal = Field(
-        default=Decimal(0), validation_alias=AliasPath("CoverageHours", "OnDemandHours")
-    )
+    reservation_id: str = Field(default="", validation_alias="ReservedInstancesId")
+    instance_type: str = Field(default="", validation_alias="InstanceType")
+    instance_count: int = Field(default=0, validation_alias="InstanceCount")
+    state: str = Field(default="", validation_alias="State")
+    scope: str = Field(default="", validation_alias="Scope")
+    availability_zone: str = Field(default="", validation_alias="AvailabilityZone")
+    offering_class: str = Field(default="", validation_alias="OfferingClass")
 
 
 class _Instance(BaseModel):
-    """One ``describe_instances`` entry: identity, state, tags (off-hours/tag-hygiene)."""
+    """One ``describe_instances`` entry: identity, state, tags (off-hours/tag-hygiene).
+
+    ``lifecycle`` is absent for on-demand instances and ``spot`` for spot ones —
+    spot can't be covered by a commitment, so the inventory join drops them.
+    """
 
     instance_id: str = Field(validation_alias="InstanceId")
     state: str = Field(default="", validation_alias=AliasPath("State", "Name"))
+    instance_type: str = Field(default="", validation_alias="InstanceType")
+    lifecycle: str = Field(default="", validation_alias="InstanceLifecycle")
+    availability_zone: str = Field(
+        default="", validation_alias=AliasPath("Placement", "AvailabilityZone")
+    )
     tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
 
     def tag_map(self) -> dict[str, str]:

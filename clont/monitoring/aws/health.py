@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 from clont.core.logging import get_logger
 from clont.core.models import Cloud, CloudResource
 from clont.core.registry import register
+from clont.monitoring.aws._common import MetricsPolicy
 from clont.monitoring.models import HealthCheck, HealthStatus
 from clont.providers.aws.parsing import _HealthEvent
 from clont.providers.base import Provider
@@ -26,7 +27,7 @@ class HealthEventsCollector:
     cloud = Cloud.AWS
     service = "health"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, metrics: MetricsPolicy | None = None) -> None:
         self._provider = provider
 
     def health(self) -> list[HealthCheck]:

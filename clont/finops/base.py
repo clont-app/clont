@@ -28,11 +28,22 @@ class FinOpsTuning:
     ri_sp_min_coverage: float = 70.0       # eligible spend covered below this % -> opportunity
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
     required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
+    allow_cost_explorer: bool = False      # off = the billed ce:GetCostAndUsage is never called
+    # off = the CloudWatch idle detectors stay quiet and idle advice comes from
+    # Compute Optimizer instead; GetMetricData bills per metric requested
+    allow_cloudwatch_metrics: bool = False
 
 
 class CostCollector(Protocol):
     cloud: Cloud
     service: str
+
+    # How often the agent actually calls this collector. Collectors are
+    # duck-typed through `registry` and don't inherit this Protocol, so these
+    # are documentation — the runner reads them with getattr and falls back to
+    # the operator's finops.collect_interval_seconds / recommend_interval_seconds.
+    collect_every_seconds: int
+    recommend_every_seconds: int
 
     def __init__(self, provider: Provider, tuning: FinOpsTuning | None = None) -> None: ...
 

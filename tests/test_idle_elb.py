@@ -79,7 +79,8 @@ def test_load_balancer_with_no_targets_is_flagged():
     by_id = {r.resource.resource_id: r for r in recs}
     assert by_id["empty-lb"].kind == "idle-elb"
     assert by_id["empty-lb"].estimated_savings.amount == pricing.LOAD_BALANCER_MONTH
-    assert by_id["empty-lb"].estimated_savings.amount == Decimal("16.43")
+    # the rate table moves when it's regenerated; the ballpark shouldn't
+    assert Decimal("10") < pricing.LOAD_BALANCER_MONTH < Decimal("30")
     assert "APPLICATION" in by_id["empty-lb"].summary
 
 

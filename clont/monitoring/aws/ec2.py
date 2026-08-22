@@ -9,12 +9,16 @@ denies access or is disabled is skipped, not fatal
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import UTC, datetime, time, timedelta
 
 from clont.core.models import Cloud, CloudResource, Period
 from clont.core.registry import register
-from clont.monitoring.aws._common import for_each_region
+from clont.monitoring.aws._common import (
+    MetricsPolicy,
+    for_each_region,
+    metric_query,
+    run_metric_queries,
+)
 from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
 from clont.providers.aws.parsing import _EC2Status
 from clont.providers.base import Provider
@@ -29,7 +33,6 @@ _METRICS = (
     ("CPUCreditBalance", "Count"),
 )
 _PERIOD_SECONDS = 3600
-_MAX_QUERIES = 500  # GetMetricData allows up to 500 queries per call.
 
 # AWS status-check value
 _HEALTH = {
@@ -57,18 +60,14 @@ def _overall(system: str, instance: str) -> tuple[HealthStatus, str]:
     return worst, f"system: {system}, instance: {instance}"
 
 
-def _chunks[T](items: list[T], size: int) -> Iterator[list[T]]:
-    for i in range(0, len(items), size):
-        yield items[i : i + size]
-
-
 @register("monitoring", Cloud.AWS, "ec2")
 class EC2MetricCollector:
     cloud = Cloud.AWS
     service = "ec2"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, metrics: MetricsPolicy | None = None) -> None:
         self._provider = provider
+        self._metrics = metrics
 
     def collect(self, period: Period) -> list[MetricPoint]:
         """CloudWatch CPU/network time series per running instance, per region."""
@@ -101,54 +100,29 @@ class EC2MetricCollector:
             qid = f"q{n}"
             id_map[qid] = (iid, name, unit)
             queries.append(
-                {
-                    "Id": qid,
-                    "MetricStat": {
-                        "Metric": {
-                            "Namespace": "AWS/EC2",
-                            "MetricName": name,
-                            "Dimensions": [{"Name": "InstanceId", "Value": iid}],
-                        },
-                        "Period": _PERIOD_SECONDS,
-                        "Stat": "Average",
-                    },
-                    "ReturnData": True,
-                }
+                metric_query(
+                    qid, "AWS/EC2", name, "InstanceId", iid, _PERIOD_SECONDS
+                )
             )
 
         cw = self._provider.client("cloudwatch", region)
+        series = run_metric_queries(cw, queries, start, end, self._metrics)
         points: list[MetricPoint] = []
-        for batch in _chunks(queries, _MAX_QUERIES):
-            token: str | None = None
-            while True:
-                kwargs = {"MetricDataQueries": batch, "StartTime": start, "EndTime": end}
-                if token:
-                    kwargs["NextToken"] = token
-                resp = cw.get_metric_data(**kwargs)
-                for res in resp.get("MetricDataResults", []):
-                    iid, name, unit = id_map[res["Id"]]
-                    resource = CloudResource(
-                        cloud=Cloud.AWS,
-                        service="ec2",
-                        resource_id=iid,
-                        region=region,
-                        alias=self._provider.alias,
-                    )
-                    for ts, val in zip(
-                        res.get("Timestamps", []), res.get("Values", []), strict=False
-                    ):
-                        points.append(
-                            MetricPoint(
-                                name=name,
-                                value=float(val),
-                                unit=unit,
-                                timestamp=ts,
-                                resource=resource,
-                            )
-                        )
-                token = resp.get("NextToken")
-                if not token:
-                    break
+        for qid, pairs in series.items():
+            iid, name, unit = id_map[qid]
+            resource = CloudResource(
+                cloud=Cloud.AWS,
+                service="ec2",
+                resource_id=iid,
+                region=region,
+                alias=self._provider.alias,
+            )
+            points.extend(
+                MetricPoint(
+                    name=name, value=value, unit=unit, timestamp=ts, resource=resource
+                )
+                for ts, value in pairs
+            )
         return points
 
     def _running_instance_ids(self, ec2) -> list[str]:

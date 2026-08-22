@@ -82,6 +82,11 @@ class AWSProvider:
         self.account_id = ident["Account"]
         log.info("authenticated %s as %s (%s)", self.alias, self.account_id, ident["Arn"])
 
+    @property
+    def cur(self):
+        """This account's Cost and Usage Report location, if one is configured."""
+        return self._config.cur
+
     def regions(self) -> list[str]:
         """Regions in scope: the configured list, or every enabled region."""
         if self._config.regions:
@@ -113,12 +118,19 @@ class AWSProvider:
 
         Returns the list of API actions that came back AccessDenied (empty ==
         the role has what clont needs). Non-permission errors propagate.
+
+        Every probe here is free — `ce:GetCostAndUsage` used to be one of them,
+        which meant a $0.01 charge just for checking.
         """
         missing: list[str] = []
         probes = [
-            ("ce:GetCostAndUsage", self._probe_cost_explorer),
             ("ec2:DescribeRegions", self._probe_describe_regions),
+            # newest grant, so the one an existing role is most likely missing
+            ("savingsplans:DescribeSavingsPlans", self._probe_savings_plans),
+            ("compute-optimizer:GetEnrollmentStatus", self._probe_compute_optimizer),
         ]
+        if self._config.cur is not None:
+            probes.append(("s3:GetObject", self._probe_cur))
         for action, probe in probes:
             try:
                 probe()
@@ -129,18 +141,42 @@ class AWSProvider:
                 raise
         return missing
 
-    def _probe_cost_explorer(self) -> None:
-        from datetime import date, timedelta
+    def _probe_cur(self) -> None:
+        """Read this month's CUR manifest — proves GetObject on the report."""
+        from datetime import date
 
-        today = date.today()
-        self.client("ce", "us-east-1").get_cost_and_usage(
-            TimePeriod={
-                "Start": (today - timedelta(days=1)).isoformat(),
-                "End": today.isoformat(),
-            },
-            Granularity="DAILY",
-            Metrics=["UnblendedCost"],
-        )
+        from clont.finops.aws.cur import read_manifest
+
+        config = self._config.cur
+        manifest = read_manifest(self.client("s3", config.region), config, date.today())
+        if manifest is None:
+            # not a permission problem: the role can read, there's just nothing
+            # delivered yet (a fresh report takes up to 24h)
+            log.warning(
+                "no CUR manifest yet under s3://%s/%s — spend will be empty until AWS delivers one",
+                config.bucket,
+                config.prefix,
+            )
+
+    def _probe_compute_optimizer(self) -> None:
+        """Check the account is opted into Compute Optimizer.
+
+        Enrollment is free but the customer has to flip it, and until they do
+        idle/rightsizing recommendations come back empty — which reads exactly
+        like "nothing to optimize". Warn so the two are distinguishable.
+        """
+        resp = self.client("compute-optimizer", "us-east-1").get_enrollment_status()
+        status = resp.get("status", "")
+        if status != "Active":
+            log.warning(
+                "%s: compute optimizer is %s — no idle/rightsizing advice until it is "
+                "enabled (free); see https://console.aws.amazon.com/compute-optimizer",
+                self.alias,
+                status or "not enrolled",
+            )
 
     def _probe_describe_regions(self) -> None:
         self.client("ec2", "us-east-1").describe_regions()
+
+    def _probe_savings_plans(self) -> None:
+        self.client("savingsplans", "us-east-1").describe_savings_plans(maxResults=1)

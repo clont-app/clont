@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from clont.core.models import Cloud, CloudResource
 from clont.core.registry import register
-from clont.monitoring.aws._common import for_each_region
+from clont.monitoring.aws._common import MetricsPolicy, for_each_region
 from clont.monitoring.models import HealthCheck, HealthStatus
 from clont.providers.aws.parsing import _ASG
 from clont.providers.base import Provider
@@ -15,7 +15,7 @@ class AutoScalingHealthCollector:
     cloud = Cloud.AWS
     service = "autoscaling"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, metrics: MetricsPolicy | None = None) -> None:
         self._provider = provider
 
     def health(self) -> list[HealthCheck]:

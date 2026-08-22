@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from moto import mock_aws
 
-from clont.core.config import AWSConfig
+from clont.core.config import AWSConfig, CURConfig
 from clont.providers.aws.provider import AWSProvider
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/clont-readonly"
@@ -64,3 +64,41 @@ def test_client_before_authenticate_raises():
     provider = AWSProvider("prod", AWSConfig(role_arn=ROLE_ARN))
     with pytest.raises(RuntimeError):
         provider.client("ec2")
+
+
+@mock_aws
+def test_preflight_never_touches_cost_explorer(aws_creds):
+    provider = AWSProvider("prod", AWSConfig(role_arn=ROLE_ARN))
+    provider.authenticate()
+    calls: list[str] = []
+    real = provider.client
+
+    def recording(service: str, region: str | None = None):
+        calls.append(service)
+        return real(service, region)
+
+    provider.client = recording  # type: ignore[method-assign]
+    provider._probe_savings_plans = lambda: None  # moto has no savingsplans
+    provider._probe_compute_optimizer = lambda: None  # nor compute-optimizer
+    provider.preflight()
+
+    assert "ce" not in calls
+
+
+@mock_aws
+def test_preflight_probes_the_cur_when_configured(aws_creds):
+    import boto3
+
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="bill")
+    config = AWSConfig(
+        role_arn=ROLE_ARN,
+        cur=CURConfig(bucket="bill", report_name="rep", prefix="p"),
+    )
+    provider = AWSProvider("prod", config)
+    provider.authenticate()
+    provider._probe_savings_plans = lambda: None  # moto has no savingsplans
+    provider._probe_compute_optimizer = lambda: None  # nor compute-optimizer
+
+    # nothing delivered yet: readable bucket, no manifest -> not a missing grant
+    assert "s3:GetObject" not in provider.preflight()
+    assert provider.cur is config.cur

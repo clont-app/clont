@@ -8,6 +8,9 @@ evidence.
 
 Connections are the primary signal; CPU is a backstop so a DB doing heavy
 background work (e.g. vacuum) without client connections isn't called idle.
+
+Off unless `finops.allow_cloudwatch_metrics` is set — Compute Optimizer reports
+idle RDS instances for free. Same trade-off as `idle.py`.
 """
 
 from __future__ import annotations
@@ -17,15 +20,15 @@ from decimal import Decimal
 
 from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
-from clont.finops.aws.idle import _chunks, _mean
+from clont.finops.aws.idle import _mean
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
+from clont.providers.aws.metrics import metric_query, metric_values, run_metric_queries
 from clont.providers.aws.parsing import _RDSInstance
 from clont.providers.aws.regions import for_each_region
 from clont.providers.base import Provider
 
 _PERIOD = 86400           # 1-day granularity (averaged across the window)
-_MAX_QUERIES = 500
 _METRICS = ("DatabaseConnections", "CPUUtilization")
 _KIND = "idle"
 
@@ -34,6 +37,7 @@ _KIND = "idle"
 class IdleRDSCollector:
     cloud = Cloud.AWS
     service = "idle_rds"
+    recommend_every_seconds = 86400
 
     def __init__(self, provider: Provider, tuning: FinOpsTuning | None = None) -> None:
         self._provider = provider
@@ -43,6 +47,8 @@ class IdleRDSCollector:
         return []
 
     def recommendations(self, period: Period) -> list[Recommendation]:
+        if not self._tuning.allow_cloudwatch_metrics:
+            return []  # compute optimizer covers this for free
         return for_each_region(self._provider, self._region, what="idle rds")
 
     def _region(self, region: str) -> list[Recommendation]:
@@ -78,35 +84,17 @@ class IdleRDSCollector:
         ):
             qid = f"q{n}"
             id_map[qid] = (db_id, metric)
-            queries.append({
-                "Id": qid,
-                "MetricStat": {
-                    "Metric": {
-                        "Namespace": "AWS/RDS",
-                        "MetricName": metric,
-                        "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": db_id}],
-                    },
-                    "Period": _PERIOD,
-                    "Stat": "Average",
-                },
-                "ReturnData": True,
-            })
+            queries.append(
+                metric_query(
+                    qid, "AWS/RDS", metric, "DBInstanceIdentifier", db_id, _PERIOD
+                )
+            )
 
         cw = self._provider.client("cloudwatch", region)
+        series = run_metric_queries(cw, queries, start, end)
         stats: dict[str, dict] = {db_id: {} for db_id in db_ids}
-        for batch in _chunks(queries, _MAX_QUERIES):
-            token: str | None = None
-            while True:
-                kwargs = {"MetricDataQueries": batch, "StartTime": start, "EndTime": end}
-                if token:
-                    kwargs["NextToken"] = token
-                resp = cw.get_metric_data(**kwargs)
-                for res in resp.get("MetricDataResults", []):
-                    db_id, metric = id_map[res["Id"]]
-                    stats[db_id][metric] = _mean(res.get("Values", []))
-                token = resp.get("NextToken")
-                if not token:
-                    break
+        for qid, (db_id, metric) in id_map.items():
+            stats[db_id][metric] = _mean(metric_values(series, qid))
         return stats
 
     def _is_idle(self, avg: dict) -> bool:

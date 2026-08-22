@@ -1,163 +1,149 @@
-"""Commitment utilization & coverage recommendations from Cost Explorer."""
+"""Commitment utilization & coverage, derived from inventory (no Cost Explorer)."""
 
 from __future__ import annotations
 
-from decimal import Decimal
+import pytest
 
-from botocore.exceptions import ClientError
-
+from clont.finops.aws import inventory
 from clont.finops.aws.utilization import CommitmentUtilizationCollector
 from clont.finops.base import FinOpsTuning
+from tests.test_finops_inventory import FakeProvider, instance, plan, reserved
 
 
-def _sp_util(pct: str, total: str = "1000", unused: str = "0") -> dict:
-    return {"Total": {
-        "Utilization": {
-            "UtilizationPercentage": pct,
-            "TotalCommitment": total,
-            "UnusedCommitment": unused,
-        },
-        "Savings": {"CurrencyCode": "USD"},
-    }}
+@pytest.fixture(autouse=True)
+def _no_cache():
+    inventory.clear_cache()
+    yield
+    inventory.clear_cache()
 
 
-def _sp_cov(pct: str, on_demand: str = "500") -> dict:
-    return {"SavingsPlansCoverages": [
-        {"Coverage": {"CoveragePercentage": pct, "OnDemandCost": on_demand}}
-    ]}
-
-
-def _ri_util(pct: str, purchased: str = "1000", unused: str = "0") -> dict:
-    return {"Total": {
-        "UtilizationPercentage": pct,
-        "PurchasedHours": purchased,
-        "UnusedHours": unused,
-    }}
-
-
-def _ri_cov(pct: str, on_demand: str = "100") -> dict:
-    return {"Total": {"CoverageHours": {
-        "CoverageHoursPercentage": pct,
-        "OnDemandHours": on_demand,
-    }}}
-
-
-class _FakeCE:
-    def __init__(self, sp_util=None, sp_cov=None, ri_util=None, ri_cov=None) -> None:
-        self._sp_util = sp_util or _sp_util("100", total="0")   # no SP held
-        self._sp_cov = sp_cov or {"SavingsPlansCoverages": []}
-        self._ri_util = ri_util or _ri_util("100", purchased="0")  # no RIs held
-        self._ri_cov = ri_cov or {"Total": {}}
-
-    def get_savings_plans_utilization(self, **kw):
-        return self._sp_util
-
-    def get_savings_plans_coverage(self, **kw):
-        return self._sp_cov
-
-    def get_reservation_utilization(self, **kw):
-        return self._ri_util
-
-    def get_reservation_coverage(self, **kw):
-        return self._ri_cov
-
-
-class _FakeProvider:
-    def __init__(self, ce: _FakeCE, alias: str = "prod") -> None:
-        self._ce = ce
-        self.alias = alias
-
-    def client(self, service: str, region: str | None = None):
-        assert service == "ce"
-        return self._ce
-
-
-def _collect(ce: _FakeCE, **tuning):
-    coll = CommitmentUtilizationCollector(_FakeProvider(ce), FinOpsTuning(**tuning))
+def _collect(*, tuning=None, **kw):
+    coll = CommitmentUtilizationCollector(FakeProvider(**kw), tuning)
     return coll.recommendations(None)
 
 
+def _kinds(recs):
+    return sorted(r.kind for r in recs)
+
+
 def test_low_sp_utilization_flagged():
-    recs = _collect(_FakeCE(sp_util=_sp_util("60", total="1000", unused="400")))
+    # $5/hr committed against a single small instance -> almost nothing consumed.
+    recs = _collect(
+        instances={"us-east-1": [instance("i-1", "m5.large")]},
+        plans=[plan("5.00")],
+    )
     [rec] = [r for r in recs if r.kind == "low-sp-utilization"]
     assert rec.service == "savings-plans"
-    assert rec.estimated_savings.amount == Decimal("400")
-    assert "60%" in rec.summary
+    assert rec.estimated_savings.amount > 0
+    assert "utilized" in rec.summary
 
 
 def test_high_sp_utilization_silent():
-    recs = _collect(_FakeCE(sp_util=_sp_util("95", total="1000", unused="50")))
+    # Far more eligible usage than committed -> the plan is fully consumed.
+    recs = _collect(
+        instances={"us-east-1": [instance(f"i-{n}", "m5.24xlarge") for n in range(4)]},
+        plans=[plan("1.00")],
+    )
     assert [r for r in recs if r.kind == "low-sp-utilization"] == []
 
 
-def test_no_commitment_held_is_silent():
-    # Defaults: TotalCommitment 0 and PurchasedHours 0 -> nothing to judge.
-    assert _collect(_FakeCE()) == []
+def test_no_commitment_held_is_silent_about_utilization():
+    recs = _collect(instances={"us-east-1": [instance("i-1")]})
+    assert "low-sp-utilization" not in _kinds(recs)
+    assert "low-ri-utilization" not in _kinds(recs)
 
 
 def test_low_sp_coverage_flagged():
-    recs = _collect(_FakeCE(sp_cov=_sp_cov("40", on_demand="500")))
+    recs = _collect(instances={"us-east-1": [instance("i-1", "m5.4xlarge")]})
     [rec] = [r for r in recs if r.kind == "low-sp-coverage"]
-    assert "40%" in rec.summary
-    assert "500" in rec.summary
+    assert "0%" in rec.summary
+    assert "could be committed" in rec.summary
 
 
-def test_coverage_silent_without_on_demand():
-    recs = _collect(_FakeCE(sp_cov=_sp_cov("0", on_demand="0")))
-    assert [r for r in recs if r.kind == "low-sp-coverage"] == []
+def test_coverage_silent_without_uncovered_usage():
+    recs = _collect(
+        instances={"us-east-1": [instance("i-1")]},
+        reserved={"us-east-1": [reserved(count=1)]},
+    )
+    assert [r for r in recs if r.kind in {"low-sp-coverage", "low-ri-coverage"}] == []
 
 
 def test_low_ri_utilization_flagged():
-    recs = _collect(_FakeCE(ri_util=_ri_util("70", purchased="1000", unused="300")))
+    recs = _collect(
+        instances={"us-east-1": [instance("i-1")]},
+        reserved={"us-east-1": [reserved(count=4)]},
+    )
     [rec] = [r for r in recs if r.kind == "low-ri-utilization"]
     assert rec.service == "reserved-instances"
-    assert "300" in rec.summary
+    assert "25%" in rec.summary
+    assert "reserved hours unused" in rec.summary
 
 
 def test_low_ri_coverage_flagged():
-    recs = _collect(_FakeCE(ri_cov=_ri_cov("50", on_demand="80")))
+    # Two running, one reserved -> 50% covered, under the 70% default gate.
+    recs = _collect(
+        instances={"us-east-1": [instance("i-1"), instance("i-2")]},
+        reserved={"us-east-1": [reserved(count=1)]},
+    )
     [rec] = [r for r in recs if r.kind == "low-ri-coverage"]
     assert "50%" in rec.summary
 
 
 def test_thresholds_are_configurable():
-    # 85% utilization passes the default 90 gate as "low" but a 80 gate clears it.
-    ce = _FakeCE(sp_util=_sp_util("85", total="1000", unused="150"))
-    assert [r for r in _collect(ce) if r.kind == "low-sp-utilization"]
-    assert _collect(ce, ri_sp_min_utilization=80.0) == []
+    kw = {
+        "instances": {"us-east-1": [instance("i-1")]},
+        "reserved": {"us-east-1": [reserved(count=2)]},  # 50% utilized
+    }
+    assert [r for r in _collect(**kw) if r.kind == "low-ri-utilization"]
+    lenient = FinOpsTuning(ri_sp_min_utilization=40.0, ri_sp_min_coverage=40.0)
+    assert [r for r in _collect(tuning=lenient, **kw) if r.kind == "low-ri-utilization"] == []
 
 
-def test_one_failing_query_does_not_drop_others():
-    boom = ClientError(
-        {"Error": {"Code": "ThrottlingException", "Message": "slow"}},
-        "GetSavingsPlansUtilization",
+def test_summaries_flag_the_snapshot_caveat():
+    recs = _collect(
+        instances={"us-east-1": [instance("i-1")]},
+        reserved={"us-east-1": [reserved(count=4)]},
+        plans=[plan("5.00")],
     )
-
-    class _CE(_FakeCE):
-        def get_savings_plans_utilization(self, **kw):
-            raise boom
-
-    recs = _collect(_CE(ri_util=_ri_util("70", purchased="1000", unused="300")))
-    assert [r.kind for r in recs] == ["low-ri-utilization"]
+    assert recs
+    assert all("snapshot" in r.summary for r in recs)
 
 
-def test_data_unavailable_swallowed():
-    err = ClientError(
-        {"Error": {"Code": "DataUnavailableException", "Message": "no data"}},
-        "GetReservationUtilization",
+def test_one_bad_region_does_not_drop_the_rest():
+    recs = _collect(
+        instances={"us-east-1": [instance("i-1")]},
+        reserved={"us-east-1": [reserved(count=4)]},
+        broken={"eu-west-1"},
     )
+    assert "low-ri-utilization" in _kinds(recs)
 
-    class _CE(_FakeCE):
-        def get_savings_plans_utilization(self, **kw):
-            raise err
 
-        def get_savings_plans_coverage(self, **kw):
-            raise err
+def test_missing_savingsplans_grant_still_yields_ri_findings():
+    from botocore.exceptions import ClientError
 
-        def get_reservation_utilization(self, **kw):
-            raise err
+    class _Denied(FakeProvider):
+        def client(self, service: str, region: str | None = None):
+            if service == "savingsplans":
+                raise ClientError(
+                    {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+                    "DescribeSavingsPlans",
+                )
+            return super().client(service, region)
 
-        def get_reservation_coverage(self, **kw):
-            raise err
+    coll = CommitmentUtilizationCollector(_Denied(
+        instances={"us-east-1": [instance("i-1")]},
+        reserved={"us-east-1": [reserved(count=4)]},
+    ))
+    assert "low-ri-utilization" in _kinds(coll.recommendations(None))
 
-    assert _collect(_CE()) == []
+
+def test_collector_never_touches_cost_explorer():
+    class _NoCE(FakeProvider):
+        def client(self, service: str, region: str | None = None):
+            assert service != "ce", "utilization must not call Cost Explorer"
+            return super().client(service, region)
+
+    coll = CommitmentUtilizationCollector(_NoCE(
+        instances={"us-east-1": [instance("i-1", "m5.4xlarge")]}
+    ))
+    assert coll.recommendations(None)

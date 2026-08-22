@@ -31,3 +31,8 @@ class Recommendation:
     summary: str
     estimated_savings: Money
     kind: str = "rec"
+    # where the savings figure was priced, and whether that's actually this
+    # resource's region. approximate = a us-east-1 ballpark, say so out loud
+    # rather than presenting it as a quote.
+    priced_region: str | None = None
+    approximate: bool = True

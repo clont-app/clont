@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 from clont.core.models import Cloud, CloudResource
 from clont.core.registry import register
-from clont.monitoring.aws._common import for_each_region
+from clont.monitoring.aws._common import MetricsPolicy, for_each_region
 from clont.monitoring.models import HealthCheck, HealthStatus
 from clont.providers.aws.parsing import _ACMCertificate
 from clont.providers.base import Provider
@@ -24,7 +24,7 @@ class ACMHealthCollector:
     cloud = Cloud.AWS
     service = "acm"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, metrics: MetricsPolicy | None = None) -> None:
         self._provider = provider
 
     def health(self) -> list[HealthCheck]:

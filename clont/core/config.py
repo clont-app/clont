@@ -102,6 +102,22 @@ class ApiConfig(_Model):
 # --- Clouds (read-only)
 
 
+class CURConfig(_Model):
+    """Where this account's Cost and Usage Report lands in S3.
+
+    Set it and spend comes from the report instead of Cost Explorer — same
+    numbers, no per-request charge. Legacy CUR only: gzip + csv, the layout
+    whose manifest sits at the billing-period root.
+    """
+
+    bucket: str                      # bucket the report is delivered to
+    report_name: str                 # the report/export name (= its folder)
+    prefix: str = ""                 # s3 prefix chosen when the report was created
+    region: str = "us-east-1"        # bucket region
+    refresh_minutes: float = 60.0    # min gap between reads; AWS rewrites it a few times a day
+    include_linked: bool = False     # payer report: count every linked account, not just this one
+
+
 class AWSConfig(_Model):
     """Read-only access config for one AWS account.
 
@@ -112,6 +128,7 @@ class AWSConfig(_Model):
     role_arn: str
     regions: list[str] = Field(default_factory=list)
     external_id: str | None = None
+    cur: CURConfig | None = None     # free spend source; without it there is no spend data
 
 
 # FinOps
@@ -133,6 +150,23 @@ class BudgetRule(_Model):
 
 class FinOpsConfig(_Model):
     """Cost-event thresholds (spend digest + spike) and recommendation tuning."""
+
+    # Cost Explorer bills $0.01 per request and the daemon polls every cycle, so
+    # it is opt-in: spend comes from the CUR unless you accept that charge.
+    allow_cost_explorer: bool = False
+
+    # GetMetricData bills $0.01 per *thousand metrics requested*, and the idle
+    # detectors ask for one per resource per cycle — so it scales with the fleet.
+    # Compute Optimizer answers the same question for free; turn this on only to
+    # fall back to CloudWatch on an account not enrolled in CO.
+    allow_cloudwatch_metrics: bool = False
+
+    # How often a collector is actually called, however fast the loop ticks.
+    # Spend lands once a day and recommendations a few times a day, so polling
+    # either every 300s buys nothing and costs per request. A collector that
+    # knows its own upstream better overrides these with a class attr.
+    collect_interval_seconds: int = 86400   # spend: daily
+    recommend_interval_seconds: int = 3600  # recommendations: hourly
 
     spend_baseline_days: int = 28     # trailing window (≈4 wks) for the same-weekday spike baseline
     spend_spike_pct: float = 50.0     # WARN when the latest day exceeds baseline by this %
@@ -158,8 +192,31 @@ class FinOpsConfig(_Model):
     required_tags: list[str] = Field(default_factory=list)            # tag keys every resource must carry
 
 
+class MetricsConfig(_Model):
+    """CloudWatch metric collection — the one paid meter clont has left.
+
+    `GetMetricData` bills $0.01 per *thousand metrics requested*, so the charge
+    grows with the fleet, not with the cycle count. It is therefore off by
+    default; the anomaly, threshold and disk-full-forecast detectors have no
+    other data source, so they are inert until you turn it on and accept the bill.
+    """
+
+    enabled: bool = False
+    services: list[str] = Field(default_factory=list)  # empty = every collector with metrics
+    metrics: list[str] = Field(default_factory=list)   # empty = whatever the collectors ask for
+    period_seconds: int | None = None                  # override the collectors' own granularity
+    max_metrics_per_cycle: int = 1000                  # hard ceiling, ≈$0.01 per cycle at 1000
+
+    # None = read every cycle (the pre-cadence behaviour). Raising this trades
+    # anomaly-detection latency for money: the detectors re-see an unchanged
+    # series between refreshes, and channel repeat_hours swallows the duplicate.
+    collect_every_seconds: int | None = None
+
+
 class MonitoringConfig(_Model):
-    """Monitoring metric-anomaly detection """
+    """Monitoring metric-anomaly detection + the paid metric reads it runs on."""
+
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)  # the paid CloudWatch reads
 
     anomaly_sigma: float = 3.0    # WARN when the latest sample is this many σ off baseline
     anomaly_min_points: int = 6   # min baseline samples before a series can flag
@@ -230,6 +287,10 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   prod:
 #     role_arn: arn:aws:iam::111111111111:role/clont-readonly
 #     regions: [us-east-1]
+#     cur:                       # cost and usage report in s3 = free spend data
+#       bucket: my-billing-bucket
+#       report_name: clont-cur
+#       prefix: reports
 
 # FinOps: spend-event thresholds + idle/stale recommendation tuning.
 # finops:

@@ -25,6 +25,7 @@ from clont import __version__
 from clont.api.serialize import to_jsonable
 from clont.api.uplink import Batch
 from clont.events.models import EventSeverity
+from clont.finops.aws import pricing
 from clont.monitoring.models import HealthStatus
 
 TOP_SPEND_LIMIT = 5
@@ -96,6 +97,8 @@ class ScanSummary:
     findings: list[Finding] = field(default_factory=list)
     top_spend: list[ServiceSpend] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # at least one savings figure was priced outside its resource's region
+    approximate_pricing: bool = False
 
     @property
     def critical_events(self) -> int:
@@ -117,6 +120,7 @@ def summarize(
     savings: dict[str, Decimal] = defaultdict(Decimal)
     for rec in batch.recommendations:
         savings[rec.estimated_savings.currency] += rec.estimated_savings.amount
+    approximate = any(r.approximate for r in batch.recommendations)
 
     grouped: dict[tuple[str, str, str], list] = defaultdict(list)
     for rec in batch.recommendations:
@@ -173,6 +177,7 @@ def summarize(
             MoneyTotal(currency=cur, amount=amt) for cur, amt in sorted(savings.items())
         ],
         findings=findings,
+        approximate_pricing=approximate,
         top_spend=[
             ServiceSpend(service=svc, currency=cur, amount=amt) for (svc, cur), amt in top
         ],
@@ -335,6 +340,10 @@ def render_report(summary: ScanSummary) -> str:
         _THIN,
         "  estimates use public on-demand list prices over this scan's window;",
         "  real savings depend on commitments and negotiated rates.",
+    ]
+    if summary.approximate_pricing:
+        lines.append(f"  some rates are {pricing.BASE_REGION} approximations, not the resource's region.")
+    lines += [
         "  reproduce: clont run --summary report.txt",
         _THIN,
     ]

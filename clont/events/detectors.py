@@ -41,8 +41,15 @@ class RecommendationDetector:
             alias = r.alias or "-"
             savings = rec.estimated_savings
             # Some recommendations (e.g. idle instances) have no per-resource
+            # priced outside this resource's region -> say so, don't let a
+            # us-east-1 ballpark read as a quote
+            at = (
+                f", at {rec.priced_region} rates"
+                if rec.approximate and rec.priced_region
+                else ""
+            )
             savings_txt = (
-                f" (est. savings {savings.amount} {savings.currency}/mo)"
+                f" (est. savings {savings.amount} {savings.currency}/mo{at})"
                 if savings.amount > 0
                 else ""
             )
@@ -58,6 +65,8 @@ class RecommendationDetector:
                     payload={
                         "estimated_savings": str(savings.amount),
                         "currency": savings.currency,
+                        "priced_region": rec.priced_region or "",
+                        "approximate": str(rec.approximate).lower(),
                     },
                 )
             )

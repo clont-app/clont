@@ -30,6 +30,7 @@ class _FakeCO:
         lambda_: dict | None = None,
         ecs: dict | None = None,
         rds: dict | None = None,
+        idle: dict | None = None,
     ) -> None:
         self._ec2 = ec2 or {"instanceRecommendations": []}
         self._ebs = ebs or {"volumeRecommendations": []}
@@ -37,6 +38,7 @@ class _FakeCO:
         self._lambda = lambda_ or {"lambdaFunctionRecommendations": []}
         self._ecs = ecs or {"ecsServiceRecommendations": []}
         self._rds = rds or {"rdsDBRecommendations": []}
+        self._idle = idle or {"idleRecommendations": []}
 
     def get_ec2_instance_recommendations(self, **kw):
         return self._ec2
@@ -55,6 +57,9 @@ class _FakeCO:
 
     def get_rds_database_recommendations(self, **kw):
         return self._rds
+
+    def get_idle_recommendations(self, **kw):
+        return self._idle
 
 
 class _FakeProvider:

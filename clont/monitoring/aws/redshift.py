@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from clont.core.models import Cloud, CloudResource, Period
 from clont.core.registry import register
-from clont.monitoring.aws._common import for_each_region, metric_query, run_metric_queries
+from clont.monitoring.aws._common import MetricsPolicy, for_each_region, metric_query, run_metric_queries
 from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
 from clont.providers.aws.parsing import _RedshiftCluster
 from clont.providers.base import Provider
@@ -30,8 +30,9 @@ class RedshiftHealthCollector:
     cloud = Cloud.AWS
     service = "redshift"
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, metrics: MetricsPolicy | None = None) -> None:
         self._provider = provider
+        self._metrics = metrics
 
     def collect(self, period: Period) -> list[MetricPoint]:
         """Disk-space-used % per cluster (for the disk-full forecast + threshold)."""
@@ -61,7 +62,7 @@ class RedshiftHealthCollector:
             )
 
         cw = self._provider.client("cloudwatch", region)
-        series = run_metric_queries(cw, queries, start, end)
+        series = run_metric_queries(cw, queries, start, end, self._metrics)
         points: list[MetricPoint] = []
         for qid, pairs in series.items():
             cid = id_map[qid]

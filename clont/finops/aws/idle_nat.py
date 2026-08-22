@@ -4,6 +4,9 @@ A NAT gateway bills a fixed hourly charge whether or not anything routes through
 it. One that has processed effectively no bytes over a trailing window is paying
 for nothing — recommend deleting it (and any route that depends on it). The
 saving is the gateway's fixed monthly charge, which is known, so it's reported.
+
+Off unless `finops.allow_cloudwatch_metrics` is set — Compute Optimizer reports
+idle NAT gateways for free. Same trade-off as `idle.py`.
 """
 
 from __future__ import annotations
@@ -13,15 +16,14 @@ from datetime import UTC, datetime, timedelta
 from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.aws import pricing
-from clont.finops.aws.idle import _chunks
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
+from clont.providers.aws.metrics import metric_query, metric_values, run_metric_queries
 from clont.providers.aws.parsing import _NatGateway
 from clont.providers.aws.regions import for_each_region
 from clont.providers.base import Provider
 
 _PERIOD = 86400
-_MAX_QUERIES = 500  # GetMetricData allows up to 500 queries per call
 # Total bytes (in + out) over the window below which a gateway counts as idle.
 # Deliberately small but non-zero to tolerate stray health-check traffic.
 _IDLE_BYTES = 1_000_000
@@ -34,6 +36,7 @@ _USD = "USD"
 class IdleNatGatewayCollector:
     cloud = Cloud.AWS
     service = "idle_nat"
+    recommend_every_seconds = 86400
 
     def __init__(self, provider: Provider, tuning: FinOpsTuning | None = None) -> None:
         self._provider = provider
@@ -43,6 +46,8 @@ class IdleNatGatewayCollector:
         return []
 
     def recommendations(self, period: Period) -> list[Recommendation]:
+        if not self._tuning.allow_cloudwatch_metrics:
+            return []  # compute optimizer covers this for free
         return for_each_region(self._provider, self._region, what="idle nat")
 
     def _region(self, region: str) -> list[Recommendation]:
@@ -78,34 +83,18 @@ class IdleNatGatewayCollector:
         ):
             qid = f"q{n}"
             id_map[qid] = nat_id
-            queries.append({
-                "Id": qid,
-                "MetricStat": {
-                    "Metric": {
-                        "Namespace": "AWS/NATGateway",
-                        "MetricName": metric,
-                        "Dimensions": [{"Name": "NatGatewayId", "Value": nat_id}],
-                    },
-                    "Period": _PERIOD,
-                    "Stat": "Sum",
-                },
-                "ReturnData": True,
-            })
+            queries.append(
+                metric_query(
+                    qid, "AWS/NATGateway", metric, "NatGatewayId", nat_id, _PERIOD,
+                    stat="Sum",
+                )
+            )
 
         cw = self._provider.client("cloudwatch", region)
+        series = run_metric_queries(cw, queries, start, end)
         totals: dict[str, float] = {nat_id: 0.0 for nat_id in nat_ids}
-        for batch in _chunks(queries, _MAX_QUERIES):
-            token: str | None = None
-            while True:
-                kwargs = {"MetricDataQueries": batch, "StartTime": start, "EndTime": end}
-                if token:
-                    kwargs["NextToken"] = token
-                resp = cw.get_metric_data(**kwargs)
-                for res in resp.get("MetricDataResults", []):
-                    totals[id_map[res["Id"]]] += sum(res.get("Values", []))
-                token = resp.get("NextToken")
-                if not token:
-                    break
+        for qid, nat_id in id_map.items():
+            totals[nat_id] += sum(metric_values(series, qid))
         return totals
 
     def _rec(self, nat_id: str, region: str) -> Recommendation:

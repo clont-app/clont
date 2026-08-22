@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from clont.finops.aws import pricing
 from clont.finops.aws.waste import WasteCollector
 
 
@@ -62,7 +63,7 @@ def test_waste_detects_each_kind_and_prices_them():
     assert by_id["vol-gp2"].estimated_savings.amount == Decimal("1.00")    # 50 GiB * $0.02
     assert by_id["vol-gp2"].kind == "gp2-gp3"
     assert "gp3" in by_id["vol-gp2"].summary
-    assert by_id["eipalloc-idle"].estimated_savings.amount == Decimal("3.60")
+    assert by_id["eipalloc-idle"].estimated_savings.amount == pricing.EIP_MONTH
     assert by_id["eipalloc-idle"].kind == "unassociated-eip"
 
 

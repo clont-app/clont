@@ -1,158 +1,95 @@
-"""FinOps commitment recommendations from Cost Explorer (Savings Plans + RIs).
+"""Commitment purchase advice (Savings Plans + RIs) from owned inventory.
 
-Cost Explorer analyses recent usage and proposes commitment purchases that would
-cut on-demand spend. We surface the headline figures:
+Cost Explorer's ``Get*PurchaseRecommendation`` APIs are billed per request and
+cost six calls a cycle. The headline advice they gave is derivable for free: take
+the running instances no Reserved Instance already discounts, price them through
+the coarse table, and apply a conservative commitment discount.
 
-* **Savings Plans** — a Compute Savings Plan recommendation (the most flexible
-  type), reported as one recommendation with its hourly commitment + monthly
-  saving.
-* **Reserved Instances** — per-service RI recommendations (EC2, RDS, ElastiCache,
-  Redshift, OpenSearch), one per service that would save money.
+Two things that follow from *not* using Cost Explorer, both surfaced in the
+summaries because an operator will otherwise compare against the console:
 
-Defaults to the lowest-commitment terms (one year, no upfront) so the figure is a
-conservative floor; longer terms / upfront payment save more. Cost Explorer is a
-global endpoint (us-east-1), so this collector is account-level and does not
-iterate regions.
+* it's a **snapshot** of what's running now, not a 30-day average, and
+* only the share in `pricing.COMMIT_SAFETY` is advised, so a momentary spike
+  can't turn into a year-long over-commitment.
+
+Account-level: the region sweep happens inside the inventory join.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
-from botocore.exceptions import ClientError
-
-from clont.core.logging import get_logger
 from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
+from clont.finops.aws import inventory, pricing
 from clont.finops.models import CostRecord, Recommendation
-from clont.providers.aws.parsing import _RIRecommendation, _SPSummary
 from clont.providers.base import Provider
 
-log = get_logger("clont.finops.aws.commitments")
-
-# Conservative, flexible defaults: one-year, nothing upfront, 30-day lookback.
-_TERM = "ONE_YEAR"
-_PAYMENT = "NO_UPFRONT"
-_LOOKBACK = "THIRTY_DAYS"
+_USD = "USD"
 _SP_TYPE = "COMPUTE_SP"
+_TERMS = "one year, no upfront"
 
-# RI recommendations require a Service; cover the ones that commonly carry RIs.
-# Maps Cost Explorer's service string -> the short id we tag the recommendation with.
-_RI_SERVICES = {
-    "Amazon Elastic Compute Cloud - Compute": "ec2",
-    "Amazon Relational Database Service": "rds",
-    "Amazon ElastiCache": "elasticache",
-    "Amazon Redshift": "redshift",
-    "Amazon OpenSearch Service": "opensearch",
-}
 
-# "We can't recommend anything" or "you're not allowed to ask" — expected, not a
-# failure; logged once per cycle instead of warned.
-_NOT_AVAILABLE = {
-    "DataUnavailableException",
-    "AccessDeniedException",
-    "AccessDenied",
-}
+def _money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 @register("finops", Cloud.AWS, "commitments")
 class CommitmentsCollector:
     cloud = Cloud.AWS
     service = "commitments"
+    # free describes now, and inventory.build() has its own ttl underneath
+    collect_every_seconds = 3600
+    recommend_every_seconds = 3600
 
     def __init__(self, provider: Provider, tuning=None) -> None:
         self._provider = provider
-        self._warned: set[str] = set()  # call labels already logged as unavailable
 
     def collect(self, period: Period) -> list[CostRecord]:
         return []  # commitment advice only, no spend records
 
     def recommendations(self, period: Period) -> list[Recommendation]:
-        ce = self._provider.client("ce", "us-east-1")
-        out: list[Recommendation] = []
-        # Savings Plans and Reserved Instances are independent queries; isolate
-        # them so an unexpected error on one still lets the other through.
-        for label, fn in (("savings plans", self._savings_plans),
-                          ("reserved instances", self._reserved_instances)):
-            try:
-                out.extend(fn(ce))
-            except Exception as exc:  # noqa: BLE001 - one half must not drop the other
-                log.warning(
-                    "%s recommendations failed for %s: %s",
-                    label, self._provider.alias, exc,
-                )
-        return out
+        inv = inventory.build(self._provider)
+        uncovered = inv.uncovered_hourly
+        if not inv.uncovered or uncovered <= 0:
+            return []  # everything running is already under a commitment
+        return self._savings_plan(inv, uncovered) + self._reserved_instances(inv, uncovered)
 
-    def _savings_plans(self, ce) -> list[Recommendation]:
-        resp = self._call(
-            ce.get_savings_plans_purchase_recommendation,
-            "savings plans",
-            SavingsPlansType=_SP_TYPE,
-            TermInYears=_TERM,
-            PaymentOption=_PAYMENT,
-            LookbackPeriodInDays=_LOOKBACK,
-        )
-        if resp is None:
+    def _savings_plan(self, inv: inventory.Inventory, uncovered: Decimal) -> list[Recommendation]:
+        saving = _money(pricing.commitment_monthly_saving(uncovered, pricing.SP_DISCOUNT_PCT))
+        if saving <= 0:
             return []
-        rec = resp.get("SavingsPlansPurchaseRecommendation", {})
-        summary = _SPSummary.model_validate(
-            rec.get("SavingsPlansPurchaseRecommendationSummary", {})
-        )
-        if summary.estimated_monthly_savings <= 0:
-            return []
+        commit = _money(pricing.commitment_hourly(uncovered))
+        pct = pricing.SP_DISCOUNT_PCT * 100
         return [self._rec(
             "savings-plans", "savings-plan", _SP_TYPE,
-            f"Compute Savings Plan ({_TERM.replace('_', ' ').lower()}, "
-            f"{_PAYMENT.replace('_', ' ').lower()}): commit "
-            f"${summary.hourly_commitment}/hr for ~{summary.savings_pct:.0f}% off",
-            summary.estimated_monthly_savings, summary.currency,
+            f"Compute Savings Plan ({_TERMS}): commit ${commit}/hr to cover "
+            f"{len(inv.uncovered)} uncommitted instance(s) for ~{pct:.0f}% off "
+            f"(snapshot of current usage, not a 30-day average)",
+            saving,
         )]
 
-    def _reserved_instances(self, ce) -> list[Recommendation]:
-        out: list[Recommendation] = []
-        for service_name, short in _RI_SERVICES.items():
-            resp = self._call(
-                ce.get_reservation_purchase_recommendation,
-                f"reserved instances ({short})",
-                Service=service_name,
-                TermInYears=_TERM,
-                PaymentOption=_PAYMENT,
-                LookbackPeriodInDays=_LOOKBACK,
-            )
-            if resp is None:
-                continue
-            for raw in resp.get("Recommendations", []):
-                ri = _RIRecommendation.model_validate(raw)
-                if ri.estimated_monthly_savings <= 0:
-                    continue
-                out.append(self._rec(
-                    "reserved-instances", "reserved-instance", short,
-                    f"Reserved Instances for {short} "
-                    f"({_TERM.replace('_', ' ').lower()}, "
-                    f"{_PAYMENT.replace('_', ' ').lower()}) — ~{ri.savings_pct:.0f}% off",
-                    ri.estimated_monthly_savings, ri.currency,
-                ))
-        return out
-
-    def _call(self, fn, label: str, **kwargs) -> dict | None:
-        """Invoke a Cost Explorer recommendation call, swallowing the expected
-        "no data / not allowed" errors (logged once) and returning None then."""
-        try:
-            return fn(**kwargs)
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") in _NOT_AVAILABLE:
-                if label not in self._warned:
-                    log.info(
-                        "%s recommendations unavailable for %s: %s",
-                        label, self._provider.alias, exc,
-                    )
-                    self._warned.add(label)
-                return None
-            raise
+    def _reserved_instances(
+        self, inv: inventory.Inventory, uncovered: Decimal
+    ) -> list[Recommendation]:
+        saving = _money(pricing.commitment_monthly_saving(uncovered, pricing.RI_DISCOUNT_PCT))
+        if saving <= 0:
+            return []
+        pct = pricing.RI_DISCOUNT_PCT * 100
+        # Types are named so the advice is actionable; RIs are bought per type.
+        types = sorted({r.instance_type for r in inv.uncovered if r.instance_type})
+        listed = ", ".join(types[:3]) + (" and more" if len(types) > 3 else "")
+        return [self._rec(
+            "reserved-instances", "reserved-instance", "ec2",
+            f"Reserved Instances for ec2 ({_TERMS}) — ~{pct:.0f}% off "
+            f"{len(inv.uncovered)} uncommitted instance(s)"
+            + (f": {listed}" if listed else "")
+            + " (snapshot of current usage, not a 30-day average)",
+            saving,
+        )]
 
     def _rec(
-        self, service: str, kind: str, rid: str, summary: str,
-        saving: Decimal, currency: str,
+        self, service: str, kind: str, rid: str, summary: str, saving: Decimal
     ) -> Recommendation:
         return Recommendation(
             cloud=str(Cloud.AWS),
@@ -165,5 +102,5 @@ class CommitmentsCollector:
                 alias=self._provider.alias,
             ),
             summary=summary,
-            estimated_savings=Money(amount=saving, currency=currency),
+            estimated_savings=Money(amount=saving, currency=_USD),
         )
