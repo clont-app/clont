@@ -1,12 +1,12 @@
-# API uplink
+# api uplink
 
-The free tier is fully self-contained: clont collects from your read-only cloud
-roles, detects events locally, and notifies your channels — nothing leaves the
-agent except the notifications you configure.
+the free tier is completely self-contained: clont reads your cloud with read-only
+roles, works out the events locally and notifies your channels. nothing leaves
+the agent except the notifications you asked for.
 
-The **API uplink** (paid tier) adds a hosted clont server that runs heavier,
-server-side analytics the agent deliberately doesn't run on-box. It is enabled
-purely by adding an `api:` block to `clont.yaml`:
+the **api uplink** (paid tier) adds a hosted clont server that runs the heavier
+analytics we deliberately don't run on your box. you turn it on by adding an
+`api:` block to `clont.yaml`:
 
 ```yaml
 api:
@@ -15,21 +15,20 @@ api:
   timeout_seconds: 10
 ```
 
-With no `api:` block the uplink is inert and the agent behaves exactly as the
-free tier.
+no `api:` block, no uplink — the agent behaves exactly like the free tier.
 
-## Why it's two-way
+## why it's two-way
 
-A hard rule: **channel tokens (Slack/Discord/Telegram) never leave the agent
-box, even in paid tiers.** The server therefore can never notify your channels
-itself — so anything it computes (a forecast, a recommendation, a cross-account
-anomaly) has to come **back** to the agent, which dispatches it through the
-channels it already owns. The uplink is consequently request/response: the agent
-POSTs its batch and the server replies with events to dispatch.
+hard rule: **your channel tokens never leave the agent box, even on paid tiers.**
+which means the server can't notify your channels itself. so anything it works
+out (a forecast, a recommendation, a cross-account anomaly) has to come **back**
+to the agent, and the agent sends it through the channels it already owns. that's
+why the uplink is request/response: the agent posts its batch, the server replies
+with events to dispatch.
 
-## Wire contract
+## the wire
 
-Each cycle the agent makes a single request:
+one request per cycle:
 
 ```
 POST {url}
@@ -42,15 +41,15 @@ Content-Type: application/json
   "costs":           [ CostRecord, ... ],
   "recommendations": [ Recommendation, ... ],
   "health":          [ HealthCheck, ... ],
-  "events":          [ Event, ... ]          // the events detected locally this cycle
+  "events":          [ Event, ... ]          // what was detected locally this cycle
 }
 ```
 
-Each record self-identifies by `cloud` and account `alias`, so one batch can
-span every configured account without a per-account split. `Decimal` money
-values are sent as strings (to preserve precision); timestamps are ISO-8601.
+every record says which `cloud` and account `alias` it came from, so one batch
+covers every configured account without splitting it up. money is sent as strings
+(`Decimal`, so precision survives the trip) and timestamps are iso-8601.
 
-The server replies with the events to dispatch locally:
+the server replies with events to dispatch:
 
 ```
 200 OK
@@ -67,16 +66,16 @@ Content-Type: application/json
 }
 ```
 
-Returned events are fed straight into the normal dispatch path, so they obey
-each channel's severity gate and repeat throttle just like locally-detected
-events. Malformed items in the reply are logged and skipped — a bad response can
-never silence the agent's own events.
+those go straight into the normal dispatch path, so they obey each channel's
+severity gate and repeat throttle just like locally-made events. anything
+malformed in the reply is logged and skipped — a bad response can never silence
+the agent's own events.
 
-## Failure & safety
+## when it breaks
 
-- The uplink is **best-effort**: a network/HTTP error is logged and the cycle
-  still dispatches its locally-detected events. The next cycle retries naturally.
-- Traffic is **outbound HTTPS to your own server** — it needs no cloud IAM
-  change and doesn't touch the read-only invariant on cloud APIs.
-- `api_key` is a secret; treat `clont.yaml` as sensitive (readable only by the
-  agent's service account), the same as the webhook tokens under `channels:`.
+- the uplink is **best effort**: a network or http error gets logged and the cycle
+  still dispatches the events it found locally. next cycle just tries again.
+- traffic is **outbound https to your own server**. no cloud iam change, and it
+  doesn't touch the read-only rule on cloud apis.
+- `api_key` is a secret, so treat `clont.yaml` as sensitive (readable only by the
+  agent's service account) — same as the webhook tokens under `channels:`.

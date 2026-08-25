@@ -1,212 +1,234 @@
 # clont
 
-A long-running, strictly **read-only** monitoring and FinOps agent for the cloud.
+a long-running, **read-only** agent that watches your cloud for broken things and
+wasted money.
 
-clont watches your cloud accounts (AWS today) for health issues and cost waste,
-emitting `warn`/`critical` events to the channels you configure. Every cloud call
-is a `Describe`/`Get`/`List` — the agent never mutates cloud state.
+clont sits next to your aws accounts, looks around every few minutes, and pings
+you on slack / discord / telegram when something is wrong or costing you more
+than it should. every call it makes is a `describe` / `get` / `list` — it never
+changes anything in your cloud.
 
-For the product vision, tier model (free local vs paid hosted intelligence), and
-architecture, see [docs/architecture.md](docs/architecture.md).
+for the bigger picture (free local tier vs paid hosted one, how the pieces fit)
+see [docs/architecture.md](docs/architecture.md).
 
-## Features
+## what it watches
 
-What's implemented today (AWS, strictly read-only):
+### health
 
-**Health monitoring** — per-cycle status checks that emit `warn`/`critical`
-events through the pipeline below, each attributed to its account alias and
-region:
+per-cycle checks, each tagged with the account alias and region it came from:
 
-- **EC2** — instance reachability (`DescribeInstanceStatus`), plus CPU / network
-  metrics via CloudWatch `GetMetricData` (billed per metric, so off until you set
-  `monitoring.metrics.enabled`).
-- **RDS** — DB instance status (storage-full / failed / incompatible states).
-- **ElastiCache** — cache cluster status.
-- **EKS** — cluster status and reported `health.issues`.
-- **EBS** — volume status (impaired / insufficient-data).
-- **Redshift** — cluster availability.
-- **Auto Scaling** — healthy in-service instances vs desired capacity.
-- **Load balancers (ALB/NLB)** — target-group health.
-- **ECS** — service running-vs-desired count and failed deployments.
-- **ACM** — certificate expiry (warn ≤30d, critical ≤7d / expired).
-- **AWS Health** — open/upcoming account events (degrades gracefully without a
-  Business/Enterprise support plan).
-- **Metric anomalies** — CloudWatch metric series (e.g. EC2 CPU / network) are
-  watched for statistical deviation: a `warn` fires when the latest sample sits
-  more than a configurable number of deviations from its baseline (anomaly
-  detection, not fixed thresholds). With enough history the baseline is
-  *seasonal* — the latest sample is compared against prior samples at the same
-  hour-of-day (robust median/MAD), so a daily load cycle isn't mistaken for an
-  anomaly.
-- **Capacity & pressure default rules** — opinionated threshold + trend rules over
-  native CloudWatch metrics (deterministic, one global default each, operator-tunable):
-  - **Predicted disk-full** — a least-squares trend over RDS free storage / Redshift
-    disk-used that `warn`s when storage is projected to hit capacity within N days.
-  - **Low free storage** (`warn` below 10%, RDS) and **high disk used** (`warn` above
-    90%, Redshift).
-  - **CPU-credit depletion** — burstable EC2/RDS instances whose `CPUCreditBalance`
-    falls below the floor.
-  - **Swap pressure** — ElastiCache `SwapUsage` above the threshold.
-  *Scope:* "disk-full" covers AWS-native storage metrics (RDS, Redshift). EC2 root /
-  EBS *filesystem* fill needs the CloudWatch agent's guest metrics and is not covered
-  (clont reads only what AWS exposes without an agent).
+- **ec2** — instance reachability, plus cpu / network metrics if you turn on
+  `monitoring.metrics.enabled` (that one is billed, so it's off by default).
+- **rds** — db instance status (storage full, failed, incompatible).
+- **elasticache** — cache cluster status.
+- **eks** — cluster status and whatever `health.issues` reports.
+- **ebs** — volume status (impaired, insufficient-data).
+- **redshift** — cluster availability.
+- **auto scaling** — in-service instances vs what you asked for.
+- **load balancers** — alb / nlb target group health.
+- **ecs** — running vs desired count, failed deployments.
+- **acm** — certs about to expire (warn at 30 days, critical at 7 or already gone).
+- **aws health** — open and upcoming account events. works fine without a
+  business support plan, it just gets skipped.
+- **metric anomalies** — instead of fixed thresholds, clont compares the newest
+  sample against its own baseline and warns when it drifts too far. with enough
+  history the baseline is *seasonal*: 9am is compared to other 9ams, so your
+  normal daily traffic curve doesn't page you.
+- **capacity rules** — a few opinionated defaults on top of native cloudwatch
+  metrics:
+  - **disk filling up** — a trend line over rds free storage / redshift disk used,
+    warns if it's going to hit the wall in the next n days.
+  - **low free storage** (rds, under 10%) and **high disk used** (redshift, over 90%).
+  - **cpu credits running out** on burstable ec2 / rds.
+  - **swap pressure** on elasticache.
 
-**FinOps — spend** — account-wide daily spend read from the account's **Cost and
-Usage Report** in S3 (free; Cost Explorer bills $0.01 per request and the daemon
-polls every cycle), surfaced as a daily spend digest (`info`) plus a spend-spike
-alert (`warn`) when a service's latest-day cost jumps beyond a configurable % over
-its baseline. The
-baseline is the median of prior **same-weekday** spend, so normal weekly cycles
-(quiet weekends, busy Mondays) don't trip false spikes.
+  heads up: "disk full" only covers what aws exposes itself (rds, redshift).
+  filesystem usage inside an ec2 box needs the cloudwatch agent, and clont only
+  reads what's there without one.
 
-**FinOps — budgets & forecast** — a month-end spend **forecast** (`info`), a
-run-rate projection (month-to-date plus an exponentially-weighted daily rate over
-the remaining days), and **budget alerts** against operator-defined monthly
-ceilings (whole-account or per-service, set in config): `warn` as the forecast
-approaches or is projected to exceed a budget, `critical` once spend has already
-breached it. Pure arithmetic — no model, no extra API calls.
+### spend
 
-**FinOps — recommendations** — read-only savings findings, each carrying a
-ballpark monthly dollar figure and emitted through the same event pipeline:
+daily account spend comes from the **cost and usage report** your account already
+writes to s3. that's free — cost explorer charges $0.01 a request and the agent
+would hit it every cycle.
 
-- **Rightsizing** via AWS Compute Optimizer — EC2 instances, EBS volumes, Auto
-  Scaling groups, Lambda functions, ECS services and RDS databases, picking the
-  best savings option. Each resource type degrades independently when its
-  Compute Optimizer opt-in is missing.
-- **Commitment purchases** — Compute Savings Plans and EC2 Reserved Instances,
-  reported at conservative one-year, no-upfront terms.
-- **Commitment utilization & coverage** — Savings Plans / RIs you already hold
-  that are under-used (committed spend going to waste) or under-covering
-  (eligible on-demand a commitment would discount).
+you get a daily spend digest (`info`) plus a spike alert (`warn`) when a service
+jumps past its baseline by more than you allow. the baseline is the median of
+previous **same-weekday** spend, so quiet weekends and busy mondays don't look
+like spikes.
 
-  Both are derived from what the account actually runs (`DescribeInstances`,
-  `DescribeReservedInstances`, `DescribeSavingsPlans` — all free) rather than
-  Cost Explorer's billed recommendation APIs, which cost 10 requests a cycle.
-  The trade-off: it's a snapshot of current usage, not a 30-day average, so the
-  figures won't match the console. Only 70% of uncovered spend is ever advised
-  as a commitment, so a momentary spike can't become a year-long one.
-- **Unattached EBS volumes** — `available` volumes still being billed.
-- **Unassociated Elastic IPs** — allocated public IPv4 not attached to anything.
-- **gp2 → gp3 migration** — in-use gp2 volumes, with the storage-rate saving.
-- **Idle resources** — EC2 instances, Auto Scaling groups, EBS volumes, ECS
-  services, RDS databases and NAT gateways that Compute Optimizer reports as
-  idle/unattached/unused, each with its monthly saving. Free, and it replaces the
-  metric-based detectors that could only report the evidence — those remain as an
-  opt-in fallback (`finops.allow_cloudwatch_metrics`) for accounts not enrolled in
-  Compute Optimizer.
-- **Idle load balancers** — ALB/NLB with no registered targets.
-- **Stale EBS snapshots** — orphaned (source volume deleted) or older than a
-  configurable age.
-- **Off-hours scheduling** — always-on non-prod EC2 instances (identified by a
-  configurable tag convention) that could be stopped nights and weekends.
-- **Tag hygiene** — EC2 instances and EBS volumes missing operator-required tags,
-  the root cause of unattributable spend.
+### budgets and forecast
 
-Idle/stale thresholds, the non-prod tag convention, and the required-tag list are
-all configurable (see `finops.*` below).
+a month-end **forecast** (`info`) from month-to-date plus a weighted daily rate,
+and **budget alerts** against ceilings you set: `warn` when the forecast gets
+close or is heading over, `critical` once you've actually blown through it. it's
+plain arithmetic — no model, no extra api calls.
 
-**Platform**
+### savings findings
 
-- **Multi-account** — monitor any number of AWS accounts, keyed by alias; a
-  failed account is skipped, not fatal.
-- **Read-only by construction** — every call is a `Describe*`/`Get*`; clont never
-  writes to your cloud. See [docs/iam.md](docs/iam.md), which also lists the two
-  billed grants (`ce:GetCostAndUsage`, `cloudwatch:GetMetricData`) clont leaves
-  out of the policy on purpose, and what each costs if you opt in. The default
-  configuration makes no billed API call at all.
-- **Refreshable assume-role credentials** — the daemon survives credential
-  expiry without restarts.
-- **Channels** — log (always on) plus optional Slack, Discord, and Telegram, each
-  with its own severity floor and repeat throttling (see below).
-- **API uplink** (optional, paid tier) — with an `api:` block, each cycle ships
-  the full batch (metrics, costs, recommendations, health, events) to your clont
-  server and dispatches the events it returns through the same channels. Two-way
-  by design: channel tokens never leave the agent, so server-side findings ride
-  back on the response. Omit the block to stay fully local. See [docs/api.md](docs/api.md).
+read-only recommendations, each with a rough monthly dollar figure, sent through
+the same event pipeline:
 
-## How events work
+- **rightsizing** via compute optimizer — ec2, ebs, auto scaling groups, lambda,
+  ecs and rds, picking the best savings option. each resource type degrades on
+  its own if you haven't opted it in.
+- **commitments to buy** — compute savings plans and ec2 reserved instances, at
+  the conservative one-year no-upfront terms.
+- **commitments you already own** that are under-used (paying for headroom you
+  don't touch) or under-covering (on-demand a commitment would discount).
 
-clont runs as a long-running agent. On every cycle it walks the same pipeline:
+  both come from what the account actually runs right now (`DescribeInstances`,
+  `DescribeReservedInstances`, `DescribeSavingsPlans` — all free) instead of cost
+  explorer's billed recommendation apis, which would be 10 requests a cycle. the
+  trade: it's a snapshot, not a 30-day average, so the numbers won't match the
+  console. and only 70% of uncovered spend ever gets advised as a commitment, so
+  one busy afternoon can't talk you into a year-long contract.
+- **unattached ebs volumes** — `available` volumes you're still paying for.
+- **public ipv4 addresses** — see below, it's the newest one.
+- **gp2 → gp3** — in-use gp2 volumes, with the storage-rate saving.
+- **idle resources** — ec2, auto scaling groups, ebs, ecs services, rds and nat
+  gateways that compute optimizer calls idle, each with its monthly saving. free,
+  and it replaced the metric-based detectors that could only show you the
+  evidence. those are still around as an opt-in fallback
+  (`finops.allow_cloudwatch_metrics`) if an account isn't enrolled.
+- **idle load balancers** — alb / nlb with nothing registered behind them.
+- **stale ebs snapshots** — orphaned (source volume gone) or just old.
+- **off-hours scheduling** — always-on non-prod instances (you pick the tag
+  convention) that could sleep at night and on weekends.
+- **tag hygiene** — ec2 and ebs missing tags you require, which is where
+  unattributable spend comes from.
 
-```
-collect (read-only) ──► detect ──► events ──► dispatch to channels
-```
+thresholds, the non-prod tag convention and the required-tag list are all
+configurable under `finops.*`.
 
-1. **Collect.** Read data from each cloud — FinOps cost, monitoring metrics and
-   health. The cloud IAM role is strictly read-only; clont never writes to your
-   cloud.
-2. **Detect.** Turn that data into **events** — an idle resource, a failing
-   health check, a spend anomaly. Every event has a **severity**
-   (`info` / `warn` / `critical`) and a stable **key** that identifies the
-   *condition*, not the occurrence (e.g. `monitoring:health:prod:aws:ec2:i-123`,
-   where `prod` is the account alias so two accounts never collide). The key is
-   what lets clont recognise the same condition across cycles.
-3. **Dispatch.** Hand every event to every channel. Each channel decides on its
-   own whether to fire, using two knobs:
-   - **`min_severity`** — drop anything below this level.
-   - **`repeat_after`** — having fired for a key, stay silent until this much
-     time has passed. `none` means "fire once, never repeat".
+## public ipv4 — every address is a bill now
 
-### How a channel fires
+since february 2024 aws charges **$0.005/hr for every public ipv4 address**,
+attached or not. that's about $3.65 a month each, and nobody notices because it
+never shows up as its own line item on anything you look at.
 
-The same firing rule covers every channel; only the defaults differ:
+so clont counts them. all of them.
 
-- **log** (always on) — severity floor `info`; re-logs a standing condition
-  every ~3h.
-- **Slack / Discord / Telegram** — severity floor `warn`; fire once, and
-  re-notify only if `repeat_hours` is set.
+**how it finds them.** every billable address in a vpc hangs off a network
+interface, so one paginated `DescribeNetworkInterfaces` per region sees nat
+gateways, load balancers, instances, rds and fargate in one shot. a second call,
+`DescribeAddresses`, picks up elastic ips that aren't attached to anything and so
+have no interface. two free describes per region — no cost explorer, no
+cloudwatch, no price lookup at runtime. **running this collector costs you $0.**
 
-So a brand-new `critical` health event fires the log **and** every notifier at
-once. While the condition persists, the log keeps a throttled record (so it
-isn't logged every cycle) and the notifiers stay quiet — unless you've given
-them a `repeat_hours` to re-ping for still-open issues. Example timeline for one
-condition (log repeat 3h, Slack `repeat_hours=24`, Telegram once-only):
+**what it reports.** a daily cost record per region with how many addresses you
+have and what they're costing, stamped per-day like every other spend source so
+it lands in the daily digest and the spike detector sees it properly. addresses
+are deduped by ip (an attached elastic ip shows up in both calls) and byoip
+addresses are dropped, since aws doesn't charge you for those.
+
+**what it recommends.** counting is not blaming. a public ip on your production
+load balancer is a cost, not a mistake, and telling you to "save $3.65" on it
+would just teach you to ignore clont. so only the clear waste turns into a
+recommendation:
+
+| finding | why it's waste |
+|---|---|
+| unassociated elastic ip | allocated, attached to nothing, billed anyway |
+| address on a detached interface | the thing behind it is gone, the ip isn't |
+| secondary public ip | billed on top of the primary on the same interface |
+
+each one is its own event, so two secondaries on one interface don't collapse
+into a single alert.
+
+the extra iam you need is one action: `ec2:DescribeNetworkInterfaces`.
+
+## platform
+
+- **many accounts** — as many as you like, keyed by an alias you choose. one
+  account failing gets skipped, not fatal.
+- **read-only by construction** — every call is a `Describe*` / `Get*`. see
+  [docs/iam.md](docs/iam.md), which also lists the two billed grants
+  (`ce:GetCostAndUsage`, `cloudwatch:GetMetricData`) that are left out of the
+  policy on purpose, and what each costs if you want them. out of the box clont
+  makes **no billed api call at all**.
+- **credentials refresh themselves** — the agent survives expiry without a restart.
+- **channels** — log (always on) plus slack, discord and telegram, each with its
+  own severity floor and repeat throttle.
+- **api uplink** (optional, paid) — add an `api:` block and each cycle ships its
+  batch to your clont server and dispatches whatever events come back. two-way on
+  purpose: your channel tokens never leave the agent. leave the block out and
+  everything stays local. see [docs/api.md](docs/api.md).
+
+## how events work
+
+every cycle walks the same path:
 
 ```
-t=0h    new       → log ✓  slack ✓  telegram ✓
-t=0h05  still open → log –  slack –  telegram –     (within every window)
+collect (read-only) ──► detect ──► events ──► send to channels
+```
+
+1. **collect.** read cost, metrics and health from each cloud.
+2. **detect.** turn that into **events** — an idle resource, a failing check, a
+   spend spike. each event has a severity (`info` / `warn` / `critical`) and a
+   stable **key** naming the *condition*, not the moment
+   (`monitoring:health:prod:aws:ec2:i-123` — `prod` is the account alias, so two
+   accounts never collide). the key is how clont recognises the same problem next
+   cycle.
+3. **dispatch.** hand every event to every channel. each channel decides for
+   itself with two knobs:
+   - **`min_severity`** — ignore anything below this.
+   - **`repeat_after`** — after firing for a key, stay quiet this long. `none`
+     means fire once and never again.
+
+### when a channel actually fires
+
+same rule everywhere, only the defaults differ:
+
+- **log** (always on) — floor `info`, re-logs a standing problem every ~3h.
+- **slack / discord / telegram** — floor `warn`, fire once, repeat only if you
+  set `repeat_hours`.
+
+so a brand new `critical` hits the log and every notifier at once. while it's
+still open the log keeps a throttled record and the notifiers stay quiet, unless
+you gave them a `repeat_hours` to nag you. one condition, log repeat 3h, slack
+`repeat_hours=24`, telegram once-only:
+
+```
+t=0h    new        → log ✓  slack ✓  telegram ✓
+t=0h05  still open → log –  slack –  telegram –     (everyone's in their window)
 t=3h    still open → log ✓  slack –  telegram –     (log window elapsed)
-t=24h   still open → log ✓  slack ✓  telegram –     (slack re-notifies)
+t=24h   still open → log ✓  slack ✓  telegram –     (slack nags again)
 ```
 
-All severity and repeat settings are per-channel configuration. Channels live
-outside the monitored clouds and use their own credentials (webhook URLs, bot
-tokens), kept separate from the read-only cloud role.
+channels live outside the clouds they report on and use their own credentials,
+kept away from the read-only cloud role.
 
-### One-shot scan
+## one-shot scan
 
-Channels only tell you what's *wrong*. Once the read-only role is in place, the
-quickest way to see what clont actually found is a single cycle with a summary:
+channels only tell you what's wrong. once the read-only role is in place, the
+fastest way to see what clont found is a single cycle with a summary:
 
 ```
-clont run --summary -                  # one cycle, print the summary, exit
-clont run --summary scan.txt           # shareable report (see below)
-clont run --summary scan.json          # machine-readable
-clont run --summary out --format json  # extension picks the format; this overrides
+clont run --summary -                  # one cycle, print it, exit
+clont run --summary scan.txt           # a report you can send someone
+clont run --summary scan.json          # for scripts
+clont run --summary out --format json  # extension picks the format; this wins
 ```
 
-Three formats, three audiences:
-
-| Format | From | For |
+| format | from | for |
 |---|---|---|
-| `text` | `-`, any other extension | you, right after the run — terse counts |
-| `report` | `.txt` | the person you send it to |
+| `text` | `-`, any other extension | you, right after the run — just counts |
+| `report` | `.txt` | the person you're sending it to |
 | `json` | `.json` | scripts, dashboards |
 
-The summary reports the accounts scanned, how much was collected (metrics,
-costs, recommendations, health checks), events broken down by severity and
-domain, the non-`ok` health checks, estimated monthly savings (per currency),
-the top services by spend, and any collector that failed — so an empty result
-can be told apart from a role that couldn't read anything.
+the summary lists accounts scanned, how much was collected, events by severity
+and domain, the non-`ok` health checks, estimated monthly savings per currency,
+top services by spend, and any collector that failed — so "nothing found" can be
+told apart from "the role couldn't read anything".
 
-`--summary` runs exactly one cycle, so events still reach the channels as usual.
-Add `--fail-on-critical` to exit `2` when the cycle produced a critical event,
-which makes the command usable as a CI gate.
+`--summary` runs exactly one real cycle, so events still reach your channels. add
+`--fail-on-critical` to exit `2` on a critical, which makes it usable as a ci gate.
 
-### The shareable report
+### the shareable report
 
-`.txt` gets a report meant to be sent to someone who wasn't there — it leads
-with the headline number and puts the evidence under it:
+`.txt` gives you something meant for a person who wasn't there. big number first,
+evidence under it:
 
 ```
 ====================================================================
@@ -232,176 +254,167 @@ with the headline number and puts the evidence under it:
                  ... and 3 more
 ```
 
-Findings are grouped by kind and sorted by money, biggest first, with the top
-resources named under each. Then top spend, health, and any collector errors.
+findings are grouped by kind and sorted by money, biggest first. then top spend,
+health, and any collector errors.
 
-Two things it will not do: sum across currencies, or print an all-clear it
-can't back. If collectors failed, the report says the figure is a floor and
-lists the failures; if nothing was configured, it says that instead.
+two things it won't do: add up different currencies, or claim an all-clear it
+can't back. if collectors failed it says the number is a floor and lists what
+broke; if nothing was configured it says that instead.
 
-## Configuration
+## configuration
 
-clont is configured by a single YAML file (see `clont.example.yaml` for the full
-reference). Point `$CLONT_CONFIG` at it, or drop a `clont.yaml` in the working
-directory; `clont run --config <path>` overrides both. In Kubernetes the file is
-a mounted ConfigMap.
+one yaml file — see `clont.example.yaml` for the full thing. point `$CLONT_CONFIG`
+at it, or drop a `clont.yaml` in the working directory; `clont run --config <path>`
+beats both.
 
-- On startup the file is **validated** (pydantic) — bad or unknown keys fail
-  fast with a clear error.
-- If no config file exists, clont **writes one with defaults** at the resolved
-  path on first run, then continues.
-- Read-only cloud access (the IAM `role_arn`) is declared in the config, not on
-  the command line. See [docs/iam.md](docs/iam.md) for the role's read-only
-  permissions and trust policy.
+- the file is **validated on startup** (pydantic), so a typo fails fast with a
+  clear message instead of silently doing nothing.
+- if there's no config file, clont **writes one with defaults** and carries on.
+- cloud access (`role_arn`) lives in the config, not on the command line. see
+  [docs/iam.md](docs/iam.md).
 
-The YAML file is the single source of truth — individual fields are not
-overridable by environment variables. The only env var clont reads is
-`CLONT_CONFIG`, which just points at the file.
+the yaml is the only source of truth — no field is overridable by an env var. the
+one env var clont reads is `CLONT_CONFIG`, and it just points at the file.
 
-### Parameters
+### the settings
 
-**Top level**
+**top level**
 
 - `interval_seconds` (int, default `300`) — how often the agent runs a cycle.
 - `lookback_days` (int, default `1`) — window for cost / metric queries.
-- `log_level` (enum, default `info`) — the daemon's own operational log
-  verbosity: `debug` / `info` / `warning` / `error` / `critical`. Distinct from
-  `channels.log.min_severity`, which gates which detected *events* are logged.
-- `aws` (map, default `{}`) — read-only AWS accounts to monitor, keyed by alias
-  (see below).
-- `channels` (object, default log only) — outbound delivery channels (see below).
+- `log_level` (enum, default `info`) — the daemon's own log volume:
+  `debug` / `info` / `warning` / `error` / `critical`. not the same as
+  `channels.log.min_severity`, which decides which *events* get logged.
+- `aws` (map, default `{}`) — accounts to watch, keyed by alias.
+- `channels` (object, default log only) — where events go.
 
-**`aws.<alias>`** — one entry per account; the alias (the map key, e.g. `prod`,
-`staging`) is shown in notifications and used to attribute events, so two
-accounts never collide. Add a second account by adding another keyed entry.
+**`aws.<alias>`** — one entry per account. the alias (`prod`, `staging`, whatever)
+shows up in notifications and event keys, so two accounts never collide. add
+another account by adding another key.
 
-- `role_arn` (str, **required**) — read-only IAM role clont assumes (via IRSA on EKS).
+- `role_arn` (str, **required**) — the read-only role clont assumes (via irsa on eks).
 - `regions` (list of str, default `[]`) — regions to query.
-- `external_id` (str, default `null`) — optional STS external id for the assume-role.
-- `cur` (map, default `null`) — the account's Cost and Usage Report in S3, the
-  free spend source: `bucket`, `report_name`, `prefix`, `region` (default
-  `us-east-1`), `refresh_minutes` (default `60`) and `include_linked` (default
-  `false`, keep only this account's rows out of a payer report). Legacy CUR
-  (gzip csv) only — setup in [docs/iam.md](docs/iam.md). Without it, and without
-  `finops.allow_cost_explorer`, there is no spend data.
+- `external_id` (str, default `null`) — sts external id, if you use one.
+- `cur` (map, default `null`) — your cost and usage report in s3, the free spend
+  source: `bucket`, `report_name`, `prefix`, `region` (default `us-east-1`),
+  `refresh_minutes` (default `60`) and `include_linked` (default `false` — keep
+  only this account's rows out of a payer report). legacy cur (gzip csv) only;
+  setup is in [docs/iam.md](docs/iam.md). without it, and without
+  `finops.allow_cost_explorer`, there's no spend data.
 
-If one account's role can't be assumed at startup, clont logs a warning and
-keeps monitoring the rest; it aborts only if no account authenticates.
+if one account's role can't be assumed at startup, clont warns and keeps going
+with the rest. it only gives up if *no* account authenticates.
 
-**`finops`** — spend-event thresholds
+**`finops`**
 
 - `allow_cost_explorer` (bool, default `false`) — read spend from
-  `ce:GetCostAndUsage` instead of the CUR. Billed: $0.01 per request, ~$0.30/mo
-  per account at the default daily cadence. Off means clont makes no paid Cost
-  Explorer call at all.
-- `collect_interval_seconds` (int, default `86400`) — how often spend is
-  actually fetched, however fast `interval_seconds` ticks. The cached records
-  still reach the detectors every cycle, so lowering this buys freshness, not
-  coverage; `clont run --summary` always forces a full refresh.
-- `recommend_interval_seconds` (int, default `3600`) — the same, for
-  recommendations.
-- `spend_baseline_days` (int, default `28`) — trailing window the spike baseline
-  is built from. ~4 weeks gives several same-weekday samples; the baseline is the
-  median of prior same-weekday spend (falls back to the flat mean on short
-  windows).
-- `spend_spike_pct` (float, default `50`) — emit a `warn` spike event when a
-  service's latest-day spend exceeds the baseline by more than this percentage.
-- `spend_min_dollars` (float, default `1`) — ignore services whose latest-day
-  spend is below this, so trivial amounts don't trip the spike alert.
-- `budgets` (list, default `[]`) — monthly spend ceilings. Each entry has
-  `monthly_limit` (required), `account` (alias, or `"*"` for every account,
-  default `"*"`), optional `service` (the name as it appears in the spend source
-  — CUR `product/ProductName`; omit for a whole-account budget), and `currency` (default `USD`).
-- `budget_warn_pct` (float, default `80`) — emit a `warn` when the month-end
-  forecast reaches this percentage of a budget (a `critical` fires once spend has
-  actually breached it).
-- `forecast_alpha` (float, default `0.5`) — EWMA recency weight for the
-  daily-rate month-end forecast (higher = more weight on recent days).
-- `allow_cloudwatch_metrics` (bool, default `false`) — fall back to the
-  CloudWatch idle detectors (EC2 / RDS / NAT) instead of relying on Compute
-  Optimizer. Billed: `GetMetricData` costs $0.01 per thousand *metrics*, and these
-  ask for one per resource per cycle, so the bill grows with the fleet. Only worth
-  it on an account not enrolled in Compute Optimizer. The three settings below
-  apply to that fallback.
-- `idle_cpu_pct` (float, default `5`) — average CPU % below which an EC2/RDS
-  resource counts as idle.
-- `idle_lookback_days` (int, default `14`) — trailing window the idle averages
-  (CPU / network / connections / NAT bytes) are taken over.
-- `idle_rds_max_connections` (float, default `1`) — average DB connections below
-  which an RDS instance counts as idle.
-- `snapshot_max_age_days` (int, default `90`) — EBS snapshots older than this are
-  flagged as "old".
-- `ri_sp_min_utilization` (float, default `90`) — flag a Savings Plan / Reserved
-  Instance used below this percentage (paying for unused commitment).
+  `ce:GetCostAndUsage` instead of the cur. billed: $0.01 a request, ~$0.30/mo per
+  account at the default daily cadence. off means zero paid cost explorer calls.
+- `collect_interval_seconds` (int, default `86400`) — how often spend is really
+  fetched, no matter how fast `interval_seconds` ticks. cached records still reach
+  the detectors every cycle, so lowering this buys freshness, not coverage.
+  `clont run --summary` always forces a full refresh.
+- `recommend_interval_seconds` (int, default `3600`) — same, for recommendations.
+- `spend_baseline_days` (int, default `28`) — how far back the spike baseline
+  looks. ~4 weeks gives you several same-weekday samples; short windows fall back
+  to a flat mean.
+- `spend_spike_pct` (float, default `50`) — `warn` when a service's latest day
+  beats its baseline by more than this percent.
+- `spend_min_dollars` (float, default `1`) — ignore services spending less than
+  this, so pocket change doesn't page you.
+- `budgets` (list, default `[]`) — monthly ceilings. each entry has
+  `monthly_limit` (required), `account` (an alias, or `"*"` for all, default
+  `"*"`), optional `service` (spelled as the spend source spells it — cur
+  `product/ProductName`; leave it out for a whole-account budget) and `currency`
+  (default `USD`).
+- `budget_warn_pct` (float, default `80`) — `warn` when the forecast reaches this
+  much of a budget. `critical` fires once you've actually gone over.
+- `forecast_alpha` (float, default `0.5`) — how much the forecast leans on recent
+  days (higher = more recent).
+- `allow_cloudwatch_metrics` (bool, default `false`) — fall back to the cloudwatch
+  idle detectors (ec2 / rds / nat) instead of compute optimizer. billed:
+  `GetMetricData` is $0.01 per thousand *metrics*, one per resource per cycle, so
+  the bill grows with your fleet. only worth it on an account that isn't enrolled
+  in compute optimizer. the next three settings only apply to this fallback.
+- `idle_cpu_pct` (float, default `5`) — average cpu % below which ec2/rds counts
+  as idle.
+- `idle_lookback_days` (int, default `14`) — window the idle averages are taken over.
+- `idle_rds_max_connections` (float, default `1`) — average connections below
+  which an rds instance counts as idle.
+- `snapshot_max_age_days` (int, default `90`) — snapshots older than this are "old".
+- `ri_sp_min_utilization` (float, default `90`) — flag a savings plan / ri used
+  below this percent.
 - `ri_sp_min_coverage` (float, default `70`) — flag when eligible usage is covered
-  below this percentage (on-demand spend a commitment would discount).
-- `nonprod_tags` (map of tag key → values, default `{}`) — tags marking
-  schedulable non-prod resources, e.g. `Environment: [dev, staging, test, qa]`.
-  Empty disables the off-hours collector (it never guesses which boxes are non-prod).
+  below this percent.
+- `nonprod_tags` (map of tag key → values, default `{}`) — the tags that mark
+  something as non-prod, e.g. `Environment: [dev, staging, test, qa]`. empty turns
+  the off-hours collector off entirely — it never guesses which boxes are non-prod.
 - `required_tags` (list of str, default `[]`) — tag keys every cost-bearing
-  resource must carry; empty disables the tag-hygiene collector.
+  resource must have. empty turns tag hygiene off.
 
-**`monitoring`** — metric-anomaly detection
+**`monitoring`**
 
-- `metrics` (map) — the CloudWatch metric collection everything in this section
-  runs on, and the only paid call left: `enabled` (bool, default `false`),
-  `services` (list, default `[]` = every collector that has metrics), `metrics`
-  (list, default `[]` = whatever the collectors ask for), `period_seconds` (int,
-  default `null` = the collectors' own granularity) and `max_metrics_per_cycle`
-  (int, default `1000`, ≈$0.01 per cycle) and `collect_every_seconds` (int,
-  default `null` = read every cycle) — `max_metrics_per_cycle` caps one cycle's
-  spend, `collect_every_seconds` caps the day's. Disabled, the detectors below
-  have no input and stay inert — clont says so once at startup.
-- `anomaly_sigma` (float, default `3`) — emit a `warn` anomaly when the latest
-  metric sample is more than this many standard deviations from its baseline.
-- `anomaly_min_points` (int, default `6`) — minimum baseline samples a series
-  needs before it can flag an anomaly.
-- `free_storage_min_pct` (float, default `10`) — `warn` when RDS free storage drops
-  below this percentage.
-- `disk_used_max_pct` (float, default `90`) — `warn` when Redshift disk used rises
-  above this percentage.
-- `cpu_credit_min_balance` (float, default `20`) — `warn` when a burstable EC2/RDS
-  `CPUCreditBalance` falls below this.
-- `swap_usage_max_mb` (float, default `50`) — `warn` when ElastiCache swap usage
-  exceeds this (MB).
-- `disk_full_forecast_days` (float, default `14`) — `warn` when the storage trend is
-  projected to hit capacity within this many days.
+- `metrics` (map) — the cloudwatch collection everything here runs on, and the
+  only paid call left: `enabled` (bool, default `false`), `services` (list,
+  default `[]` = every collector that has metrics), `metrics` (list, default `[]`
+  = whatever the collectors ask for), `period_seconds` (int, default `null` = the
+  collectors' own granularity), `max_metrics_per_cycle` (int, default `1000`,
+  ≈$0.01 a cycle) and `collect_every_seconds` (int, default `null` = every cycle).
+  `max_metrics_per_cycle` caps one cycle's spend, `collect_every_seconds` caps the
+  day's. with this off the detectors below have nothing to chew on and say so once
+  at startup.
+- `anomaly_sigma` (float, default `3`) — how many standard deviations from the
+  baseline before it's an anomaly.
+- `anomaly_min_points` (int, default `6`) — minimum baseline samples before a
+  series is allowed to flag anything.
+- `free_storage_min_pct` (float, default `10`) — `warn` under this much rds free
+  storage.
+- `disk_used_max_pct` (float, default `90`) — `warn` over this much redshift disk used.
+- `cpu_credit_min_balance` (float, default `20`) — `warn` under this many cpu credits.
+- `swap_usage_max_mb` (float, default `50`) — `warn` over this much elasticache swap.
+- `disk_full_forecast_days` (float, default `14`) — `warn` when storage is
+  projected to hit full within this many days.
 
 **`channels.log`** — always on
 
-- `repeat_hours` (float, default `3.0`) — re-log a standing condition at most this often.
-- `min_severity` (enum, default `info`) — drop events below this level.
+- `repeat_hours` (float, default `3.0`) — re-log a standing problem at most this often.
+- `min_severity` (enum, default `info`) — drop anything below this.
 
 **`channels.slack` / `channels.discord` / `channels.telegram`** — all optional
 
-- `webhook_url` (str, **required** for slack & discord) — incoming webhook URL.
-- `bot_token` (str, **required** for telegram) — bot token from @BotFather.
-- `chat_id` (str, **required** for telegram) — target chat / channel / group id.
-- `min_severity` (enum, default `warn`) — drop events below this level.
+- `webhook_url` (str, **required** for slack & discord) — incoming webhook url.
+- `bot_token` (str, **required** for telegram) — from @BotFather.
+- `chat_id` (str, **required** for telegram) — target chat / channel / group.
+- `min_severity` (enum, default `warn`) — drop anything below this.
 - `repeat_hours` (float, default `null`) — `null` notifies once per condition; a
-  value re-notifies a still-open one that often.
+  number re-notifies a still-open one that often.
 
-`min_severity` accepts `info`, `warn`, or `critical`.
+`min_severity` takes `info`, `warn` or `critical`.
 
-## Savings figures
+## where the dollar figures come from
 
-Every dollar amount comes from `clont/finops/aws/prices.json` — public on-demand
-list prices, generated offline from the AWS Price List bulk API. Nothing is
-fetched at runtime and no IAM grant is involved.
+everything comes out of `clont/finops/aws/prices.json` — public on-demand list
+prices, generated offline from the aws price list bulk api. nothing is fetched at
+runtime and no iam grant is involved.
 
-They are estimates, and clont says which ones. One rate per instance family at
-`.large`, scaled by size; commitment discounts and provisioned IOPS aren't
-modelled. A resource whose region isn't in the table is priced at us-east-1
-rates and marked approximate, so the report reads "estimated at us-east-1 rates"
-instead of passing a guess off as a quote.
+they're estimates and clont says so. one rate per instance family at `.large`,
+scaled by size; commitment discounts and provisioned iops aren't modelled. a
+resource in a region that's missing from the table gets priced at us-east-1 rates
+and marked approximate, so the report says "estimated at us-east-1 rates" instead
+of passing a guess off as a quote.
 
-Regenerate at release time — prices drift:
+public ipv4 has its own key (`public_ipv4_hourly`, the in-use sku). it's the same
+$0.005/hr as an idle elastic ip today, but they're separate skus and aws can move
+one without the other — if your price table predates the in-use sku, clont falls
+back to the idle rate instead of the generic default.
+
+regenerate at release time, prices drift:
 
 ```sh
 python tools/gen_prices.py          # ~15 min, no credentials needed
 ```
 
-## Status
+## status
 
-- Development status: Active
-- License: Apache-2.0
+- development status: active
+- license: apache-2.0

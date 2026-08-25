@@ -1,54 +1,64 @@
 # clont architecture
 
-## What clont is
+## what clont is
 
-clont is a long-running, **read-only** monitoring + FinOps **agent**. It assumes
-a read-only role in your cloud account(s), runs a `collect → detect → dispatch`
-loop, and delivers decisions to chat (Slack / Discord / Telegram) — not
-dashboards. It is **not** a metrics store, a rules engine, or an APM. It is a
-decision/notification agent that gets more capable as you opt into higher tiers.
+a long-running, **read-only** monitoring + finops **agent**. it assumes a
+read-only role in your cloud accounts, runs a `collect → detect → dispatch` loop,
+and delivers decisions to chat (slack / discord / telegram) — not dashboards.
 
-### Principles (hold across every tier)
+it is **not** a metrics store, a rules engine or an apm. it's a thing that
+notices something and tells you, and it gets smarter as you opt into higher tiers.
 
-- **Strictly read-only to the cloud.** The agent never writes to your cloud. All
-  signal-gathering is `describe_*` / `Get*` / query calls.
-- **Zero-setup, opinionated defaults.** The user should define as little as
-  possible. Every forced threshold is an admission the agent isn't smart enough.
-- **Chat-native.** Output is an explained event in your messenger, not a graph.
-- **Multi-account, alias-keyed.** Accounts are a map keyed by a human alias
-  (`prod`, `staging`); the alias flows into every event key and message.
-- **Secrets stay on the agent.** Channel tokens and cloud credentials never leave
-  the box — including in the paid tiers (see Local vs hosted).
-- **FinOps + monitoring, unified.** One agent, one pipeline, both domains.
+### principles (true at every tier)
 
-## The pipeline (one architecture, every tier)
+- **strictly read-only to the cloud.** the agent never writes. everything is
+  `describe_*` / `Get*` / a query.
+- **sane defaults, minimal setup.** you should have to define as little as
+  possible. every threshold we force on you is an admission the agent isn't clever
+  enough yet.
+- **chat-native.** output is an explained event in your messenger, not a graph.
+- **many accounts, keyed by alias.** accounts are a map keyed by a human name
+  (`prod`, `staging`); that alias flows into every event key and message.
+- **secrets stay on the agent.** channel tokens and cloud credentials never leave
+  the box, paid tiers included.
+- **finops and monitoring together.** one agent, one pipeline, both jobs.
+
+## the pipeline (same shape at every tier)
 
 ```
 collect / query (read-only)
    → detect: pluggable sink — local evaluator  OR  remote uploader
-   → events (produced locally  OR  returned from clont cloud)
+   → events (made locally  OR  returned from clont cloud)
    → dispatch → channels (log / slack / discord / telegram)
 ```
 
-Implemented today in:
-- `clont/agent/runner.py` — the loop: per provider, run each registered
-  collector, feed results through detectors, hand every event to every channel.
-- `clont/core/registry.py` — collectors self-register by `(domain, cloud,
-  service)`; the loop discovers them with no hard-coded imports.
-- `clont/providers/` — read-only cloud auth (AWS: refreshable assume-role,
-  multi-account, per-region clients).
-- `clont/events/detectors.py` — turn collector output into `Event`s; the account
-  alias is folded into the event **key** and **title**.
-- `clont/channels/` — outbound delivery with per-channel severity gate +
-  repeat/throttle.
+where that lives today:
+
+- `clont/agent/runner.py` — the loop: for each provider, run every registered
+  collector, push the results through the detectors, hand each event to every
+  channel.
+- `clont/core/registry.py` — collectors register themselves by
+  `(domain, cloud, service)` and the loop finds them. no hard-coded imports, so a
+  new collector is one decorated class (`public_ipv4` was exactly that).
+- `clont/providers/` — read-only cloud auth (aws: refreshable assume-role,
+  multi-account, per-region clients) and the response parsing helpers collectors
+  share.
+- `clont/events/detectors.py` — collector output becomes `Event`s; the account
+  alias goes into the event **key** and **title**.
+- `clont/channels/` — delivery, with a per-channel severity gate and repeat
+  throttle.
 - `clont/reporting/summary.py` — the ad-hoc read path over one cycle's `Batch`
-  (`clont run --summary`): a rollup rendered as text or JSON. It summarizes what
-  the loop already collected; it never collects anything itself.
+  (`clont run --summary`), rendered as text or json. it summarizes what the loop
+  already collected; it never collects anything itself.
 
-**Design rule to protect:** events are **source-agnostic** and collectors stay
-**dumb** (they gather; they don't decide). That single seam is what lets the same
-`MetricPoint`/`HealthCheck` stream feed a local rule *or* a remote analyzer
-without re-architecture.
+## the seam worth protecting
 
+events are **source-agnostic** and collectors stay **dumb** — they gather, they
+don't decide. that single seam is what lets the same `MetricPoint` / `HealthCheck`
+stream feed a local rule *or* a remote analyzer without rewriting anything.
 
-
+a second rule falls out of it, learned the hard way on the public ipv4 collector:
+**cost records and recommendations are not the same thing.** a collector reports
+what everything costs; only the clear, deterministic waste becomes a
+recommendation. mixing the two turns the savings number into noise and teaches
+people to ignore the agent.
