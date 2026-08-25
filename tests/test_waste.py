@@ -1,10 +1,9 @@
-"""Waste recommendations: unattached EBS, unassociated EIP, gp2->gp3."""
+"""Waste recommendations: unattached EBS, gp2->gp3. EIPs moved to public_ipv4."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-from clont.finops.aws import pricing
 from clont.finops.aws.waste import WasteCollector
 
 
@@ -55,7 +54,9 @@ def test_waste_detects_each_kind_and_prices_them():
     recs = WasteCollector(_FakeProvider(_FakeEC2(volumes, addresses))).recommendations(None)
 
     by_id = {r.resource.resource_id: r for r in recs}
-    assert set(by_id) == {"vol-free", "vol-gp2", "eipalloc-idle"}  # in-use gp3 + used EIP skipped
+    assert set(by_id) == {"vol-free", "vol-gp2"}  # in-use gp3 skipped
+    # EIPs belong to public_ipv4 now; flagging them here too bills $3.65 twice
+    assert not [r for r in recs if r.kind == "unassociated-eip"]
 
     assert by_id["vol-free"].estimated_savings.amount == Decimal("8.00")   # 100 GiB * $0.08
     assert by_id["vol-free"].kind == "unattached-ebs"
@@ -63,8 +64,6 @@ def test_waste_detects_each_kind_and_prices_them():
     assert by_id["vol-gp2"].estimated_savings.amount == Decimal("1.00")    # 50 GiB * $0.02
     assert by_id["vol-gp2"].kind == "gp2-gp3"
     assert "gp3" in by_id["vol-gp2"].summary
-    assert by_id["eipalloc-idle"].estimated_savings.amount == pricing.EIP_MONTH
-    assert by_id["eipalloc-idle"].kind == "unassociated-eip"
 
 
 def test_waste_empty_when_nothing_wasteful():

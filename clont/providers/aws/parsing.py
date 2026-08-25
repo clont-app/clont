@@ -140,6 +140,79 @@ class _EIP(BaseModel):
     public_ip: str = Field(default="", validation_alias="PublicIp")
     allocation_id: str = Field(default="", validation_alias="AllocationId")
     association_id: str = Field(default="", validation_alias="AssociationId")
+    pool: str = Field(default="", validation_alias="PublicIpv4Pool")
+
+    @property
+    def byoip(self) -> bool:
+        """Brought-your-own address — AWS doesn't charge for it."""
+        return bool(self.pool) and self.pool != "amazon"
+
+
+class _ENIPrivateIp(BaseModel):
+    """One entry of a network interface's ``PrivateIpAddresses``."""
+
+    primary: bool = Field(default=False, validation_alias="Primary")
+    public_ip: str = Field(
+        default="", validation_alias=AliasPath("Association", "PublicIp")
+    )
+
+
+class _NetworkInterface(BaseModel):
+    """One ``describe_network_interfaces`` entry.
+
+    Every billable public IPv4 in a VPC hangs off one of these, so
+    ``interface_type``/``description`` are what say whether it's a NAT gateway,
+    a load balancer or an instance.
+    """
+
+    eni_id: str = Field(validation_alias="NetworkInterfaceId")
+    interface_type: str = Field(default="", validation_alias="InterfaceType")
+    description: str = Field(default="", validation_alias="Description")
+    status: str = Field(default="", validation_alias="Status")
+    public_ip: str = Field(
+        default="", validation_alias=AliasPath("Association", "PublicIp")
+    )
+    allocation_id: str = Field(
+        default="", validation_alias=AliasPath("Association", "AllocationId")
+    )
+    attachment_status: str = Field(
+        default="", validation_alias=AliasPath("Attachment", "Status")
+    )
+    private_ips: list[_ENIPrivateIp] = Field(
+        default_factory=list, validation_alias="PrivateIpAddresses"
+    )
+
+    def public_ips(self) -> list[str]:
+        """Every public address on this interface; the primary one comes first.
+
+        The top-level ``Association`` repeats the primary private IP's, so this
+        dedupes — counting it twice would double the bill.
+        """
+        ips = [self.public_ip, *(p.public_ip for p in self.private_ips)]
+        return list(dict.fromkeys(ip for ip in ips if ip))
+
+    def secondary_public_ips(self) -> list[str]:
+        """Extra addresses beyond the primary — each one billed separately.
+
+        The primary is what ``Primary`` says plus the top-level ``Association``;
+        taking ``public_ips()[0]`` made this order-dependent, so an interface
+        whose primary private ip had no public address hid a real secondary.
+        """
+        primary = {p.public_ip for p in self.private_ips if p.primary}
+        primary.add(self.public_ip)
+        return [
+            p.public_ip
+            for p in self.private_ips
+            if p.public_ip and not p.primary and p.public_ip not in primary
+        ]
+
+    def unattached(self) -> bool:
+        """No instance/service behind it — the address is pure waste.
+
+        ``available`` is the reliable signal: a detached eni has no ``Attachment``
+        block at all, so keying off ``attachment_status`` alone read as attached.
+        """
+        return self.status == "available" or self.attachment_status == "detached"
 
 
 class _NatGateway(BaseModel):

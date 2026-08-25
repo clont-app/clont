@@ -29,6 +29,7 @@ _BASE = _REGIONS[BASE_REGION]
 
 # Billing hours in a month, the figure AWS itself quotes with.
 HOURS_PER_MONTH = Decimal("730")
+HOURS_PER_DAY = Decimal("24")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +83,10 @@ _FAMILY_DEFAULT_HOURLY = _FAMILY_LARGE_HOURLY.get("m5", Decimal("0.096"))
 # us-east-1 monthly figures. Region-aware callers should use the functions below;
 # these stay for the call sites that don't know a region yet.
 EIP_MONTH = _base(("eip_hourly",), "0.005") * HOURS_PER_MONTH
+# an in-use public ipv4; same rate as an idle one today, its own sku since 2024
+PUBLIC_IPV4_MONTH = (
+    _base(("public_ipv4_hourly",), str(EIP_MONTH / HOURS_PER_MONTH)) * HOURS_PER_MONTH
+)
 NAT_GATEWAY_MONTH = _base(("nat_gateway_hourly",), "0.045") * HOURS_PER_MONTH
 LOAD_BALANCER_MONTH = _base(("load_balancer_hourly",), "0.0225") * HOURS_PER_MONTH
 
@@ -163,6 +168,37 @@ def eip_quote(region: str | None = None) -> Quote:
     """An idle/unassociated public IPv4 address, USD per month."""
     quote = _rate(region, ("eip_hourly",), EIP_MONTH / HOURS_PER_MONTH)
     return Quote(quote.amount * HOURS_PER_MONTH, quote.region, quote.approximate)
+
+
+def _public_ipv4_hourly(region: str | None) -> Quote:
+    """One billable public IPv4, USD/hr — the in-use sku, else the idle rate.
+
+    Probes `region` *and* us-east-1 for the key, so a table generated before the
+    in-use SKU existed falls back to `eip_hourly` instead of pricing off the
+    default.
+    """
+    default = PUBLIC_IPV4_MONTH / HOURS_PER_MONTH
+    for key in ("public_ipv4_hourly", "eip_hourly"):
+        if any(key in _REGIONS.get(r, {}) for r in (region, BASE_REGION) if r):
+            return _rate(region, (key,), default)
+    return Quote(default, BASE_REGION, True)
+
+
+def public_ipv4_quote(region: str | None = None) -> Quote:
+    """One billable public IPv4 address, USD per month.
+
+    AWS bills every public IPv4 since Feb 2024, attached or not. Priced off the
+    idle-address rate until the table carries the in-use SKU — identical today,
+    kept separate so they can diverge.
+    """
+    quote = _public_ipv4_hourly(region)
+    return Quote(quote.amount * HOURS_PER_MONTH, quote.region, quote.approximate)
+
+
+def public_ipv4_daily_quote(region: str | None = None) -> Quote:
+    """One billable public IPv4 address, USD per day — what `collect()` stamps."""
+    quote = _public_ipv4_hourly(region)
+    return Quote(quote.amount * HOURS_PER_DAY, quote.region, quote.approximate)
 
 
 def nat_gateway_quote(region: str | None = None) -> Quote:

@@ -77,6 +77,17 @@ def test_no_collector_calls_cost_explorer(cls):
     assert "ce" not in provider.asked
 
 
+def test_public_ipv4_only_ever_asks_for_ec2():
+    # two free describes is the whole promise of this collector
+    from clont.finops.aws.public_ipv4 import PublicIPv4Collector
+
+    provider = _Recording(instances={"us-east-1": [instance("i-1")]})
+    collector = PublicIPv4Collector(provider)
+    collector.collect(_period())
+    collector.recommendations(_period())
+    assert set(provider.asked) == {"ec2"}
+
+
 def test_the_guard_would_notice_a_cost_explorer_call():
     # Proof the recording provider sees through for_each_region's isolation.
     provider = _Recording()

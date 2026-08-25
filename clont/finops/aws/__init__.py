@@ -12,6 +12,7 @@ from clont.finops.aws import (  # noqa: F401 - imported for registration
     idle_nat,
     idle_rds,
     offhours,
+    public_ipv4,
     snapshots,
     tags,
     utilization,

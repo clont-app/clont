@@ -79,6 +79,9 @@ def _classify(block: str) -> tuple[str, str] | None:
         return ("flat", "nat_gateway_hourly")
     if usagetype.endswith("PublicIPv4:IdleAddress"):
         return ("flat", "eip_hourly")
+    # in-use addresses are a separate sku at the same rate; keep them apart
+    if usagetype.endswith("PublicIPv4:InUseAddress"):
+        return ("flat", "public_ipv4_hourly")
     # the plain ALB hourly - not Outposts-, not TS- (Local Zones)
     if family == "Load Balancer-Application" and usagetype.endswith("LoadBalancerUsage"):
         if "Outposts-" in usagetype or "TS-" in usagetype:

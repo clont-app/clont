@@ -4,8 +4,10 @@ Each check is a single read + a known-cost rule, so the savings figure is a
 concrete (approximate) dollar amount:
 
 * unattached EBS volumes (``status == available``) — pay for nothing,
-* unassociated Elastic IPs — billed while idle,
 * gp2 volumes that could be gp3 — same/better performance, cheaper.
+
+Idle Elastic IPs used to live here; they moved to `public_ipv4`, which sees
+every billable address rather than just the unassociated ones.
 
 Regional; `collect()` is a no-op (recommendations only).
 """
@@ -16,7 +18,7 @@ from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.aws import pricing
 from clont.finops.models import CostRecord, Recommendation
-from clont.providers.aws.parsing import _EBSVolume, _EIP
+from clont.providers.aws.parsing import _EBSVolume
 from clont.providers.aws.regions import for_each_region
 from clont.providers.base import Provider
 
@@ -39,10 +41,7 @@ class WasteCollector:
 
     def _region(self, region: str) -> list[Recommendation]:
         ec2 = self._provider.client("ec2", region)
-        out: list[Recommendation] = []
-        out.extend(self._volumes(ec2, region))
-        out.extend(self._addresses(ec2, region))
-        return out
+        return self._volumes(ec2, region)
 
     def _volumes(self, ec2, region: str) -> list[Recommendation]:
         out: list[Recommendation] = []
@@ -61,19 +60,6 @@ class WasteCollector:
                         f"gp2 -> gp3 migration ({vol.size} GiB) — cheaper, same baseline performance",
                         pricing.ebs_gp2_to_gp3_monthly(vol.size),
                     ))
-        return out
-
-    def _addresses(self, ec2, region: str) -> list[Recommendation]:
-        out: list[Recommendation] = []
-        for raw in ec2.describe_addresses().get("Addresses", []):
-            eip = _EIP.model_validate(raw)
-            if eip.association_id:
-                continue  # in use
-            out.append(self._rec(
-                "ec2", "unassociated-eip", eip.allocation_id or eip.public_ip, region,
-                f"Unassociated Elastic IP {eip.public_ip} — release",
-                pricing.EIP_MONTH,
-            ))
         return out
 
     def _rec(self, service: str, kind: str, rid: str, region: str, summary: str, saving) -> Recommendation:
