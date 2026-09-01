@@ -37,8 +37,8 @@ class AbstractChannel(ABC):
     ) -> None:
         self.min_severity = min_severity
         self.repeat_after = repeat_after
-        # key -> last delivery time. In-memory; TODO persist so a restart
-        # doesn't re-alert every open condition. Must stay outside the RO role.
+        # key -> last delivery time, in-memory; todo persist so a restart
+        # doesn't re-alert every open condition. must stay outside the ro role
         self._last_sent: dict[str, datetime] = {}
 
     def send(self, event: Event) -> bool:
