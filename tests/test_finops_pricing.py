@@ -1,10 +1,7 @@
-"""FinOps price estimates + the not-yet-implemented S3/EC2 collector contracts.
+"""FinOps price estimates.
 
 `pricing` is coarse-but-load-bearing: every recommendation's dollar figure flows
-through it, so we pin the rate table and the derived helpers. The S3/EC2
-collectors are registered stubs; we lock in that they register correctly and
-still signal `NotImplementedError` so a half-wired collector can't silently
-report zero savings.
+through it, so we pin the rate table and the derived helpers.
 """
 
 from __future__ import annotations
@@ -13,9 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from clont.core import registry
-from clont.core.models import Cloud, CloudResource, Period
-from clont.finops.aws import ec2, pricing, s3
+from clont.finops.aws import pricing
 
 
 # --- pricing helpers --------------------------------------------------------
@@ -48,50 +43,6 @@ def test_pricing_returns_decimal_not_float():
     assert isinstance(pricing.EIP_MONTH, Decimal)
     assert isinstance(pricing.NAT_GATEWAY_MONTH, Decimal)
     assert isinstance(pricing.LOAD_BALANCER_MONTH, Decimal)
-
-
-# --- S3 / EC2 collector stubs ----------------------------------------------
-
-
-class _Provider:
-    alias = "prod"
-
-    def regions(self) -> list[str]:
-        return ["us-east-1"]
-
-    def client(self, service: str, region: str | None = None):
-        raise AssertionError("stub collectors must not touch a client yet")
-
-
-def _period() -> Period:
-    from datetime import date
-
-    return Period(date(2026, 1, 1), date(2026, 1, 31))
-
-
-@pytest.mark.parametrize(
-    ("service", "cls"),
-    [("s3", s3.S3CostCollector), ("ec2", ec2.EC2CostCollector)],
-)
-def test_stub_collectors_are_registered(service, cls):
-    assert registry.get("finops", Cloud.AWS, service) is cls
-    assert cls.cloud == Cloud.AWS
-    assert cls.service == service
-
-
-@pytest.mark.parametrize("cls", [s3.S3CostCollector, ec2.EC2CostCollector])
-def test_stub_collectors_signal_not_implemented(cls):
-    collector = cls(_Provider())
-    with pytest.raises(NotImplementedError):
-        collector.collect(_period())
-    with pytest.raises(NotImplementedError):
-        collector.recommendations(_period())
-
-
-def test_cloudresource_typing_kept_importable():
-    # Sanity: the stubs' return types are importable value objects.
-    r = CloudResource(Cloud.AWS, "s3", "my-bucket")
-    assert r.resource_id == "my-bucket"
 
 
 # --- ec2 instance rates -----------------------------------------------------

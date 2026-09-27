@@ -61,4 +61,4 @@ def test_real_finops_collectors_are_registered():
     services = {
         svc for (dom, cloud, svc) in registry._REGISTRY if dom == "finops" and cloud == Cloud.AWS
     }
-    assert {"s3", "ec2", "waste"} <= services
+    assert {"cur", "idle", "waste"} <= services

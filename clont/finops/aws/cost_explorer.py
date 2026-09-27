@@ -73,8 +73,9 @@ class CostExplorerCollector:
         return records
 
     def recommendations(self, period: Period) -> list[Recommendation]:
-        # Cost Explorer gives spend, not rightsizing advice — no recommendations here.
-        return [] # TODO
+        # ce gives spend, not advice; purchase recommendations are billed per call
+        # and commitments.py derives the same headline for free
+        return []
 
     def _to_record(self, raw: dict, period: Period) -> CostRecord:
         group = _CEGroup.model_validate(raw)
