@@ -71,11 +71,15 @@ finops:
   ri_sp_min_coverage: 70         # WARN when eligible spend is covered less than this %
 
   # Governance. nonprod_tags marks schedulable non-prod resources (off-hours);
-  # required_tags lists keys every cost-bearing resource must carry (tag hygiene).
+  # required_tags lists keys every cost-bearing resource must carry, and drives
+  # both tag hygiene (which resources to fix) and showback (how much spend has no
+  # owner). The keys also have to be activated as cost allocation tags in Billing,
+  # or CUR has no column for them and every line reads as unattributed.
   # Both are empty by default, which disables their collectors (no false alarms).
   nonprod_tags:
     Environment: [dev, staging, test, qa]
   required_tags: [Owner, Environment]
+  showback_unattributed_pct: 20  # WARN when this share of spend carries no value
 
 # Monitoring. Metric-anomaly detection (baseline + deviation) plus Tier-1 default
 # rules: disk-full forecast, low free storage, CPU-credit depletion, swap pressure.

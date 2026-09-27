@@ -40,6 +40,10 @@ class _RDSInstance(BaseModel):
     allocated_storage: int = Field(default=0, validation_alias="AllocatedStorage")  # GiB
     # Present only when storage autoscaling is enabled; 0 = off.
     max_allocated_storage: int = Field(default=0, validation_alias="MaxAllocatedStorage")  # GiB
+    tags: list[dict] = Field(default_factory=list, validation_alias="TagList")
+
+    def tag_map(self) -> dict[str, str]:
+        return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
 
 
 class _CacheCluster(BaseModel):

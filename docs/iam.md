@@ -173,8 +173,14 @@ two things worth remembering:
   `elasticloadbalancing:DescribeTargetHealth` (last two already listed for health)
 - **off-hours scheduling** — `ec2:DescribeInstances` (state + tags; needs
   `nonprod_tags`)
-- **tag hygiene** — `ec2:DescribeInstances`, `ec2:DescribeVolumes` (tags; needs
-  `required_tags`)
+- **tag hygiene** — `ec2:DescribeInstances`, `ec2:DescribeVolumes`,
+  `rds:DescribeDBInstances`, `elasticloadbalancing:DescribeLoadBalancers`,
+  `elasticloadbalancing:DescribeTags`, `lambda:ListFunctions`, `lambda:ListTags`,
+  `s3:ListAllMyBuckets`, `s3:GetBucketLocation`, `s3:GetBucketTagging` (needs
+  `required_tags`). a missing grant costs that one service, not the whole report
+- **showback by tag** — nothing extra: it groups the CUR lines already read. what
+  it needs is the keys activated as *cost allocation tags* in Billing, or CUR
+  carries no column for them and the spend all reads as unattributed
 - **monitoring default rules** (disk-full forecast, low free storage, cpu credits,
   swap) — the same billed `cloudwatch:GetMetricData` as ec2 metrics, so they're
   inert until `monitoring.metrics.enabled`. reads `AWS/RDS` (`FreeStorageSpace`,

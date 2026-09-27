@@ -95,8 +95,12 @@ the same event pipeline:
 - **stale ebs snapshots** — orphaned (source volume gone) or just old.
 - **off-hours scheduling** — always-on non-prod instances (you pick the tag
   convention) that could sleep at night and on weekends.
-- **tag hygiene** — ec2 and ebs missing tags you require, which is where
-  unattributable spend comes from.
+- **tag hygiene** — ec2, ebs, rds, load balancers, lambda and s3 buckets missing
+  tags you require, which is where unattributable spend comes from.
+- **showback by tag** — the same keys turned into spend per team / cost centre,
+  with the unattributed share reported as its own line. that share is the number
+  that justifies fixing the tags. grouping is cloud-agnostic: whatever fills a
+  cost record's tags gets the report.
 
 thresholds, the non-prod tag convention and the required-tag list are all
 configurable under `finops.*`.
@@ -350,7 +354,9 @@ with the rest. it only gives up if *no* account authenticates.
   something as non-prod, e.g. `Environment: [dev, staging, test, qa]`. empty turns
   the off-hours collector off entirely — it never guesses which boxes are non-prod.
 - `required_tags` (list of str, default `[]`) — tag keys every cost-bearing
-  resource must have. empty turns tag hygiene off.
+  resource must have. empty turns tag hygiene *and* showback off.
+- `showback_unattributed_pct` (float, default `20`) — showback groups spend by
+  `required_tags` and warns when this much of it carries no value for a key.
 
 **`monitoring`**
 
