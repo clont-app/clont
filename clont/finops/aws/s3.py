@@ -11,7 +11,11 @@ Four findings, all from free bucket-level reads (`get_bucket_lifecycle_configura
 * **standard with no transition** — data sitting in Standard that nothing moves
   to a cheaper class.
 * **no lifecycle at all** — the catch-all, emitted only when none of the above
-  fired, so one bucket never produces four rows saying the same thing.
+  fired *and* the lifecycle config was readable, so one bucket never produces
+  four rows saying the same thing and a denied read is never read as "no rules".
+
+Each check is isolated on its own: `ListMultipartUploadParts`, `GetBucketVersioning`
+and CloudWatch are separate grants, so a role that lacks one still gets the rest.
 
 Two things this deliberately does not claim:
 
@@ -77,8 +81,8 @@ class S3StorageCollector:
 
     def recommendations(self, period: Period) -> list[Recommendation]:
         out: list[Recommendation] = []
-        for name in self._safe("list buckets", self._bucket_names):
-            out.extend(self._safe(f"bucket {name}", lambda n=name: self._bucket(n)))
+        for name in self._safe("list buckets", self._bucket_names, []):
+            out.extend(self._safe(f"bucket {name}", lambda n=name: self._bucket(n), []))
         return out
 
     def _bucket_names(self) -> list[str]:
@@ -91,31 +95,50 @@ class S3StorageCollector:
             self._clients[region] = self._provider.client("s3", region)
         return self._clients[region]
 
-    def _safe(self, what: str, fn: Callable[[], list]) -> list:
+    def _safe(self, what: str, fn: Callable[[], object], default=None):
         try:
             return fn()
-        except Exception as exc:  # noqa: BLE001 - one denied bucket must not sink the rest
+        except Exception as exc:  # noqa: BLE001 - one denied call must not sink the rest
             log.warning("%s: skipping %s for %s: %s", _WHAT, what, self._provider.alias, exc)
-            return []
+            return default
 
     def _bucket(self, name: str) -> list[Recommendation]:
         region = self._bucket_region(name)
         s3 = self._client(region)
-        rules = self._rules(s3, name)
+        # each check below needs its own grant (ListMultipartUploadParts and
+        # GetBucketVersioning are separate), so they get separate isolation —
+        # one AccessDenied must not drop the findings that did work
+        rules = self._safe(f"lifecycle of {name}", lambda: self._rules(s3, name))
         out: list[Recommendation] = []
 
-        uploads = self._old_uploads(s3, name)
-        if uploads:
-            out.append(self._multipart_rec(s3, name, region, uploads, rules))
-        versioning = self._versioning(s3, name)
-        if versioning and not _has_action(rules, "NoncurrentVersionExpiration"):
-            out.append(self._versions_rec(name, region, versioning))
-        cold = self._cold_rec(name, region, rules)
-        if cold is not None:
-            out.append(cold)
-        if not rules and not out:  # nothing specific to say, but still unmanaged
+        checks = (
+            ("uploads", lambda: self._multipart(s3, name, region, rules)),
+            ("versioning", lambda: self._versions(s3, name, region, rules)),
+            ("size", lambda: self._cold(name, region, rules)),
+        )
+        for what, check in checks:
+            out += self._safe(f"{what} of {name}", check, [])
+        # only claim "unmanaged" when the rules were actually readable and empty
+        if rules == [] and not out:
             out.append(self._no_lifecycle_rec(name, region))
         return out
+
+    def _multipart(self, s3, name: str, region: str, rules: list[dict] | None) -> list:
+        uploads = self._old_uploads(s3, name)
+        if not uploads:
+            return []
+        rec = self._multipart_rec(s3, name, region, uploads, rules)
+        return [rec] if rec is not None else []
+
+    def _versions(self, s3, name: str, region: str, rules: list[dict] | None) -> list:
+        if rules is None or _has_action(rules, "NoncurrentVersionExpiration"):
+            return []  # unreadable rules: can't claim the rule is missing
+        versioning = self._versioning(s3, name)
+        return [self._versions_rec(name, region, versioning)] if versioning else []
+
+    def _cold(self, name: str, region: str, rules: list[dict] | None) -> list:
+        rec = self._cold_rec(name, region, rules)
+        return [rec] if rec is not None else []
 
     def _bucket_region(self, name: str) -> str:
         s3 = self._client(_GLOBAL_REGION)
@@ -148,9 +171,9 @@ class S3StorageCollector:
         out: list[dict] = []
         for page in s3.get_paginator("list_multipart_uploads").paginate(Bucket=name):
             for raw in page.get("Uploads", []):
-                started = raw.get("Initiated")
+                started = _aware(raw.get("Initiated"))
                 if started is not None and started < cutoff:
-                    out.append(raw)
+                    out.append({**raw, "Initiated": started})
         out.sort(key=lambda u: u["Initiated"])
         return out
 
@@ -190,28 +213,36 @@ class S3StorageCollector:
         return Decimal(str(max(points, key=lambda p: p[0])[1]))
 
     def _multipart_rec(
-        self, s3, name: str, region: str, uploads: list[dict], rules: list[dict]
-    ) -> Recommendation:
+        self, s3, name: str, region: str, uploads: list[dict], rules: list[dict] | None
+    ) -> Recommendation | None:
         total, sized = self._upload_bytes(s3, name, uploads)
+        if total == 0 and sized == len(uploads):
+            return None  # initiated, never uploaded a part: nothing is billed
         gib = total / _GIB
         oldest = (datetime.now(UTC) - uploads[0]["Initiated"]).days
         # parts keep the class of the upload that made them
-        storage_class = pricing.S3_API_CLASS.get(
-            str(uploads[0].get("StorageClass") or "STANDARD"), "standard"
-        )
-        saving = pricing.s3_storage_monthly(gib, storage_class, region)
+        api_class = str(uploads[0].get("StorageClass") or "STANDARD")
+        storage_class = pricing.S3_API_CLASS.get(api_class)
+        if storage_class is None:
+            # standard is the priciest class, so guessing it inflates the saving
+            quote = None
+            note = f", class {api_class} not priced"
+        else:
+            quote = pricing.s3_storage_quote(gib, storage_class, region)
+            note = ", at us-east-1 rates" if quote.approximate else ""
         scope = "" if sized == len(uploads) else f" (sized the oldest {sized})"
         size = _human(total)
         fix = (
             " — add an AbortIncompleteMultipartUpload rule"
-            if not _has_action(rules, "AbortIncompleteMultipartUpload")
+            if rules is not None and not _has_action(rules, "AbortIncompleteMultipartUpload")
             else ""
         )
         return self._rec(
             name, region, "s3-incomplete-multipart",
             f"{len(uploads)} incomplete multipart upload(s), oldest {oldest}d, "
-            f"{size} of parts{scope} — billed but invisible in the console{fix}",
-            saving,
+            f"{size} of parts{scope}{note} — billed but invisible in the console{fix}",
+            quote.amount if quote else Decimal(0),
+            quote,
         )
 
     def _versions_rec(self, name: str, region: str, versioning: str) -> Recommendation:
@@ -225,12 +256,12 @@ class S3StorageCollector:
         )
 
     def _cold_rec(
-        self, name: str, region: str, rules: list[dict]
+        self, name: str, region: str, rules: list[dict] | None
     ) -> Recommendation | None:
         if not self._tuning.allow_cloudwatch_metrics:
             return None  # GetMetricData bills per metric
-        if _has_action(rules, "Transitions"):
-            return None
+        if rules is None or _has_action(rules, "Transitions"):
+            return None  # unreadable rules: can't claim a transition is missing
         total = self._cold_bytes(name, region)
         if total is None:
             return None
@@ -245,6 +276,7 @@ class S3StorageCollector:
             f"save ~{quote.amount:.0f} USD/mo if the data is cold{approx}; clont "
             "can't see read frequency (s3 request metrics are billed)",
             quote.amount,
+            quote,
         )
 
     def _no_lifecycle_rec(self, name: str, region: str) -> Recommendation:
@@ -256,7 +288,13 @@ class S3StorageCollector:
         )
 
     def _rec(
-        self, name: str, region: str, kind: str, summary: str, saving: Decimal
+        self,
+        name: str,
+        region: str,
+        kind: str,
+        summary: str,
+        saving: Decimal,
+        quote: pricing.Quote | None = None,
     ) -> Recommendation:
         return Recommendation(
             cloud=str(Cloud.AWS),
@@ -271,7 +309,17 @@ class S3StorageCollector:
             ),
             summary=summary,
             estimated_savings=Money(amount=saving, currency=_USD),
+            priced_region=quote.region if quote else None,
+            # no quote means no figure to qualify; approximate stays the default
+            approximate=quote.approximate if quote else True,
         )
+
+
+def _aware(value):
+    """A naive timestamp is utc here; comparing it raw raises TypeError."""
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 def _human(size_bytes: Decimal) -> str:

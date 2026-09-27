@@ -348,11 +348,89 @@ def test_the_metric_is_read_in_the_buckets_own_region():
 
 def test_one_denied_bucket_does_not_sink_the_report():
     class _Denied(_FakeS3):
-        def get_bucket_versioning(self, Bucket: str):  # noqa: N803
+        def get_bucket_location(self, Bucket: str):  # noqa: N803
             if Bucket == "locked":
-                raise ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketVersioning")
-            return {}
+                raise ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketLocation")
+            return {"LocationConstraint": "eu-west-1"}
 
     recs, _ = _run(_Denied(["locked", "open"]))
 
     assert [r.resource.resource_id for r in recs] == ["open"]
+
+
+def test_a_denied_sub_check_keeps_the_other_findings():
+    # ListMultipartUploadParts is its own grant; losing it must not drop the
+    # versioning finding, which doesn't depend on it
+    class _Denied(_FakeS3):
+        def get_paginator(self, name: str):
+            if name == "list_parts":
+                raise ClientError({"Error": {"Code": "AccessDenied"}}, "ListParts")
+            return super().get_paginator(name)
+
+    recs, _ = _run(_Denied(["half"], versioning="Enabled", uploads=[_upload("u1", days=30)]))
+
+    assert _kinds(recs) == ["s3-noncurrent-versions"]
+
+
+def test_unreadable_lifecycle_is_not_read_as_no_lifecycle():
+    class _Denied(_FakeS3):
+        def get_bucket_lifecycle_configuration(self, Bucket: str):  # noqa: N803
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketLifecycle")
+
+    recs, _ = _run(_Denied(["opaque"], versioning="Enabled"))
+
+    # can't claim a rule is missing when the rules were never readable
+    assert recs == []
+
+
+def test_an_upload_with_no_parts_is_not_a_finding():
+    # initiated and abandoned before a single part landed: nothing is billed
+    s3 = _FakeS3(["big"], uploads=[_upload("u1", days=30)])
+    recs, _ = _run(s3)
+
+    assert _kinds(recs) == ["s3-no-lifecycle"]
+
+
+def test_a_naive_initiated_timestamp_does_not_raise():
+    upload = _upload("u1", days=30)
+    upload["Initiated"] = upload["Initiated"].replace(tzinfo=None)
+    s3 = _FakeS3(["big"], uploads=[upload], parts={"u1": [{"Size": 1024**3}]})
+    recs, _ = _run(s3)
+
+    assert _kinds(recs) == ["s3-incomplete-multipart"]
+
+
+# --- pricing ----------------------------------------------------------------
+
+
+def test_deep_archive_parts_are_priced_as_deep_archive():
+    # the rate is ~23x below standard; pricing it as standard inflates the saving
+    def one(storage_class: str) -> Decimal:
+        s3 = _FakeS3(
+            ["big"],
+            uploads=[_upload("u1", days=30, storage_class=storage_class)],
+            parts={"u1": [{"Size": 1024**4}]},
+        )
+        return _run(s3)[0][0].estimated_savings.amount
+
+    assert one("DEEP_ARCHIVE") * 10 < one("STANDARD")
+
+
+def test_an_unknown_storage_class_is_not_priced_as_standard():
+    s3 = _FakeS3(
+        ["big"],
+        uploads=[_upload("u1", days=30, storage_class="SOMETHING_NEW")],
+        parts={"u1": [{"Size": 1024**4}]},
+    )
+    recs, _ = _run(s3)
+
+    assert recs[0].estimated_savings.amount == Decimal(0)
+    assert "class SOMETHING_NEW not priced" in recs[0].summary
+
+
+def test_the_priced_region_is_reported():
+    s3 = _FakeS3(["big"], uploads=[_upload("u1", days=30)], parts={"u1": [{"Size": 1024**3}]})
+    recs, _ = _run(s3)
+
+    assert recs[0].priced_region == "eu-west-1"
+    assert recs[0].approximate is False
