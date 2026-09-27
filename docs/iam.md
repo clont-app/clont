@@ -132,6 +132,8 @@ two things worth remembering:
   lookback, so they won't match the console exactly.
 - **commitment expiry** (ris and savings plans in their last 60/30/7 days) — no
   extra grant, the end date rides along on those same two describes.
+- **graviton candidates** — no extra grant either, it's the same
+  `compute-optimizer:GetEC2InstanceRecommendations` with an arm64 preference on it.
 - **budgets + month-end forecast** — no extra grant, it reuses the spend stream.
 - **ec2 health** (reachability) — `ec2:DescribeInstanceStatus`
 - **ec2 metrics** (cpu / network) — `cloudwatch:GetMetricData`, **billed and off

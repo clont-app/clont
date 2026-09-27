@@ -89,6 +89,10 @@ the same event pipeline:
   the same free describes. the tiers are separate findings on purpose, so an alert
   at 60 days doesn't silence the one at 7. sagemaker and database plans are
   watched too — they cover no ec2, but they still expire.
+- **graviton candidates** — x86 instances compute optimizer would move to arm64,
+  with the migration effort it reports. these need an explicit arm64 preference on
+  the call, so without it they look absent rather than unasked-for. it's a
+  separate finding from rightsizing: same instance can have both.
 - **unattached ebs volumes** — `available` volumes you're still paying for.
 - **public ipv4 addresses** — see below, it's the newest one.
 - **gp2 → gp3** — in-use gp2 volumes, with the storage-rate saving.

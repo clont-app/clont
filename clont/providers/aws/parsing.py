@@ -257,6 +257,12 @@ class _COOption(BaseModel):
 
     rank: int = Field(default=999, validation_alias="rank")
     instance_type: str = Field(default="", validation_alias="instanceType")
+    # VeryLow/Low/Medium/High — only meaningful when the target changes platform
+    migration_effort: str = Field(default="", validation_alias="migrationEffort")
+    # e.g. ["Architecture", "Hypervisor"] — what breaks when moving here
+    platform_differences: list[str] = Field(
+        default_factory=list, validation_alias="platformDifferences"
+    )
     savings: Decimal = Field(
         default=Decimal(0),
         validation_alias=AliasPath("savingsOpportunity", "estimatedMonthlySavings", "value"),

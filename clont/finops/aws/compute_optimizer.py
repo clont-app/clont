@@ -1,4 +1,4 @@
-"""FinOps recommendations from AWS Compute Optimizer (rightsizing + idle).
+"""FinOps recommendations from AWS Compute Optimizer (rightsizing, idle, graviton).
 
 Compute Optimizer does the analysis; we just read its recommendations per region
 for EC2 instances, EBS volumes, Auto Scaling groups, Lambda functions, ECS
@@ -13,6 +13,11 @@ per metric requested. It also carries a real dollar figure, which the metric
 detectors never had. So this is the default idle source and those three are an
 opt-in fallback — see `FinOpsTuning.allow_cloudwatch_metrics`.
 
+Graviton candidates come from the *same* EC2 call with an arm64 preference on it —
+20-40% off for a rebuild, and the recs are invisible without that preference
+rather than absent. It is a separate pass because the preference replaces the
+same-architecture options, see `_collect_graviton`.
+
 Regional service, so it iterates the provider's regions like the monitoring
 collectors. `collect()` is a no-op — this collector only produces
 recommendations, not cost records.
@@ -20,6 +25,7 @@ recommendations, not cost records.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 
 from botocore.exceptions import ClientError
@@ -45,6 +51,14 @@ log = get_logger("clont.finops.aws.compute_optimizer")
 
 _KIND = "rightsize"
 _IDLE_KIND = "idle"
+_GRAVITON_KIND = "graviton"
+# ask for arm64 targets explicitly — without this preference CO only ever offers
+# options on the instance's current architecture, which is why these recs were
+# invisible rather than absent
+_ARM64_PREFERENCE = {"cpuVendorArchitectures": ["AWS_ARM64"]}
+# graviton families spell the g after the generation digit: m7g, c7gn, x2gd,
+# im4gn. `g5`/`g4dn` (nvidia) put it first and must not match.
+_GRAVITON_FAMILY = re.compile(r"^[a-z]+\d+[a-z]*g[a-z]*$")
 # Errors that just mean "Compute Optimizer isn't enabled for this account" —
 # expected, not a failure, so logged once per cycle at info (the collector is
 # rebuilt each cycle, resetting the flag) instead of a per-region warning.
@@ -87,6 +101,19 @@ def _resource_id(arn: str) -> str:
 def _rightsize_summary(rec, best: _COOption) -> str:
     """Generic summary for resources whose target is just a % saving."""
     return f"{rec.finding or 'Rightsizable'}: rightsize (~{best.pct:.0f}% saving)"
+
+
+def _is_graviton(instance_type: str) -> bool:
+    family = instance_type.partition(".")[0]
+    return bool(_GRAVITON_FAMILY.match(family))
+
+
+def _graviton_summary(rec: _COInstanceRec, best: _COOption) -> str:
+    effort = f", {best.migration_effort.lower()} migration effort" if best.migration_effort else ""
+    return (
+        f"Graviton candidate: {rec.current_type or '?'} -> {best.instance_type} "
+        f"(~{best.pct:.0f}% saving{effort}) — arm64 build required"
+    )
 
 
 def _idle_summary(rec: _COIdleRec) -> str:
@@ -144,6 +171,13 @@ class ComputeOptimizerCollector:
         except Exception as exc:  # noqa: BLE001 - idle must not drop the rightsizing recs
             log.warning(
                 "compute optimizer idle failed in %s for %s: %s", region, self._provider.alias, exc
+            )
+        try:
+            out.extend(self._collect_graviton(co, region))
+        except Exception as exc:  # noqa: BLE001 - same, graviton is a bonus pass
+            log.warning(
+                "compute optimizer graviton failed in %s for %s: %s",
+                region, self._provider.alias, exc,
             )
         for service, method, list_key, model, summarize in self._SOURCES:
             # Isolate each resource type: a transient error on one (e.g. a
@@ -219,7 +253,40 @@ class ComputeOptimizerCollector:
                 )
         return out
 
-    def _pages(self, fn: Callable, service: str) -> Iterator[dict]:
+    def _collect_graviton(self, co, region: str) -> list[Recommendation]:
+        """arm64 targets for x86 instances — a second pass, on purpose.
+
+        CO only offers options on the instance's current architecture unless the
+        arm64 preference is set, so this cannot be folded into the rightsizing
+        call: with the preference on, that call returns arm64 targets *instead of*
+        the same-arch ones and the plain rightsizing advice disappears. Different
+        kind, so the two recs on one instance don't collide on the event key.
+        """
+        out: list[Recommendation] = []
+        pages = self._pages(
+            co.get_ec2_instance_recommendations,
+            "ec2",  # same opt-in as the rightsizing pass, so share the "not enabled" note
+            {"recommendationPreferences": _ARM64_PREFERENCE},
+        )
+        for resp in pages:
+            for raw in resp.get("instanceRecommendations", []):
+                rec = _COInstanceRec.model_validate(raw)
+                if _is_graviton(rec.current_type):
+                    continue  # already on arm64
+                # CO answers with x86 options too when no arm64 one is cheaper
+                arm = [o for o in rec.options if _is_graviton(o.instance_type)]
+                best = _best_savings_option(arm)
+                if best is None:
+                    continue
+                out.append(
+                    self._rec(
+                        "ec2", rec.arn, region, _graviton_summary(rec, best), best,
+                        kind=_GRAVITON_KIND,
+                    )
+                )
+        return out
+
+    def _pages(self, fn: Callable, service: str, params: dict | None = None) -> Iterator[dict]:
         """Yield every page of a CO call, absorbing "not enabled" once.
 
         A type the account hasn't opted into (or lacks permission for) is logged
@@ -229,7 +296,7 @@ class ComputeOptimizerCollector:
         token: str | None = None
         while True:
             try:
-                resp = fn(**({"nextToken": token} if token else {}))
+                resp = fn(**(params or {}), **({"nextToken": token} if token else {}))
             except ClientError as exc:
                 if exc.response.get("Error", {}).get("Code") in _NOT_AVAILABLE:
                     if service not in self._warned_unavailable:
@@ -246,12 +313,18 @@ class ComputeOptimizerCollector:
                 return
 
     def _rec(
-        self, service: str, arn: str, region: str, summary: str, option: _COOption
+        self,
+        service: str,
+        arn: str,
+        region: str,
+        summary: str,
+        option: _COOption,
+        kind: str = _KIND,
     ) -> Recommendation:
         return Recommendation(
             cloud=str(Cloud.AWS),
             service=service,
-            kind=_KIND,
+            kind=kind,
             resource=CloudResource(
                 cloud=Cloud.AWS,
                 service=service,

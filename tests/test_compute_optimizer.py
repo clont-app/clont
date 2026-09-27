@@ -234,6 +234,108 @@ def test_transient_error_on_one_source_keeps_the_others():
     assert [r.resource.resource_id for r in recs] == ["i-over"]
 
 
+def _graviton_co(arm_recs: list[dict], x86_recs: list[dict] | None = None):
+    """CO that answers differently depending on the arm64 preference, like the real one."""
+
+    class _CO(_FakeCO):
+        def get_ec2_instance_recommendations(self, **kw):
+            prefs = kw.get("recommendationPreferences", {})
+            if prefs.get("cpuVendorArchitectures") == ["AWS_ARM64"]:
+                return {"instanceRecommendations": arm_recs}
+            return {"instanceRecommendations": x86_recs or []}
+
+    return _CO()
+
+
+def test_graviton_candidate_emitted_beside_the_rightsize_rec():
+    inst = "arn:aws:ec2:us-east-1:111:instance/i-x86"
+    arm = [{
+        "instanceArn": inst,
+        "currentInstanceType": "m5.2xlarge",
+        "finding": "Overprovisioned",
+        "recommendationOptions": [
+            dict(_opt("m5.xlarge", rank=1, value=50.0, pct=25.0)),          # same arch
+            dict(_opt("m7g.2xlarge", rank=2, value=90.0, pct=30.0),
+                 migrationEffort="Medium"),
+        ],
+    }]
+    x86 = [{
+        "instanceArn": inst,
+        "currentInstanceType": "m5.2xlarge",
+        "finding": "Overprovisioned",
+        "recommendationOptions": [_opt("m5.xlarge", rank=1, value=50.0, pct=25.0)],
+    }]
+    recs = ComputeOptimizerCollector(
+        _FakeProvider(_graviton_co(arm, x86))
+    ).recommendations(None)
+
+    by_kind = {r.kind: r for r in recs}
+    assert set(by_kind) == {"rightsize", "graviton"}  # both survive, one instance
+    grav = by_kind["graviton"]
+    assert grav.service == "ec2"
+    assert grav.resource.resource_id == "i-x86"
+    assert grav.estimated_savings.amount == Decimal("90")  # arm option, not the rank-1 x86 one
+    assert "m7g.2xlarge" in grav.summary and "medium migration effort" in grav.summary
+    # separate kind -> separate event key, so neither notification swallows the other
+    keys = {e.key for e in RecommendationDetector().detect(recs)}
+    assert keys == {
+        "finops:rec:prod:aws:ec2:rightsize:i-x86",
+        "finops:rec:prod:aws:ec2:graviton:i-x86",
+    }
+
+
+def test_graviton_skips_x86_only_options_and_instances_already_on_arm():
+    arm = [
+        {   # CO found nothing on arm64 worth it, only a same-arch resize
+            "instanceArn": "arn:aws:ec2:us-east-1:111:instance/i-x86",
+            "currentInstanceType": "m5.2xlarge",
+            "recommendationOptions": [_opt("m5.large", rank=1, value=40.0, pct=30.0)],
+        },
+        {   # already graviton: a newer arm generation is a rightsize, not a migration
+            "instanceArn": "arn:aws:ec2:us-east-1:111:instance/i-arm",
+            "currentInstanceType": "m6g.xlarge",
+            "recommendationOptions": [_opt("m7g.large", rank=1, value=20.0, pct=20.0)],
+        },
+    ]
+    recs = ComputeOptimizerCollector(_FakeProvider(_graviton_co(arm))).recommendations(None)
+    assert [r.kind for r in recs] == []
+
+
+def test_gpu_families_are_not_read_as_graviton():
+    # g5/g4dn/p4d put the g first (nvidia) — only m7g/c7gn/x2gd/im4gn shapes count
+    arm = [{
+        "instanceArn": "arn:aws:ec2:us-east-1:111:instance/i-gpu",
+        "currentInstanceType": "p3.2xlarge",
+        "recommendationOptions": [
+            _opt("g5.xlarge", rank=1, value=100.0, pct=40.0),
+            _opt("g4dn.xlarge", rank=2, value=80.0, pct=30.0),
+        ],
+    }]
+    recs = ComputeOptimizerCollector(_FakeProvider(_graviton_co(arm))).recommendations(None)
+    assert recs == []
+
+
+def test_graviton_follows_next_token():
+    def _inst(iid: str) -> dict:
+        return {
+            "instanceArn": f"arn:aws:ec2:us-east-1:111:instance/{iid}",
+            "currentInstanceType": "c5.xlarge",
+            "recommendationOptions": [_opt("c7g.xlarge", rank=1, value=30.0, pct=20.0)],
+        }
+
+    class _CO(_FakeCO):
+        def get_ec2_instance_recommendations(self, **kw):
+            if kw.get("recommendationPreferences", {}).get("cpuVendorArchitectures") is None:
+                return {"instanceRecommendations": []}
+            if kw.get("nextToken"):
+                return {"instanceRecommendations": [_inst("i-2")]}
+            return {"instanceRecommendations": [_inst("i-1")], "nextToken": "page2"}
+
+    recs = ComputeOptimizerCollector(_FakeProvider(_CO())).recommendations(None)
+    assert sorted(r.resource.resource_id for r in recs) == ["i-1", "i-2"]
+    assert {r.kind for r in recs} == {"graviton"}
+
+
 def test_asg_lambda_ecs_rds_recommendations_emitted():
     asg = {
         "autoScalingGroupRecommendations": [
