@@ -1,6 +1,6 @@
 {
  "base_region": "us-east-1",
- "generated_at": "2026-08-25T13:13:31Z",
+ "generated_at": "2026-09-27T21:55:38Z",
  "regions": {
   "af-south-1": {
    "ebs_gb_month": {
@@ -65,6 +65,19 @@
    "load_balancer_hourly": "0.03",
    "nat_gateway_hourly": "0.057",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.0274",
+    "intelligent_ia": "0.0149",
+    "onezone_ia": "0.0119",
+    "rrs": "0.024",
+    "standard": "0.0274",
+    "standard_ia": "0.0149"
+   },
    "snapshot_gb_month": "0.0595"
   },
   "ap-east-1": {
@@ -123,6 +136,19 @@
    "load_balancer_hourly": "0.0277",
    "nat_gateway_hourly": "0.065",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.024",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "ap-east-2": {
@@ -171,6 +197,19 @@
    "load_balancer_hourly": "0.0219",
    "nat_gateway_hourly": "0.0558",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.0225",
+    "intelligent_ia": "0.01242",
+    "onezone_ia": "0.0099",
+    "rrs": "0.02376",
+    "standard": "0.0225",
+    "standard_ia": "0.01242"
+   },
    "snapshot_gb_month": "0.045"
   },
   "ap-northeast-1": {
@@ -299,6 +338,20 @@
    "load_balancer_hourly": "0.0243",
    "nat_gateway_hourly": "0.062",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.124",
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-northeast-2": {
@@ -392,6 +445,20 @@
    "load_balancer_hourly": "0.0225",
    "nat_gateway_hourly": "0.059",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.12",
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.0251",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-northeast-3": {
@@ -452,6 +519,19 @@
    "load_balancer_hourly": "0.0243",
    "nat_gateway_hourly": "0.062",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-south-1": {
@@ -549,6 +629,20 @@
    "load_balancer_hourly": "0.0239",
    "nat_gateway_hourly": "0.056",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.124",
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.024",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-south-2": {
@@ -614,6 +708,19 @@
    "load_balancer_hourly": "0.0239",
    "nat_gateway_hourly": "0.056",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.024",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-southeast-1": {
@@ -721,6 +828,20 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.059",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.12",
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.024",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-southeast-2": {
@@ -829,6 +950,20 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.059",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.12",
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "ap-southeast-3": {
@@ -886,6 +1021,19 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.059",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.024",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.05"
   },
   "ap-southeast-4": {
@@ -934,6 +1082,19 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.059",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.011",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "ap-southeast-5": {
@@ -997,6 +1158,19 @@
    "load_balancer_hourly": "0.0227",
    "nat_gateway_hourly": "0.05015",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.0045",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.0045",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.0225",
+    "intelligent_ia": "0.01242",
+    "onezone_ia": "0.0099",
+    "rrs": "0.0216",
+    "standard": "0.0225",
+    "standard_ia": "0.01242"
+   },
    "snapshot_gb_month": "0.045"
   },
   "ap-southeast-6": {
@@ -1049,6 +1223,19 @@
    "load_balancer_hourly": "0.02646",
    "nat_gateway_hourly": "0.06195",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.004725",
+    "glacier_ir": "0.00525",
+    "intelligent_aa": "0.004725",
+    "intelligent_aia": "0.00525",
+    "intelligent_daa": "0.0021",
+    "intelligent_fa": "0.02625",
+    "intelligent_ia": "0.01449",
+    "onezone_ia": "0.01155",
+    "rrs": "0.02772",
+    "standard": "0.02415",
+    "standard_ia": "0.01449"
+   },
    "snapshot_gb_month": "0.0577"
   },
   "ap-southeast-7": {
@@ -1101,6 +1288,19 @@
    "load_balancer_hourly": "0.0227",
    "nat_gateway_hourly": "0.05015",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.0045",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.0045",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.0225",
+    "intelligent_ia": "0.01242",
+    "onezone_ia": "0.0099",
+    "rrs": "0.0216",
+    "standard": "0.0225",
+    "standard_ia": "0.01242"
+   },
    "snapshot_gb_month": "0.045"
   },
   "ca-central-1": {
@@ -1194,6 +1394,20 @@
    "load_balancer_hourly": "0.02475",
    "nat_gateway_hourly": "0.05",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.12",
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.01104",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "ca-west-1": {
@@ -1246,6 +1460,19 @@
    "load_balancer_hourly": "0.02475",
    "nat_gateway_hourly": "0.05",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.01104",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "eu-central-1": {
@@ -1373,6 +1600,20 @@
    "load_balancer_hourly": "0.027",
    "nat_gateway_hourly": "0.052",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.118",
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.0245",
+    "intelligent_ia": "0.0135",
+    "onezone_ia": "0.0108",
+    "rrs": "0.026",
+    "standard": "0.0245",
+    "standard_ia": "0.0135"
+   },
    "snapshot_gb_month": "0.054"
   },
   "eu-central-2": {
@@ -1430,6 +1671,19 @@
    "load_balancer_hourly": "0.0297",
    "nat_gateway_hourly": "0.0572",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.004455",
+    "glacier_ir": "0.0055",
+    "intelligent_aa": "0.004455",
+    "intelligent_aia": "0.0055",
+    "intelligent_daa": "0.00198",
+    "intelligent_fa": "0.02695",
+    "intelligent_ia": "0.01485",
+    "onezone_ia": "0.01188",
+    "rrs": "0.0286",
+    "standard": "0.02695",
+    "standard_ia": "0.01485"
+   },
    "snapshot_gb_month": "0.059"
   },
   "eu-north-1": {
@@ -1511,6 +1765,20 @@
    "load_balancer_hourly": "0.02394",
    "nat_gateway_hourly": "0.046",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.11",
+    "glacier": "0.0036",
+    "glacier_ir": "0.004",
+    "intelligent_aa": "0.0036",
+    "intelligent_aia": "0.004",
+    "intelligent_daa": "0.00099",
+    "intelligent_fa": "0.023",
+    "intelligent_ia": "0.0125",
+    "onezone_ia": "0.01",
+    "rrs": "0.024",
+    "standard": "0.023",
+    "standard_ia": "0.0125"
+   },
    "snapshot_gb_month": "0.0475"
   },
   "eu-south-1": {
@@ -1578,6 +1846,19 @@
    "load_balancer_hourly": "0.0265",
    "nat_gateway_hourly": "0.05",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.024",
+    "intelligent_ia": "0.0131",
+    "onezone_ia": "0.0105",
+    "rrs": "0.024",
+    "standard": "0.024",
+    "standard_ia": "0.0131"
+   },
    "snapshot_gb_month": "0.0525"
   },
   "eu-south-2": {
@@ -1665,6 +1946,19 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.048",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.023",
+    "intelligent_ia": "0.0125",
+    "onezone_ia": "0.01",
+    "rrs": "0.024",
+    "standard": "0.023",
+    "standard_ia": "0.0125"
+   },
    "snapshot_gb_month": "0.05"
   },
   "eu-west-1": {
@@ -1795,6 +2089,20 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.048",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.11",
+    "glacier": "0.0036",
+    "glacier_ir": "0.004",
+    "intelligent_aa": "0.0036",
+    "intelligent_aia": "0.004",
+    "intelligent_daa": "0.00099",
+    "intelligent_fa": "0.023",
+    "intelligent_ia": "0.0125",
+    "onezone_ia": "0.01",
+    "rrs": "0.024",
+    "standard": "0.023",
+    "standard_ia": "0.0125"
+   },
    "snapshot_gb_month": "0.05"
   },
   "eu-west-2": {
@@ -1892,6 +2200,19 @@
    "load_balancer_hourly": "0.02646",
    "nat_gateway_hourly": "0.05",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.024",
+    "intelligent_ia": "0.0131",
+    "onezone_ia": "0.01048",
+    "rrs": "0.0252",
+    "standard": "0.024",
+    "standard_ia": "0.0131"
+   },
    "snapshot_gb_month": "0.053"
   },
   "eu-west-3": {
@@ -1976,6 +2297,20 @@
    "load_balancer_hourly": "0.02646",
    "nat_gateway_hourly": "0.05",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.115",
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.024",
+    "intelligent_ia": "0.0131",
+    "onezone_ia": "0.01048",
+    "rrs": "0.0252",
+    "standard": "0.024",
+    "standard_ia": "0.0131"
+   },
    "snapshot_gb_month": "0.053"
   },
   "il-central-1": {
@@ -2027,6 +2362,19 @@
    "load_balancer_hourly": "0.02646",
    "nat_gateway_hourly": "0.0504",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.01104",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.06"
   },
   "me-central-1": {
@@ -2076,6 +2424,19 @@
    "load_balancer_hourly": "0.028224",
    "nat_gateway_hourly": "0.0528",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.01104",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "me-south-1": {
@@ -2121,6 +2482,19 @@
    "load_balancer_hourly": "0.02772",
    "nat_gateway_hourly": "0.0528",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00405",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.00405",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.0018",
+    "intelligent_fa": "0.025",
+    "intelligent_ia": "0.0138",
+    "onezone_ia": "0.01104",
+    "rrs": "0.0264",
+    "standard": "0.025",
+    "standard_ia": "0.0138"
+   },
    "snapshot_gb_month": "0.055"
   },
   "mx-central-1": {
@@ -2169,6 +2543,19 @@
    "load_balancer_hourly": "0.023625",
    "nat_gateway_hourly": "0.04725",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.00378",
+    "glacier_ir": "0.0042",
+    "intelligent_aa": "0.00378",
+    "intelligent_aia": "0.0042",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.02415",
+    "intelligent_ia": "0.013125",
+    "onezone_ia": "0.0105",
+    "rrs": "0.0252",
+    "standard": "0.02415",
+    "standard_ia": "0.013125"
+   },
    "snapshot_gb_month": "0.053"
   },
   "sa-east-1": {
@@ -2263,6 +2650,20 @@
    "load_balancer_hourly": "0.034",
    "nat_gateway_hourly": "0.093",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.194",
+    "glacier": "0.00765",
+    "glacier_ir": "0.0083",
+    "intelligent_aa": "0.00765",
+    "intelligent_aia": "0.0083",
+    "intelligent_daa": "0.0032",
+    "intelligent_fa": "0.0405",
+    "intelligent_ia": "0.0221",
+    "onezone_ia": "0.0177",
+    "rrs": "0.0326",
+    "standard": "0.0405",
+    "standard_ia": "0.0221"
+   },
    "snapshot_gb_month": "0.068"
   },
   "us-east-1": {
@@ -2405,6 +2806,20 @@
    "load_balancer_hourly": "0.0225",
    "nat_gateway_hourly": "0.045",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.11",
+    "glacier": "0.0036",
+    "glacier_ir": "0.004",
+    "intelligent_aa": "0.0036",
+    "intelligent_aia": "0.004",
+    "intelligent_daa": "0.00099",
+    "intelligent_fa": "0.023",
+    "intelligent_ia": "0.0125",
+    "onezone_ia": "0.01",
+    "rrs": "0.024",
+    "standard": "0.023",
+    "standard_ia": "0.0125"
+   },
    "snapshot_gb_month": "0.05"
   },
   "us-east-2": {
@@ -2536,6 +2951,20 @@
    "load_balancer_hourly": "0.0225",
    "nat_gateway_hourly": "0.045",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.11",
+    "glacier": "0.0036",
+    "glacier_ir": "0.004",
+    "intelligent_aa": "0.0036",
+    "intelligent_aia": "0.004",
+    "intelligent_daa": "0.00099",
+    "intelligent_fa": "0.023",
+    "intelligent_ia": "0.0125",
+    "onezone_ia": "0.01",
+    "rrs": "0.024",
+    "standard": "0.023",
+    "standard_ia": "0.0125"
+   },
    "snapshot_gb_month": "0.05"
   },
   "us-gov-east-1": {
@@ -2608,6 +3037,19 @@
    "load_balancer_hourly": "0.032",
    "nat_gateway_hourly": "0.054",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0054",
+    "glacier_ir": "0.0064",
+    "intelligent_aa": "0.0054",
+    "intelligent_aia": "0.0064",
+    "intelligent_daa": "0.0024",
+    "intelligent_fa": "0.039",
+    "intelligent_ia": "0.02",
+    "onezone_ia": "0.016",
+    "rrs": "0.0312",
+    "standard": "0.039",
+    "standard_ia": "0.02"
+   },
    "snapshot_gb_month": "0.066"
   },
   "us-gov-west-1": {
@@ -2700,6 +3142,19 @@
    "load_balancer_hourly": "0.032",
    "nat_gateway_hourly": "0.054",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "glacier": "0.0054",
+    "glacier_ir": "0.0064",
+    "intelligent_aa": "0.0054",
+    "intelligent_aia": "0.0064",
+    "intelligent_daa": "0.0024",
+    "intelligent_fa": "0.039",
+    "intelligent_ia": "0.02",
+    "onezone_ia": "0.016",
+    "rrs": "0.0312",
+    "standard": "0.039",
+    "standard_ia": "0.02"
+   },
    "snapshot_gb_month": "0.066"
   },
   "us-west-1": {
@@ -2789,6 +3244,20 @@
    "load_balancer_hourly": "0.0252",
    "nat_gateway_hourly": "0.048",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.126",
+    "glacier": "0.0045",
+    "glacier_ir": "0.005",
+    "intelligent_aa": "0.0045",
+    "intelligent_aia": "0.005",
+    "intelligent_daa": "0.002",
+    "intelligent_fa": "0.026",
+    "intelligent_ia": "0.0144",
+    "onezone_ia": "0.0115",
+    "rrs": "0.0264",
+    "standard": "0.026",
+    "standard_ia": "0.0144"
+   },
    "snapshot_gb_month": "0.055"
   },
   "us-west-2": {
@@ -2932,6 +3401,20 @@
    "load_balancer_hourly": "0.0225",
    "nat_gateway_hourly": "0.045",
    "public_ipv4_hourly": "0.005",
+   "s3_gb_month": {
+    "express_onezone": "0.11",
+    "glacier": "0.0036",
+    "glacier_ir": "0.004",
+    "intelligent_aa": "0.0036",
+    "intelligent_aia": "0.004",
+    "intelligent_daa": "0.00099",
+    "intelligent_fa": "0.023",
+    "intelligent_ia": "0.0125",
+    "onezone_ia": "0.01",
+    "rrs": "0.024",
+    "standard": "0.023",
+    "standard_ia": "0.0125"
+   },
    "snapshot_gb_month": "0.05"
   }
  },

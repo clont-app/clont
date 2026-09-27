@@ -138,3 +138,44 @@ def test_spot_check_published_us_east_1_rates():
     assert pricing.ebs_quote("gp3", 1, "us-east-1").amount == Decimal("0.08")
     assert pricing.instance_quote("m5.large", "us-east-1").amount == Decimal("0.096")
     assert pricing.nat_gateway_quote("us-east-1").amount == Decimal("0.045") * Decimal("730")
+
+
+# --- s3 storage classes -----------------------------------------------------
+
+
+def test_s3_storage_monthly_uses_the_class_rate():
+    assert pricing.s3_storage_monthly(Decimal(100), "standard") == Decimal("0.023") * 100
+    assert pricing.s3_storage_monthly(Decimal(100), "standard_ia") == Decimal("0.0125") * 100
+
+
+def test_s3_transition_saving_is_the_rate_delta():
+    size = Decimal(1000)
+    expected = (Decimal("0.023") - Decimal("0.0125")) * size
+    quote = pricing.s3_transition_quote(size, "standard_ia", "standard", "us-east-1")
+    assert quote.amount == expected
+    assert not quote.approximate
+    # never more than just deleting the data
+    assert quote.amount < pricing.s3_storage_monthly(size, "standard", "us-east-1")
+
+
+def test_s3_transition_to_a_class_we_do_not_price_invents_nothing():
+    # deep archive has no byte-hrs sku in the s3 offer; a fallback rate here
+    # would quote a saving off the standard rate, i.e. zero dollars as a number
+    quote = pricing.s3_transition_quote(Decimal(1000), "mystery", "standard", "us-east-1")
+    assert quote.amount == Decimal(0)
+    assert quote.approximate
+
+
+def test_s3_transition_the_wrong_way_round_is_not_a_saving():
+    assert pricing.s3_transition_quote(
+        Decimal(1000), "standard", "glacier", "us-east-1"
+    ).amount == Decimal(0)
+
+
+def test_every_region_prices_the_classes_the_collector_reads():
+    for region in pricing.regions():
+        for cls in ("standard", "standard_ia"):
+            quote = pricing.s3_storage_quote(Decimal(1), cls, region)
+            assert quote.region == region, f"{region}/{cls} fell back"
+            assert not quote.approximate
+            assert quote.amount > 0

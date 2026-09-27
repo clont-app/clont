@@ -6,6 +6,7 @@ never calls it at runtime. The bulk API is free, needs no credentials, no IAM.
 
     python tools/gen_prices.py                 # every region
     python tools/gen_prices.py us-east-1 eu-west-1
+    python tools/gen_prices.py --s3            # only the s3 rates, merged in
 
 The EC2 region shards are ~480 MB of pretty-printed JSON each, so they are
 scanned line by line and never held in memory — `json.load` on one wants more
@@ -14,7 +15,14 @@ a single sequential pass collects the SKUs it wants, then their rates.
 
 Everything but the load balancer lives in the AmazonEC2 offer (NAT gateway and
 EBS included); only the ALB hourly comes from AWSELB. AmazonVPC carries the idle
-public IPv4 charge.
+public IPv4 charge. S3 storage is its own offer, and its shards are ~0.5 MB —
+`--s3` refreshes just those rates in place, because a full run pulls ~17 GB of
+ec2 shards to change one key. It only touches regions the table already has: a
+region with s3 rates and no ec2 rates would price every instance at us-east-1
+without saying so.
+
+Tiered rates (s3 standard, rrs) keep the *first* tier — the small-volume rate,
+which is what a bucket under 50 TB actually pays.
 """
 
 from __future__ import annotations
@@ -36,6 +44,27 @@ _TERM_SKU = re.compile(r'^ {6}"([A-Z0-9]{10,20})" : \{')
 _USD = re.compile(r'^\s*"USD" : "([0-9.]+)"')
 
 _EBS_TYPES = {"gp3", "gp2", "io1", "io2", "st1", "sc1", "standard"}
+
+# s3 storage classes, keyed by usagetype so the staging/overhead skus (which
+# carry the same volumeType as real storage) can't be mistaken for a rate
+_S3_CLASSES = {
+    "TimedStorage-ByteHrs": "standard",
+    "TimedStorage-SIA-ByteHrs": "standard_ia",
+    "TimedStorage-ZIA-ByteHrs": "onezone_ia",
+    "TimedStorage-INT-FA-ByteHrs": "intelligent_fa",
+    "TimedStorage-INT-IA-ByteHrs": "intelligent_ia",
+    "TimedStorage-INT-AIA-ByteHrs": "intelligent_aia",
+    "TimedStorage-INT-AA-ByteHrs": "intelligent_aa",
+    "TimedStorage-INT-DAA-ByteHrs": "intelligent_daa",
+    "TimedStorage-GIR-ByteHrs": "glacier_ir",
+    "TimedStorage-GlacierByteHrs": "glacier",
+    "TimedStorage-GDA-ByteHrs": "deep_archive",
+    "TimedStorage-RRS-ByteHrs": "rrs",
+    "TimedStorage-XZ-ByteHrs": "express_onezone",
+}
+# outside us-east-1 the usagetype carries a region code (EUC1-, APS3-). the
+# prefix is uppercase, which is what keeps Files-/Annotation- out.
+_S3_USAGETYPE = re.compile(r"^(?:[A-Z]{2,5}[0-9]?-)?(TimedStorage-[A-Za-z0-9-]+)$")
 
 
 def _get_json(url: str) -> dict:
@@ -90,12 +119,25 @@ def _classify(block: str) -> tuple[str, str] | None:
     return None
 
 
+def _classify_s3(block: str) -> tuple[str, str] | None:
+    """Same contract as `_classify`, for the AmazonS3 offer."""
+    if _attr(block, "productFamily") != "Storage":
+        return None
+    if _attr(block, "locationType") != "AWS Region":
+        return None
+    m = _S3_USAGETYPE.match(_attr(block, "usagetype"))
+    if m is None:
+        return None
+    name = _S3_CLASSES.get(m.group(1))
+    return ("s3_gb_month", name) if name else None
+
+
 def _trim(rate: str) -> str:
     """0.0960000000 -> 0.096. the table is read by humans in review."""
     return rate.rstrip("0").rstrip(".") if "." in rate else rate
 
 
-def _scan(url: str, into: dict) -> None:
+def _scan(url: str, into: dict, classify=_classify) -> None:
     """Stream one region shard, folding the rates we recognise into `into`."""
     wanted: dict[str, tuple[str, str]] = {}
     block: list[str] = []
@@ -115,7 +157,7 @@ def _scan(url: str, into: dict) -> None:
                     block.append(line)
                     if line.startswith("    }"):
                         in_product = False
-                        target = _classify("".join(block))
+                        target = classify("".join(block))
                         if target is not None:
                             wanted[sku] = target
                     continue
@@ -139,11 +181,53 @@ def _scan(url: str, into: dict) -> None:
                     current = ""
 
 
-def main(regions: list[str]) -> None:
+def _write(regions: dict[str, dict]) -> None:
+    OUT.write_text(
+        json.dumps(
+            {
+                "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source": "AWS Price List bulk API - on-demand, USD, Linux/shared tenancy",
+                "base_region": "us-east-1",
+                "regions": regions,
+            },
+            indent=1,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    print(f"wrote {OUT} ({len(regions)} regions)", file=sys.stderr)
+
+
+def _s3_only(regions: list[str]) -> None:
+    """Refresh s3_gb_month in place, leaving every other rate alone."""
+    table = json.loads(OUT.read_text())
+    have: dict[str, dict] = table["regions"]
+    urls = _region_urls("AmazonS3")
+    for region in regions or sorted(have):
+        if region not in have or region not in urls:
+            print(f"  {region} not in the table, skipped", file=sys.stderr)
+            continue
+        print(f"{region} ...", file=sys.stderr, flush=True)
+        row: dict = {}
+        _scan(urls[region], row, _classify_s3)
+        rates = row.get("s3_gb_month")
+        if not rates:  # keep the old rates rather than blanking them
+            print(f"  no s3 rates for {region}, kept", file=sys.stderr)
+            continue
+        have[region]["s3_gb_month"] = rates
+    _write(have)
+
+
+def main(argv: list[str]) -> None:
+    if "--s3" in argv:
+        _s3_only([a for a in argv if a != "--s3"])
+        return
+
     ec2 = _region_urls("AmazonEC2")
     vpc = _region_urls("AmazonVPC")
     elb = _region_urls("AWSELB")
-    targets = regions or sorted(set(ec2) & set(vpc) & set(elb))
+    s3 = _region_urls("AmazonS3")
+    targets = argv or sorted(set(ec2) & set(vpc) & set(elb))
 
     out: dict[str, dict] = {}
     for region in targets:
@@ -151,25 +235,14 @@ def main(regions: list[str]) -> None:
         row: dict = {}
         for urls in (ec2, vpc, elb):
             _scan(urls[region], row)
+        if region in s3:
+            _scan(s3[region], row, _classify_s3)
         if not row.get("ec2_family_large_hourly"):
             print(f"  no ec2 rates for {region}, skipped", file=sys.stderr)
             continue
         out[region] = row
 
-    OUT.write_text(
-        json.dumps(
-            {
-                "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "source": "AWS Price List bulk API - on-demand, USD, Linux/shared tenancy",
-                "base_region": "us-east-1",
-                "regions": out,
-            },
-            indent=1,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    print(f"wrote {OUT} ({len(out)} regions)", file=sys.stderr)
+    _write(out)
 
 
 if __name__ == "__main__":

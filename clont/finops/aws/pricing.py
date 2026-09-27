@@ -94,6 +94,25 @@ LOAD_BALANCER_MONTH = _base(("load_balancer_hourly",), "0.0225") * HOURS_PER_MON
 # so true cost is below this; used as an upper-bound ballpark on the volume size.
 SNAPSHOT_GB_MONTH = _base(("snapshot_gb_month",), "0.05")
 
+# S3 storage, USD per GB-month, us-east-1. Keys are the storage classes as
+# `gen_prices.py` names them; standard and rrs are the first (under-50-TB) tier.
+_S3_GB_MONTH = {
+    cls: Decimal(rate) for cls, rate in _BASE.get("s3_gb_month", {}).items()
+}
+_S3_DEFAULT = _S3_GB_MONTH.get("standard", Decimal("0.023"))
+# a `StorageClass` as the s3 api spells it -> the table's key
+S3_API_CLASS = {
+    "STANDARD": "standard",
+    "STANDARD_IA": "standard_ia",
+    "ONEZONE_IA": "onezone_ia",
+    "INTELLIGENT_TIERING": "intelligent_fa",  # the frequent tier: worst case, under-promise
+    "GLACIER_IR": "glacier_ir",
+    "GLACIER": "glacier",
+    "DEEP_ARCHIVE": "deep_archive",
+    "REDUCED_REDUNDANCY": "rrs",
+    "EXPRESS_ONEZONE": "express_onezone",
+}
+
 # AWS instance-size normalization factors, rebased so large == 1.
 _SIZE_FACTOR = {
     "nano": Decimal("0.0625"),
@@ -162,6 +181,46 @@ def snapshot_quote(size_gb: int, region: str | None = None) -> Quote:
     """Approximate upper-bound monthly cost of a snapshot of a `size_gb` volume."""
     quote = _rate(region, ("snapshot_gb_month",), SNAPSHOT_GB_MONTH)
     return Quote(quote.amount * Decimal(size_gb), quote.region, quote.approximate)
+
+
+def _s3_rate(storage_class: str, region: str | None) -> Quote:
+    """USD per GB-month for one s3 storage class."""
+    quote = _rate(region, ("s3_gb_month", storage_class), _S3_DEFAULT)
+    known = storage_class in _S3_GB_MONTH or storage_class in _REGIONS.get(
+        region or BASE_REGION, {}
+    ).get("s3_gb_month", {})
+    return Quote(quote.amount, quote.region, quote.approximate or not known)
+
+
+def s3_storage_quote(
+    size_gb: Decimal, storage_class: str = "standard", region: str | None = None
+) -> Quote:
+    """Monthly cost of `size_gb` sitting in one s3 storage class."""
+    quote = _s3_rate(storage_class, region)
+    return Quote(quote.amount * Decimal(size_gb), quote.region, quote.approximate)
+
+
+def s3_transition_quote(
+    size_gb: Decimal,
+    to_class: str = "standard_ia",
+    from_class: str = "standard",
+    region: str | None = None,
+) -> Quote:
+    """Monthly saving from moving `size_gb` between two storage classes.
+
+    Storage rate difference only — per-request retrieval, the lifecycle
+    transition request fee and IA's 128 KB / 30-day minimums are not modelled,
+    so this is the ceiling on what a transition saves, and it is only a saving
+    at all if the data is genuinely cold.
+    """
+    src = _s3_rate(from_class, region)
+    dst = _s3_rate(to_class, region)
+    delta = src.amount - dst.amount
+    if delta <= 0:  # a class we don't price, or not actually cheaper
+        return Quote(Decimal(0), src.region, True)
+    return Quote(
+        delta * Decimal(size_gb), src.region, src.approximate or dst.approximate
+    )
 
 
 def eip_quote(region: str | None = None) -> Quote:
@@ -235,6 +294,12 @@ def snapshot_monthly(size_gb: int, region: str | None = None) -> Decimal:
 
 def ebs_monthly(volume_type: str, size_gb: int, region: str | None = None) -> Decimal:
     return ebs_quote(volume_type, size_gb, region).amount
+
+
+def s3_storage_monthly(
+    size_gb: Decimal, storage_class: str = "standard", region: str | None = None
+) -> Decimal:
+    return s3_storage_quote(size_gb, storage_class, region).amount
 
 
 def ebs_gp2_to_gp3_monthly(size_gb: int, region: str | None = None) -> Decimal:
