@@ -92,6 +92,20 @@ def test_spend_digest_one_info_event_per_alias_for_latest_day():
     assert prod.title.startswith("[prod]")
 
 
+def test_spend_digest_sums_the_slices_of_one_service():
+    # cur splits a service's day by tag combo and transfer bucket; the digest
+    # must report the service, not whichever slice happened to come last
+    records = [
+        _cost("EC2", "6", date(2024, 1, 2)),
+        _cost("EC2", "4", date(2024, 1, 2)),
+        _cost("S3", "5", date(2024, 1, 2)),
+    ]
+    [event] = SpendDigestDetector().detect(records)
+
+    assert event.payload["services"] == {"EC2": "10", "S3": "5"}
+    assert event.message.endswith("top: EC2 10, S3 5")
+
+
 def _spike_series(latest: str, alias: str = "prod") -> list[CostRecord]:
     # 3 baseline days at $10 + one latest day at `latest`.
     return [

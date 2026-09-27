@@ -127,7 +127,7 @@ def test_detector_warns_over_the_share_and_names_the_buckets():
     assert len(events) == 1
     event = events[0]
     assert event.severity is EventSeverity.WARN
-    assert event.key == "finops:transfer:prod"
+    assert event.key == "finops:transfer:prod:USD"
     assert "30.0%" in event.title
     assert "nat" in event.message and "cross-az" in event.message
     assert event.payload["buckets"] == {"nat": "20.00", "cross-az": "10.00"}

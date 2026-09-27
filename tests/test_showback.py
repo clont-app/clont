@@ -116,7 +116,7 @@ def test_detector_warns_once_unattributed_crosses_the_threshold():
 
     (event,) = ShowbackDetector(("Owner",), unattributed_pct=20.0).detect(records)
     assert event.severity is EventSeverity.WARN
-    assert event.key == "finops:showback:prod:Owner"
+    assert event.key == "finops:showback:prod:Owner:USD"
     assert "30.0% unattributed" in event.title
     assert "team-a 70.00" in event.message
     assert event.payload["unattributed"] == "30.00"
@@ -129,3 +129,12 @@ def test_detector_warns_once_unattributed_crosses_the_threshold():
 def test_detector_skips_a_window_with_no_spend():
     # pure credits net to zero; there is no share to report
     assert ShowbackDetector(("Owner",)).detect([_rec("0", {"Owner": "a"})]) == []
+
+
+def test_nothing_attributed_points_at_the_billing_switch():
+    # every dollar untagged is almost always an unactivated cost allocation tag,
+    # not a fleet with no tags on it
+    (event,) = ShowbackDetector(("Owner",)).detect([_rec("100", {"Owner": ""})])
+
+    assert event.severity is EventSeverity.WARN
+    assert "activated in Billing" in event.message

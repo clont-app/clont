@@ -77,6 +77,10 @@ class RecommendationDetector:
 
 class SpendDigestDetector:
     """Daily spend -> one INFO digest event per account (latest day present).
+
+    Totals per service first: a collector can emit several records for one
+    service and day (cur splits by account, transfer bucket and tag combo), so
+    ranking raw records would report a slice as if it were the service.
     """
 
     _TOP_N = 5
@@ -94,8 +98,11 @@ class SpendDigestDetector:
             currency = today[0].cost.currency
             alias = alias_key or "-"
 
-            top = sorted(today, key=lambda r: r.cost.amount, reverse=True)[: self._TOP_N]
-            breakdown = ", ".join(f"{r.service} {r.cost.amount}" for r in top)
+            per_service: dict[str, Decimal] = defaultdict(Decimal)
+            for rec in today:
+                per_service[rec.service] += rec.cost.amount
+            ranked = sorted(per_service.items(), key=lambda kv: (-kv[1], kv[0]))
+            breakdown = ", ".join(f"{s} {a}" for s, a in ranked[: self._TOP_N])
             events.append(
                 Event(
                     key=f"finops:spend:digest:{alias}",
@@ -108,7 +115,7 @@ class SpendDigestDetector:
                         "day": latest_day.isoformat(),
                         "total": str(total),
                         "currency": currency,
-                        "services": {r.service: str(r.cost.amount) for r in today},
+                        "services": {s: str(a) for s, a in ranked},
                     },
                 )
             )
@@ -139,9 +146,15 @@ class ShowbackDetector:
             over = report.unattributed_pct >= self._limit
             top = [ln for ln in report.lines if ln.value != UNATTRIBUTED][: self._TOP_N]
             breakdown = ", ".join(f"{ln.value} {ln.amount} ({ln.share_pct}%)" for ln in top)
+            if not top:
+                # 100% unattributed usually means the key was never activated as a
+                # cost allocation tag, so the report has no column for it at all
+                breakdown = "nothing — is the cost allocation tag activated in Billing?"
             events.append(
                 Event(
-                    key=f"finops:showback:{alias}:{report.key}",
+                    # currency is in the key: a report is per currency, and two
+                    # events sharing a key would silence one another's resend
+                    key=f"finops:showback:{alias}:{report.key}:{report.currency}",
                     severity=EventSeverity.WARN if over else EventSeverity.INFO,
                     domain="finops",
                     cloud=_cloud_of(records),
@@ -278,7 +291,7 @@ class DataTransferDetector:
             )
             events.append(
                 Event(
-                    key=f"finops:transfer:{alias}",
+                    key=f"finops:transfer:{alias}:{report.currency}",
                     severity=EventSeverity.WARN if over else EventSeverity.INFO,
                     domain="finops",
                     cloud=_cloud_of(records),
