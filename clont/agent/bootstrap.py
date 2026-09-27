@@ -125,17 +125,22 @@ def build_agent(config: Config) -> Agent:
         members.extend(_member_configs(provider, aws))
 
     # discovered accounts come second on purpose: an account also named in the
-    # YAML keeps that entry, with its own alias and its own cur
-    taken = {p.alias for p in providers} | {p.account_id for p in providers}
+    # YAML keeps that entry, with its own alias and its own cur. aliases and ids
+    # are tracked apart so an alias spelled like an id can't collide, and an
+    # unknown id never stands in for another one
+    aliases = {p.alias for p in providers}
+    ids = {p.account_id for p in providers if p.account_id}
     for alias, aws in members:
-        if alias in taken:
+        if alias in aliases:
             continue
         provider = _authenticate(alias, aws)
-        if provider is None or provider.account_id in taken:
+        if provider is None or (provider.account_id and provider.account_id in ids):
             continue
         log.info("member account %s (%s) discovered", alias, provider.account_id)
         providers.append(provider)
-        taken |= {alias, provider.account_id}
+        aliases.add(alias)
+        if provider.account_id:
+            ids.add(provider.account_id)
 
     if config.aws and not providers:
         raise RuntimeError("no configured accounts could be authenticated")
