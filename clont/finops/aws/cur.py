@@ -69,8 +69,11 @@ _ABSENT = {"NoSuchKey", "NoSuchBucket", "404"}
 _TAG_PREFIXES = ("resourceTags/user:", "resource_tags_user_")
 # splitting by tag multiplies the rows: days x services x distinct combos. a
 # high-cardinality required tag (Name, say) would otherwise eat the box, so
-# surplus combos fold into one labelled bucket instead of being dropped
-_MAX_GROUPS = 5000
+# surplus combos fold into one labelled bucket instead of being dropped.
+# the cap counts *tag combos*, not groups: days x accounts x services alone can
+# pass 5000 on a big payer, and capping that would blank the tags of a report
+# whose cardinality is fine
+_MAX_TAG_COMBOS = 5000
 _OTHER = "(other)"
 
 # day, usage account ("" when the report is not split by account), service,
@@ -85,6 +88,7 @@ class _Spend:
     totals: dict[_Group, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     currency: str = "USD"
     seen_tags: set[str] = field(default_factory=set)  # keys the report actually carries
+    combos: set[tuple[tuple[str, str], ...]] = field(default_factory=set)
 
     def add(
         self,
@@ -95,10 +99,12 @@ class _Spend:
         tags: tuple[tuple[str, str], ...],
         amount: Decimal,
     ) -> None:
-        group: _Group = (day, account, service, transfer, tags)
-        if group not in self.totals and len(self.totals) >= _MAX_GROUPS:
-            group = (day, account, service, transfer, tuple((k, _OTHER) for k, _ in tags))
-        self.totals[group] += amount
+        if tags and tags not in self.combos:
+            if len(self.combos) >= _MAX_TAG_COMBOS:
+                tags = tuple((k, _OTHER) for k, _ in tags)
+            else:
+                self.combos.add(tags)
+        self.totals[(day, account, service, transfer, tags)] += amount
 
 
 _cache: dict[str, tuple[float, _Spend]] = {}

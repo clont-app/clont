@@ -495,7 +495,7 @@ def test_changing_the_tag_keys_bypasses_the_cache():
 
 def test_surplus_tag_values_fold_into_one_bucket(monkeypatch):
     # a high-cardinality required tag must not let the group table grow forever
-    monkeypatch.setattr(cur, "_MAX_GROUPS", 2)
+    monkeypatch.setattr(cur, "_MAX_TAG_COMBOS", 2)
     rows = [
         _row("2024-01-01", "1.00", "Amazon RDS") | {"resourceTags/user:Name": f"n-{i}"}
         for i in range(5)
@@ -507,6 +507,24 @@ def test_surplus_tag_values_fold_into_one_bucket(monkeypatch):
     assert len(records) == 3  # two real values plus the fold-in bucket
     assert {"Name": "(other)"} in [r.tags for r in records]
     assert sum(r.cost.amount for r in records) == Decimal("5.00")  # no dollars lost
+
+
+def test_many_days_and_services_keep_their_tags(monkeypatch):
+    # the cap is on distinct tag values, not on rows: days x services alone must
+    # not blank the tags of a report whose cardinality is fine
+    monkeypatch.setattr(cur, "_MAX_TAG_COMBOS", 2)
+    rows = [
+        _row(f"2024-01-0{day}", "1.00", service)
+        | {"resourceTags/user:Owner": f"team-{service.lower()}"}
+        for day in range(1, 6)
+        for service in ("A", "B")
+    ]
+    objects = _tagged_objects([*_BASE_COLUMNS, "resourceTags/user:Owner"], rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)), tuning=_tuning("Owner"))
+
+    assert len(records) == 10
+    assert {r.tags["Owner"] for r in records} == {"team-a", "team-b"}
 
 
 # --- data transfer: the usage-type split -----------------------------------
