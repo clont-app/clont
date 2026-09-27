@@ -25,6 +25,7 @@ from clont.events.stats import (
 )
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.showback import UNATTRIBUTED, showback
+from clont.finops.transfer import transfer_report
 from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
 
 # Minimum same-phase samples (same weekday / same hour-of-day) before a detector
@@ -245,6 +246,61 @@ class SpendSpikeDetector:
                         },
                     )
                 )
+        return events
+
+
+class DataTransferDetector:
+    """Network spend -> one event per account, WARN when it eats too much of the bill.
+
+    Cloud-agnostic: it reads the `transfer` dimension, so anything that labels its
+    records gets the report. Transfer is normally 5-15% of an aws bill and has no
+    api of its own, so the headline is the share — the bucket breakdown is what
+    says which fix (placement, gateway endpoint, replication, cdn).
+    """
+
+    def __init__(self, transfer_pct: float = 15.0, min_dollars: float = 1.0) -> None:
+        self._limit = Decimal(str(transfer_pct))
+        self._min = Decimal(str(min_dollars))
+
+    def detect(self, records: list[CostRecord]) -> list[Event]:
+        events: list[Event] = []
+        for report in transfer_report(records):
+            # a few cents of cross-az on a toy account is not a finding
+            if report.total <= 0 or report.transfer < self._min:
+                continue
+            alias = report.alias or "-"
+            over = report.transfer_pct >= self._limit
+            breakdown = ", ".join(
+                f"{ln.bucket} {ln.amount} ({ln.share_pct}%"
+                + (f", {'/'.join(ln.services)}" if ln.services else "")
+                + ")"
+                for ln in report.lines
+            )
+            events.append(
+                Event(
+                    key=f"finops:transfer:{alias}",
+                    severity=EventSeverity.WARN if over else EventSeverity.INFO,
+                    domain="finops",
+                    cloud=_cloud_of(records),
+                    title=(
+                        f"[{alias}] Data transfer: {report.transfer} {report.currency} "
+                        f"({report.transfer_pct}% of spend)"
+                    ),
+                    message=(
+                        f"{report.start}..{report.end}: {report.transfer} {report.currency} "
+                        f"of {report.total} {report.currency} is network — {breakdown}"
+                    ),
+                    payload={
+                        "start": report.start.isoformat(),
+                        "end": report.end.isoformat(),
+                        "total": str(report.total),
+                        "transfer": str(report.transfer),
+                        "transfer_pct": str(report.transfer_pct),
+                        "currency": report.currency,
+                        "buckets": {ln.bucket: str(ln.amount) for ln in report.lines},
+                    },
+                )
+            )
         return events
 
 

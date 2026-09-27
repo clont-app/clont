@@ -507,3 +507,48 @@ def test_surplus_tag_values_fold_into_one_bucket(monkeypatch):
     assert len(records) == 3  # two real values plus the fold-in bucket
     assert {"Name": "(other)"} in [r.tags for r in records]
     assert sum(r.cost.amount for r in records) == Decimal("5.00")  # no dollars lost
+
+
+# --- data transfer: the usage-type split -----------------------------------
+
+
+_USAGE_COLUMNS = [*_BASE_COLUMNS, "lineItem/UsageType"]
+
+
+def test_transfer_rows_carry_their_bucket_as_a_dimension():
+    rows = [
+        _row("2024-01-01", "3.00", "Amazon Virtual Private Cloud")
+        | {"lineItem/UsageType": "USE1-NatGateway-Bytes"},
+        _row("2024-01-01", "1.00", "Amazon Virtual Private Cloud")
+        | {"lineItem/UsageType": "USE1-NatGateway-Hours"},
+    ]
+    objects = _tagged_objects(_USAGE_COLUMNS, rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)))
+
+    # same day, same service: the bytes split off, the hourly charge doesn't
+    assert [(r.cost.amount, r.dimensions) for r in records] == [
+        (Decimal("1.00"), None),
+        (Decimal("3.00"), {"transfer": "nat"}),
+    ]
+
+
+def test_the_service_total_is_unchanged_by_the_transfer_split():
+    rows = [
+        _row("2024-01-01", "2.00", "Amazon Elastic Compute Cloud")
+        | {"lineItem/UsageType": "USE1-DataTransfer-Regional-Bytes"},
+        _row("2024-01-01", "8.00", "Amazon Elastic Compute Cloud")
+        | {"lineItem/UsageType": "BoxUsage:t3.micro"},
+    ]
+    objects = _tagged_objects(_USAGE_COLUMNS, rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)))
+
+    assert sum(r.cost.amount for r in records) == Decimal("10.00")
+    assert {(r.dimensions or {}).get("transfer") for r in records} == {None, "cross-az"}
+
+
+def test_a_report_with_no_usage_type_column_has_no_transfer_dimension():
+    records = _collect(_FakeProvider(_FakeS3(_objects())))
+
+    assert {r.dimensions for r in records} == {None}

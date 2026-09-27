@@ -21,6 +21,7 @@ from clont.core.models import Period
 from clont.events.detectors import (
     BudgetDetector,
     CapacityForecastDetector,
+    DataTransferDetector,
     HealthDetector,
     MetricAnomalyDetector,
     RecommendationDetector,
@@ -85,6 +86,7 @@ class Agent:
         forecast_alpha: float = 0.5,
         finops_tuning: FinOpsTuning | None = None,
         showback_unattributed_pct: float = 20.0,
+        transfer_spend_pct: float = 15.0,
         anomaly_sigma: float = 3.0,
         anomaly_min_points: int = 6,
         free_storage_min_pct: float = 10.0,
@@ -122,6 +124,7 @@ class Agent:
             BudgetDetector(budgets or [], budget_warn_pct, forecast_alpha),
             # same keys tag hygiene mandates: what must be tagged is what gets shown back
             ShowbackDetector(self._finops_tuning.required_tags, showback_unattributed_pct),
+            DataTransferDetector(transfer_spend_pct, spend_min_dollars),
         ]
         self._monitoring_detectors = [HealthDetector()]
         self._monitoring_metric_detectors = [

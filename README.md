@@ -101,6 +101,13 @@ the same event pipeline:
   with the unattributed share reported as its own line. that share is the number
   that justifies fixing the tags. grouping is cloud-agnostic: whatever fills a
   cost record's tags gets the report.
+- **data transfer** — network spend split into cross-az, inter-region, internet
+  egress, nat processing, cdn and privatelink, with the top talking service in
+  each. it is normally 5-15% of a bill and has no api of its own; the usage type
+  in cur is the only free place that says which transfer you bought.
+- **nat paying for free traffic** — a vpc with a nat gateway and no s3/dynamodb
+  gateway endpoint pays per gigabyte for traffic the endpoint carries for
+  nothing. the classic transfer finding, and two free describes to catch.
 
 thresholds, the non-prod tag convention and the required-tag list are all
 configurable under `finops.*`.
@@ -364,6 +371,8 @@ with the rest. it only gives up if *no* account authenticates.
   resource must have. empty turns tag hygiene *and* showback off.
 - `showback_unattributed_pct` (float, default `20`) — showback groups spend by
   `required_tags` and warns when this much of it carries no value for a key.
+- `transfer_spend_pct` (float, default `15`) — warn when data transfer takes this
+  share of an account's spend. 5-15% is normal, past that it's a finding.
 
 **`monitoring`**
 

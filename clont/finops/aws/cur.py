@@ -39,6 +39,8 @@ from botocore.exceptions import ClientError
 from clont.core.logging import get_logger
 from clont.core.models import Cloud, Money, Period
 from clont.core.registry import register
+from clont.finops.aws.usage_types import DIMENSION as _TRANSFER
+from clont.finops.aws.usage_types import transfer_bucket
 from clont.finops.models import CostRecord, Recommendation
 from clont.providers.aws.organizations import account_names
 from clont.providers.base import Provider
@@ -51,6 +53,7 @@ _COST = ("lineItem/UnblendedCost", "line_item_unblended_cost")
 _CURRENCY = ("lineItem/CurrencyCode", "line_item_currency_code")
 _KIND = ("lineItem/LineItemType", "line_item_line_item_type")
 _ACCOUNT = ("lineItem/UsageAccountId", "line_item_usage_account_id")
+_USAGE_TYPE = ("lineItem/UsageType", "line_item_usage_type")
 # ProductName is the closest thing to a Cost Explorer service name; the product
 # code is the fallback when the report doesn't carry it.
 _SERVICE = (
@@ -70,13 +73,14 @@ _TAG_PREFIXES = ("resourceTags/user:", "resource_tags_user_")
 _MAX_GROUPS = 5000
 _OTHER = "(other)"
 
-# day, usage account ("" when the report is not split by account), service, tags
-_Group = tuple[date, str, str, tuple[tuple[str, str], ...]]
+# day, usage account ("" when the report is not split by account), service,
+# data-transfer bucket ("" for everything that isn't transfer), tags
+_Group = tuple[date, str, str, str, tuple[tuple[str, str], ...]]
 
 
 @dataclass
 class _Spend:
-    """Daily per-account per-service totals, split by tag combo."""
+    """Daily per-account per-service totals, split by transfer bucket and tag combo."""
 
     totals: dict[_Group, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     currency: str = "USD"
@@ -87,12 +91,13 @@ class _Spend:
         day: date,
         account: str,
         service: str,
+        transfer: str,
         tags: tuple[tuple[str, str], ...],
         amount: Decimal,
     ) -> None:
-        group: _Group = (day, account, service, tags)
+        group: _Group = (day, account, service, transfer, tags)
         if group not in self.totals and len(self.totals) >= _MAX_GROUPS:
-            group = (day, account, service, tuple((k, _OTHER) for k, _ in tags))
+            group = (day, account, service, transfer, tuple((k, _OTHER) for k, _ in tags))
         self.totals[group] += amount
 
 
@@ -125,9 +130,14 @@ class CURCostCollector:
         spend = _spend(self._provider, config, period, self._tags)
         names = _linked_names(self._provider, config, spend)
         records: list[CostRecord] = []
-        for (day, account, service, tags), amount in sorted(spend.totals.items()):
+        for (day, account, service, transfer, tags), amount in sorted(spend.totals.items()):
             if not period.start <= day <= period.end:
                 continue
+            dimensions = {}
+            if account:
+                dimensions["account_id"] = account
+            if transfer:
+                dimensions[_TRANSFER] = transfer
             records.append(
                 CostRecord(
                     cloud=str(Cloud.AWS),
@@ -135,7 +145,7 @@ class CURCostCollector:
                     period=Period(start=day, end=day),
                     alias=names.get(account, self._provider.alias),
                     cost=Money(amount=amount, currency=spend.currency),
-                    dimensions={"account_id": account} if account else None,
+                    dimensions=dimensions or None,
                     tags=dict(tags) if tags else None,
                 )
             )
@@ -154,7 +164,7 @@ def _linked_names(provider: Provider, config, spend: _Spend) -> dict[str, str]:
     """
     if not config.include_linked:
         return {}
-    seen = {account for _, account, _, _ in spend.totals if account}
+    seen = {account for _, account, *_ in spend.totals if account}
     own = str(getattr(provider, "account_id", None) or "")
     if not seen - {own}:  # single-account report, no need to ask organizations
         return dict.fromkeys(seen, provider.alias)
@@ -292,10 +302,12 @@ def _read_into(
             amount = _amount(row)
             if day is None or not amount:
                 continue
+            service = _service(row)
             spend.add(
                 day,
                 owner if split else "",
-                _service(row),
+                service,
+                transfer_bucket(_pick(row, _USAGE_TYPE), service),
                 _row_tags(row, columns),
                 amount,
             )
