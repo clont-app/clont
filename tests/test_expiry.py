@@ -77,10 +77,26 @@ def test_no_end_date_is_silent():
     assert _recs(reserved={"us-east-1": [_ri(None)]}, plans=[_sp(None)]) == []
 
 
-def test_already_lapsed_reads_as_today_not_negative():
+def test_already_lapsed_says_so_instead_of_expires_today():
+    # aws keeps a lapsed ri active for a while; "expires today" on a date three
+    # days gone reads as "still time" on the most urgent case there is
     [rec] = _recs(reserved={"us-east-1": [_ri(-3)]})
     assert rec.kind == "commitment-expiry-7d"
-    assert "expires today" in rec.summary
+    assert "expired 3 days ago" in rec.summary
+    assert "expires" not in rec.summary
+
+
+def test_lapsed_yesterday_is_singular():
+    [rec] = _recs(reserved={"us-east-1": [_ri(-1.5)]})
+    assert "expired 1 day ago" in rec.summary
+
+
+def test_naive_end_date_does_not_sink_the_pass():
+    # a tz-less End compared to an aware now raises TypeError and kills the run
+    raw = _ri(3)
+    raw["End"] = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=3.5)
+    [rec] = _recs(reserved={"us-east-1": [raw]})
+    assert "expires in 3 days" in rec.summary
 
 
 def test_retired_ri_never_reaches_the_calendar():
@@ -118,6 +134,14 @@ def test_non_compute_plan_still_watched():
     [rec] = _recs(plans=[_sp(10, "1.00", plan_type="SageMaker")])
     assert rec.resource.service == "savings-plans"
     assert "SageMaker Savings Plan" in rec.summary
+    # the figure is the compute discount; don't pass it off as sagemaker's
+    assert "compute discount" in rec.summary
+
+
+def test_plan_in_another_currency_keeps_that_currency():
+    [rec] = _recs(plans=[_sp(10, "2.00", currency="EUR")])
+    assert "2.00 EUR/hr" in rec.summary
+    assert rec.estimated_savings.currency == "EUR"
 
 
 def test_inactive_plan_is_not_a_commitment():

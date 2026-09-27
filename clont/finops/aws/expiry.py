@@ -15,7 +15,8 @@ Two decisions worth knowing:
 * **The dollar figure is the discount at risk, not the bill.** Renewing doesn't
   make the usage free, it keeps the ~20-25% a commitment takes off it, so that
   is what the saving names. It's the coarse price table, so it's approximate and
-  says so.
+  says so — and a plan's figure is derived from its commitment, so it carries
+  the *plan's* currency, not a hardcoded USD.
 
 Account-level: the region sweep happens inside the inventory join.
 """
@@ -33,6 +34,8 @@ from clont.providers.base import Provider
 
 _USD = "USD"
 _TERMS = "one year, no upfront"
+# the plan types SP_DISCOUNT_PCT actually describes
+_COMPUTE_PLAN_TYPES = {"Compute", "EC2Instance"}
 # ascending: the tightest threshold already crossed is the one reported
 _TIERS = (7, 30, 60)
 _SECONDS_PER_DAY = 86400
@@ -42,16 +45,27 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _aware(value: datetime) -> datetime:
+    """A naive end date is utc; comparing it to an aware `now` raises TypeError."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
 def _days_left(end: datetime, now: datetime) -> int:
-    """Whole days until `end`; never negative, so a lapsed one still reports."""
-    return max(0, int((end - now).total_seconds() // _SECONDS_PER_DAY))
+    """Whole days until `end`, negative once it has lapsed."""
+    delta = (_aware(end) - now).total_seconds()
+    whole = int(abs(delta) // _SECONDS_PER_DAY)
+    return whole if delta >= 0 else -whole
 
 
 def _tier(days: int) -> int | None:
-    return next((t for t in _TIERS if days <= t), None)
+    # lapsed is the most urgent case, so max(0) keeps it in the tightest tier
+    return next((t for t in _TIERS if max(0, days) <= t), None)
 
 
 def _when(days: int) -> str:
+    """A lapsed commitment must not read as "there is still time"."""
+    if days < 0:
+        return f"expired {-days} day{'s' if days < -1 else ''} ago"
     if days == 0:
         return "expires today"
     return f"expires in {days} day{'s' if days > 1 else ''}"
@@ -130,6 +144,11 @@ class CommitmentExpiryCollector:
         d = pricing.SP_DISCOUNT_PCT
         at_risk = _money(plan.commitment * pricing.HOURS_PER_MONTH * d / (1 - d))
         family = f", {plan.ec2_instance_family}" if plan.ec2_instance_family else ""
+        # sagemaker/database plans discount differently; say so instead of
+        # passing the compute rate off as theirs
+        rate = "" if plan.plan_type in _COMPUTE_PLAN_TYPES else (
+            f" (at risk figure uses the compute discount, not {plan.plan_type}'s)"
+        )
         return Recommendation(
             cloud=str(Cloud.AWS),
             service="savings-plans",
@@ -144,7 +163,10 @@ class CommitmentExpiryCollector:
                 f"{plan.plan_type} Savings Plan{family} at {commit} {plan.currency}/hr "
                 f"{_when(days)} ({plan.end:%Y-%m-%d}) — covered usage reverts to "
                 f"on-demand; buy a replacement committing {commit} {plan.currency}/hr "
-                f"({_TERMS})"
+                f"({_TERMS}){rate}"
             ),
-            estimated_savings=Money(amount=at_risk, currency=_USD),
+            # the commitment's own currency: the figure is derived from it, so
+            # labelling a EUR plan's uplift as USD would be a wrong number
+            estimated_savings=Money(amount=at_risk, currency=plan.currency or _USD),
+            approximate=True,  # coarse discount, no region priced
         )

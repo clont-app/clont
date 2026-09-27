@@ -116,13 +116,18 @@ def reserved(itype: str = "m5.large", count: int = 1, *, scope="Region", az="", 
     }
 
 
-def plan(commitment: str = "1.00", state: str = "active", plan_type: str = "Compute"):
+def plan(
+    commitment: str = "1.00",
+    state: str = "active",
+    plan_type: str = "Compute",
+    currency: str = "USD",
+):
     return {
         "savingsPlanId": f"sp-{commitment}",
         "state": state,
         "savingsPlanType": plan_type,
         "commitment": commitment,
-        "currency": "USD",
+        "currency": currency,
     }
 
 
