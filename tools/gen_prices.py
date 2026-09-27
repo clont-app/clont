@@ -21,6 +21,11 @@ ec2 shards to change one key. It only touches regions the table already has: a
 region with s3 rates and no ec2 rates would price every instance at us-east-1
 without saying so.
 
+Deep Archive is the exception: the AmazonS3 offer has no `TimedStorage-GDA-ByteHrs`
+(only `GDA-Staging`, which is staging overhead at 20x the rate), the real one sits
+in the separate AmazonS3GlacierDeepArchive offer — and there the products carry no
+`productFamily`, so it needs its own classifier.
+
 Tiered rates (s3 standard, rrs) keep the *first* tier — the small-volume rate,
 which is what a bucket under 50 TB actually pays.
 """
@@ -58,10 +63,13 @@ _S3_CLASSES = {
     "TimedStorage-INT-DAA-ByteHrs": "intelligent_daa",
     "TimedStorage-GIR-ByteHrs": "glacier_ir",
     "TimedStorage-GlacierByteHrs": "glacier",
-    "TimedStorage-GDA-ByteHrs": "deep_archive",
     "TimedStorage-RRS-ByteHrs": "rrs",
     "TimedStorage-XZ-ByteHrs": "express_onezone",
 }
+# deep archive lives in its own offer, keyed by the usagetype the AmazonS3 offer
+# doesn't have. EarlyDelete-GDA carries the same rate and is not storage.
+_S3_GDA_OFFER = "AmazonS3GlacierDeepArchive"
+_S3_GDA_USAGETYPE = "TimedStorage-GDA-ByteHrs"
 # outside us-east-1 the usagetype carries a region code (EUC1-, APS3-). the
 # prefix is uppercase, which is what keeps Files-/Annotation- out.
 _S3_USAGETYPE = re.compile(r"^(?:[A-Z]{2,5}[0-9]?-)?(TimedStorage-[A-Za-z0-9-]+)$")
@@ -130,6 +138,16 @@ def _classify_s3(block: str) -> tuple[str, str] | None:
         return None
     name = _S3_CLASSES.get(m.group(1))
     return ("s3_gb_month", name) if name else None
+
+
+def _classify_s3_gda(block: str) -> tuple[str, str] | None:
+    """Deep archive storage. Its offer leaves productFamily out, so don't ask."""
+    if _attr(block, "locationType") != "AWS Region":
+        return None
+    m = _S3_USAGETYPE.match(_attr(block, "usagetype"))
+    if m is None or m.group(1) != _S3_GDA_USAGETYPE:
+        return None
+    return ("s3_gb_month", "deep_archive")
 
 
 def _trim(rate: str) -> str:
@@ -203,6 +221,7 @@ def _s3_only(regions: list[str]) -> None:
     table = json.loads(OUT.read_text())
     have: dict[str, dict] = table["regions"]
     urls = _region_urls("AmazonS3")
+    gda = _region_urls(_S3_GDA_OFFER)
     for region in regions or sorted(have):
         if region not in have or region not in urls:
             print(f"  {region} not in the table, skipped", file=sys.stderr)
@@ -210,6 +229,8 @@ def _s3_only(regions: list[str]) -> None:
         print(f"{region} ...", file=sys.stderr, flush=True)
         row: dict = {}
         _scan(urls[region], row, _classify_s3)
+        if region in gda:
+            _scan(gda[region], row, _classify_s3_gda)
         rates = row.get("s3_gb_month")
         if not rates:  # keep the old rates rather than blanking them
             print(f"  no s3 rates for {region}, kept", file=sys.stderr)
@@ -227,6 +248,7 @@ def main(argv: list[str]) -> None:
     vpc = _region_urls("AmazonVPC")
     elb = _region_urls("AWSELB")
     s3 = _region_urls("AmazonS3")
+    gda = _region_urls(_S3_GDA_OFFER)
     targets = argv or sorted(set(ec2) & set(vpc) & set(elb))
 
     out: dict[str, dict] = {}
@@ -237,6 +259,8 @@ def main(argv: list[str]) -> None:
             _scan(urls[region], row)
         if region in s3:
             _scan(s3[region], row, _classify_s3)
+        if region in gda:
+            _scan(gda[region], row, _classify_s3_gda)
         if not row.get("ec2_family_large_hourly"):
             print(f"  no ec2 rates for {region}, skipped", file=sys.stderr)
             continue
