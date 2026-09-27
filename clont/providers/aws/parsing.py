@@ -383,6 +383,7 @@ class _SavingsPlan(BaseModel):
     commitment: Decimal = Field(default=Decimal(0), validation_alias="commitment")
     ec2_instance_family: str = Field(default="", validation_alias="ec2InstanceFamily")
     currency: str = Field(default="USD", validation_alias="currency")
+    end: datetime | None = Field(default=None, validation_alias="end")
 
 
 class _ReservedInstance(BaseModel):
@@ -399,6 +400,7 @@ class _ReservedInstance(BaseModel):
     scope: str = Field(default="", validation_alias="Scope")
     availability_zone: str = Field(default="", validation_alias="AvailabilityZone")
     offering_class: str = Field(default="", validation_alias="OfferingClass")
+    end: datetime | None = Field(default=None, validation_alias="End")
 
 
 class _Instance(BaseModel):

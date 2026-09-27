@@ -130,6 +130,8 @@ two things worth remembering:
   missing — without it the savings plans half is skipped and the ri half still
   reports. these come from a snapshot of current usage, not cost explorer's 30-day
   lookback, so they won't match the console exactly.
+- **commitment expiry** (ris and savings plans in their last 60/30/7 days) — no
+  extra grant, the end date rides along on those same two describes.
 - **budgets + month-end forecast** — no extra grant, it reuses the spend stream.
 - **ec2 health** (reachability) — `ec2:DescribeInstanceStatus`
 - **ec2 metrics** (cpu / network) — `cloudwatch:GetMetricData`, **billed and off

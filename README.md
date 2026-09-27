@@ -83,6 +83,12 @@ the same event pipeline:
   trade: it's a snapshot, not a 30-day average, so the numbers won't match the
   console. and only 70% of uncovered spend ever gets advised as a commitment, so
   one busy afternoon can't talk you into a year-long contract.
+- **commitments about to lapse** — reserved instances and savings plans in their
+  last 60 / 30 / 7 days. when one ends, the usage under it goes back to on-demand
+  overnight and the bill only tells you days later; the end date rides along on
+  the same free describes. the tiers are separate findings on purpose, so an alert
+  at 60 days doesn't silence the one at 7. sagemaker and database plans are
+  watched too — they cover no ec2, but they still expire.
 - **unattached ebs volumes** — `available` volumes you're still paying for.
 - **public ipv4 addresses** — see below, it's the newest one.
 - **gp2 → gp3** — in-use gp2 volumes, with the storage-rate saving.

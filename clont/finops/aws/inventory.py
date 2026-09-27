@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 
 from clont.core.logging import get_logger
@@ -49,6 +50,22 @@ class Running:
         return pricing.instance_hourly(self.instance_type)
 
 
+@dataclass(frozen=True)
+class ReservedItem:
+    """One active reservation as described, before the pools collapse them.
+
+    The pools drop the reservation id and the end date because they aggregate by
+    type and scope; the expiry calendar needs both, so it reads these.
+    """
+
+    reservation_id: str
+    instance_type: str
+    region: str
+    az: str
+    count: int
+    end: datetime | None
+
+
 @dataclass
 class ReservedPool:
     """Active RIs of one type in one scope, plus how many we matched to usage."""
@@ -70,6 +87,10 @@ class Inventory:
     pools: list[ReservedPool]
     plans: list[_SavingsPlan]
     uncovered: list[Running] = field(default_factory=list)
+    reserved: list[ReservedItem] = field(default_factory=list)
+    # every active plan, including the sagemaker/database ones `plans` drops —
+    # they don't cover ec2 usage, but they still lapse
+    all_plans: list[_SavingsPlan] = field(default_factory=list)
 
     # --- reserved instances
 
@@ -166,12 +187,31 @@ def _build(provider: Provider) -> Inventory:
     running = for_each_region(
         provider, lambda r: _instances(provider, r), what="inventory instances"
     )
-    pools = for_each_region(
+    reserved = for_each_region(
         provider, lambda r: _reserved(provider, r), what="inventory reserved"
     )
-    plans = _savings_plans(provider)
+    pools = [
+        ReservedPool(
+            instance_type=item.instance_type,
+            region=item.region,
+            az=item.az,
+            count=item.count,
+        )
+        for item in reserved
+    ]
+    all_plans = _savings_plans(provider)
+    # SageMaker/Database plans commit against usage we don't inventory; counting
+    # them would read as a compute plan nobody is using
+    plans = [p for p in all_plans if p.plan_type in _COMPUTE_PLANS]
     uncovered = _match(running, pools)
-    return Inventory(running=running, pools=pools, plans=plans, uncovered=uncovered)
+    return Inventory(
+        running=running,
+        pools=pools,
+        plans=plans,
+        uncovered=uncovered,
+        reserved=reserved,
+        all_plans=all_plans,
+    )
 
 
 def _instances(provider: Provider, region: str) -> list[Running]:
@@ -193,19 +233,21 @@ def _instances(provider: Provider, region: str) -> list[Running]:
     return out
 
 
-def _reserved(provider: Provider, region: str) -> list[ReservedPool]:
+def _reserved(provider: Provider, region: str) -> list[ReservedItem]:
     ec2 = provider.client("ec2", region)
-    out: list[ReservedPool] = []
+    out: list[ReservedItem] = []
     for raw in ec2.describe_reserved_instances().get("ReservedInstances", []):
         ri = _ReservedInstance.model_validate(raw)
         if ri.state != "active" or ri.instance_count <= 0:
             continue
         regional = ri.scope != "Availability Zone"
-        out.append(ReservedPool(
+        out.append(ReservedItem(
+            reservation_id=ri.reservation_id,
             instance_type=ri.instance_type,
             region=region,
             az="" if regional else ri.availability_zone,
             count=ri.instance_count,
+            end=ri.end,
         ))
     return out
 
@@ -219,9 +261,7 @@ def _savings_plans(provider: Provider) -> list[_SavingsPlan]:
         log.info("savings plans unavailable for %s: %s", provider.alias, exc)
         return []
     plans = [_SavingsPlan.model_validate(p) for p in raw]
-    # SageMaker/Database plans commit against usage we don't inventory; counting
-    # them would read as a compute plan nobody is using
-    return [p for p in plans if p.state == "active" and p.plan_type in _COMPUTE_PLANS]
+    return [p for p in plans if p.state == "active"]
 
 
 def _match(running: list[Running], pools: list[ReservedPool]) -> list[Running]:
