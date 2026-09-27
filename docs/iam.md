@@ -57,7 +57,8 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
         "compute-optimizer:GetEnrollmentStatus",
         "ec2:DescribeVolumes",
         "ec2:DescribeAddresses",
-        "ec2:DescribeNetworkInterfaces"
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeVpcEndpoints"
       ],
       "Resource": "*"
     }
@@ -67,9 +68,10 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
 
 all of that is free. the list grows as you turn on more collectors.
 
-> upgrading? `ec2:DescribeNetworkInterfaces` is new — it's what the public ipv4
-> collector uses. without it that collector is skipped and you keep everything
-> else.
+> upgrading? `ec2:DescribeVpcEndpoints` is new — it pairs with
+> `ec2:DescribeNatGateways` to find nat processing an s3/dynamodb gateway endpoint
+> would carry for free. without it that one collector is skipped and you keep
+> everything else.
 
 ## the two billed grants — only if you want them
 
@@ -159,6 +161,10 @@ two things worth remembering:
   used to be reported by the waste collector; they live here now, alongside
   addresses on detached interfaces and secondary addresses billed on top of a
   primary.
+- **nat paying for free traffic** (a vpc with a nat gateway and no s3/dynamodb
+  gateway endpoint) — `ec2:DescribeNatGateways`, `ec2:DescribeVpcEndpoints`. two
+  free describes per region, no metrics. the dollar size of the finding is the
+  `nat` bucket of the data transfer report, which comes from cur.
 - **stale snapshots** (old or orphaned) — `ec2:DescribeSnapshots`,
   `ec2:DescribeVolumes` (to tell orphaned from live)
 - **metric-based idle detectors** (idle ec2 by cpu, idle rds by connections, nat
@@ -185,6 +191,8 @@ two things worth remembering:
 - **showback by tag** — nothing extra: it groups the CUR lines already read. what
   it needs is the keys activated as *cost allocation tags* in Billing, or CUR
   carries no column for them and the spend all reads as unattributed
+- **data transfer report** — nothing extra: it classifies the `lineItem/UsageType`
+  of the CUR lines already read
 - **monitoring default rules** (disk-full forecast, low free storage, cpu credits,
   swap) — the same billed `cloudwatch:GetMetricData` as ec2 metrics, so they're
   inert until `monitoring.metrics.enabled`. reads `AWS/RDS` (`FreeStorageSpace`,

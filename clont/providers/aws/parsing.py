@@ -224,6 +224,7 @@ class _NatGateway(BaseModel):
 
     nat_gateway_id: str = Field(validation_alias="NatGatewayId")
     state: str = Field(default="", validation_alias="State")
+    vpc_id: str = Field(default="", validation_alias="VpcId")
 
 
 class _LoadBalancer(BaseModel):
