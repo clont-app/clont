@@ -178,6 +178,10 @@ two things worth remembering:
   `elasticloadbalancing:DescribeTags`, `lambda:ListFunctions`, `lambda:ListTags`,
   `s3:ListAllMyBuckets`, `s3:GetBucketLocation`, `s3:GetBucketTagging` (needs
   `required_tags`). a missing grant costs that one service, not the whole report
+- **multi-account** (per-account spend labels, member discovery) —
+  `organizations:ListAccounts`, on the payer only. free, and optional: without it
+  linked accounts are labelled by id and the fan-out finds nothing. see the payer
+  fan-out section below
 - **showback by tag** — nothing extra: it groups the CUR lines already read. what
   it needs is the keys activated as *cost allocation tags* in Billing, or CUR
   carries no column for them and the spend all reads as unattributed
@@ -231,13 +235,52 @@ stuff that will bite you:
   cur spelling.
 - **a payer's report covers every linked account.** by default clont keeps only
   the rows matching the account it authenticated as, so each alias reports its
-  own spend. set `include_linked: true` to take the whole thing.
+  own spend. set `include_linked: true` to take the whole thing — each linked
+  account then gets its own digest, spike check, forecast, budget and showback,
+  grouped by `lineItem/UsageAccountId` instead of lumped under the payer alias.
+  the label is the account's organizations name (slugified), or the bare 12-digit
+  id when the role can't call `organizations:ListAccounts`.
 - **the report is rewritten a few times a day**, so it's re-read at most every
   `refresh_minutes` (default 60), not every cycle.
 - **a brand new report can take 24h to appear.** until then spend is empty and
   preflight says so.
 - without `cur` and without `finops.allow_cost_explorer: true` there's no spend
   data at all — recommendations and health still work fine.
+
+## several accounts: the payer fan-out
+
+listing every account in `clont.yaml` works and stays supported. on an org of any
+size it goes stale, so the payer can discover the rest instead:
+
+```yaml
+aws:
+  payer:
+    role_arn: arn:aws:iam::111111111111:role/clont-readonly
+    regions: [us-east-1]
+    cur:
+      bucket: my-billing-bucket
+      report_name: clont-cur
+      include_linked: true         # whole-org spend, split per account
+    members:
+      role_name: clont-readonly    # same role name in every member account
+      exclude: [444444444444]      # optional; include: [...] to pin an allow-list
+```
+
+what that needs, and what it does:
+
+- **one extra grant, on the payer only:** `organizations:ListAccounts`. free, and
+  only the management account can call it. without it clont logs one info line and
+  falls back to account ids as labels — nothing fails.
+- **the same `clont-readonly` role in each member account**, trusting the same
+  runtime identity. the arn is derived (`arn:aws:iam::<id>:role/<role_name>`), so
+  the role name has to match everywhere.
+- members inherit the payer's `regions` and `external_id`. they deliberately get
+  **no `cur` of their own** — org spend already comes from the payer's report, and
+  a member reading it too would count every line twice.
+- suspended and closing accounts are skipped, and a member whose role can't be
+  assumed is logged and skipped like any other account.
+- an account you also spell out in the yaml keeps that entry: the explicit config
+  wins, so one account can have its own alias, regions or report.
 
 ## trust policy
 

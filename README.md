@@ -145,7 +145,9 @@ the extra iam you need is one action: `ec2:DescribeNetworkInterfaces`.
 ## platform
 
 - **many accounts** — as many as you like, keyed by an alias you choose. one
-  account failing gets skipped, not fatal.
+  account failing gets skipped, not fatal. on an org, point clont at the payer
+  and set `members.role_name`: it lists the linked accounts itself and splits the
+  payer's spend per account, so each one gets its own digest, spike and budget.
 - **read-only by construction** — every call is a `Describe*` / `Get*`. see
   [docs/iam.md](docs/iam.md), which also lists the two billed grants
   (`ce:GetCostAndUsage`, `cloudwatch:GetMetricData`) that are left out of the
@@ -302,9 +304,14 @@ another account by adding another key.
 - `cur` (map, default `null`) — your cost and usage report in s3, the free spend
   source: `bucket`, `report_name`, `prefix`, `region` (default `us-east-1`),
   `refresh_minutes` (default `60`) and `include_linked` (default `false` — keep
-  only this account's rows out of a payer report). legacy cur (gzip csv) only;
+  only this account's rows out of a payer report; `true` reports every linked
+  account under its own alias). legacy cur (gzip csv) only;
   setup is in [docs/iam.md](docs/iam.md). without it, and without
   `finops.allow_cost_explorer`, there's no spend data.
+- `members` (map, default `null`) — payer only: discover the org's accounts with
+  `organizations:ListAccounts` and assume `role_name` in each, with optional
+  `include` / `exclude` account-id lists. members inherit these regions and get no
+  cur of their own, so org spend still comes from the payer report once.
 
 if one account's role can't be assumed at startup, clont warns and keeps going
 with the rest. it only gives up if *no* account authenticates.

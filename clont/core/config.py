@@ -118,6 +118,22 @@ class CURConfig(_Model):
     include_linked: bool = False     # payer report: count every linked account, not just this one
 
 
+class MembersConfig(_Model):
+    """Fan out from a payer account to its org's member accounts.
+
+    `organizations:ListAccounts` on this account gives the member list; clont
+    assumes `role_name` in each one, so a new account is watched the day it is
+    created instead of whenever someone remembers to edit the YAML.
+
+    Members get no `cur` of their own — spend for the whole org comes from the
+    payer's report, so nothing is counted twice.
+    """
+
+    role_name: str                                    # same role name in every member account
+    include: list[str] = Field(default_factory=list)  # account ids; empty = every active member
+    exclude: list[str] = Field(default_factory=list)  # account ids to leave alone
+
+
 class AWSConfig(_Model):
     """Read-only access config for one AWS account.
 
@@ -129,6 +145,7 @@ class AWSConfig(_Model):
     regions: list[str] = Field(default_factory=list)
     external_id: str | None = None
     cur: CURConfig | None = None     # free spend source; without it there is no spend data
+    members: MembersConfig | None = None  # payer only: discover and fan out to linked accounts
 
 
 # FinOps
@@ -293,6 +310,9 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #       bucket: my-billing-bucket
 #       report_name: clont-cur
 #       prefix: reports
+#       include_linked: true     # payer report: every linked account, split per account
+#     members:                   # payer only: discover the org and assume this role in each
+#       role_name: clont-readonly
 
 # FinOps: spend-event thresholds + idle/stale recommendation tuning.
 # finops:

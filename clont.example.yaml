@@ -21,7 +21,15 @@ aws:
       prefix: reports              # s3 prefix given when the report was created
       region: us-east-1            # bucket region
       refresh_minutes: 60          # AWS rewrites it a few times a day
-      include_linked: false        # true = payer report, count linked accounts too
+      include_linked: false        # true = payer report: every linked account,
+                                   # each reported under its own alias
+    # Payer only: discover the org's members and assume `role_name` in each, so
+    # a new account is watched without editing this file. Members inherit these
+    # regions but get no cur of their own — spend comes from the payer report.
+    # members:
+    #   role_name: clont-readonly
+    #   include: []                # account ids; empty = every active member
+    #   exclude: [444444444444]    # account ids to leave alone
   staging:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]

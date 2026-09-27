@@ -7,10 +7,11 @@ import clont.monitoring.aws
 from clont import channels
 from clont.agent.runner import Agent
 from clont.api.uplink import ApiUplink
-from clont.core.config import Config, MetricsConfig
+from clont.core.config import AWSConfig, Config, MetricsConfig
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
 from clont.monitoring.base import PER_METRIC_USD, MetricsPolicy
+from clont.providers.aws import organizations
 from clont.providers.aws.provider import AWSProvider
 from clont.providers.base import Provider
 
@@ -56,6 +57,56 @@ def _build_metrics_policy(cfg: MetricsConfig) -> MetricsPolicy | None:
     )
 
 
+def _authenticate(alias: str, aws: AWSConfig) -> AWSProvider | None:
+    provider = AWSProvider(alias, aws)
+    try:
+        provider.authenticate()  # RO role assumption
+    except Exception as exc:  # noqa: BLE001 - isolate one bad account
+        log.warning("skipping account %s: %s", alias, exc)
+        return None
+    return provider
+
+
+def _member_configs(payer: AWSProvider, aws: AWSConfig) -> list[tuple[str, AWSConfig]]:
+    """One (alias, config) per org member account to fan out to.
+
+    The role arn is derived from the member's account id and the shared role
+    name. Members inherit the payer's regions and external id but never its
+    `cur`: spend comes from the payer's report, so a member reading it as well
+    would count every line twice.
+    """
+    members = aws.members
+    if members is None:
+        return []
+    wanted = set(members.include)
+    skip = set(members.exclude) | {payer.account_id or ""}
+    out: list[tuple[str, AWSConfig]] = []
+    for account in organizations.accounts(payer):
+        if account.id in skip or (wanted and account.id not in wanted):
+            continue
+        if account.status != "ACTIVE":  # suspended or closing: nothing to read
+            continue
+        out.append(
+            (
+                account.alias,
+                aws.model_copy(
+                    update={
+                        "role_arn": f"arn:aws:iam::{account.id}:role/{members.role_name}",
+                        "cur": None,
+                        "members": None,
+                    }
+                ),
+            )
+        )
+    if not out:
+        log.warning(
+            "%s: members.role_name is set but no member account was discovered — "
+            "the role needs organizations:ListAccounts on the payer",
+            payer.alias,
+        )
+    return out
+
+
 def build_agent(config: Config) -> Agent:
     """Construct authenticated providers + channels.
 
@@ -64,15 +115,27 @@ def build_agent(config: Config) -> Agent:
     are configured but none authenticate, we abort rather than run blind.
     """
     providers: list[Provider] = []
+    members: list[tuple[str, AWSConfig]] = []
     for alias, aws in config.aws.items():
-        provider = AWSProvider(alias, aws)
-        try:
-            provider.authenticate()  # RO role assumption
-        except Exception as exc:  # noqa: BLE001 - isolate one bad account
-            log.warning("skipping account %s: %s", alias, exc)
+        provider = _authenticate(alias, aws)
+        if provider is None:
             continue
         _log_cost_source(alias, aws, config.finops.allow_cost_explorer)
         providers.append(provider)
+        members.extend(_member_configs(provider, aws))
+
+    # discovered accounts come second on purpose: an account also named in the
+    # YAML keeps that entry, with its own alias and its own cur
+    taken = {p.alias for p in providers} | {p.account_id for p in providers}
+    for alias, aws in members:
+        if alias in taken:
+            continue
+        provider = _authenticate(alias, aws)
+        if provider is None or provider.account_id in taken:
+            continue
+        log.info("member account %s (%s) discovered", alias, provider.account_id)
+        providers.append(provider)
+        taken |= {alias, provider.account_id}
 
     if config.aws and not providers:
         raise RuntimeError("no configured accounts could be authenticated")
