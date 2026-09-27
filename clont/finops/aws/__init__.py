@@ -14,6 +14,7 @@ from clont.finops.aws import (  # noqa: F401 - imported for registration
     nat_endpoints,
     offhours,
     public_ipv4,
+    s3,
     snapshots,
     tags,
     utilization,

@@ -24,6 +24,8 @@ class FinOpsTuning:
     idle_lookback_days: int = 14           # trailing window the averages span
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # snapshots older than this are "old"
+    s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned
+    s3_cold_min_gb: float = 100.0          # standard-class buckets below this aren't worth a transition
     ri_sp_min_utilization: float = 90.0    # commitment used below this % -> wasted spend
     ri_sp_min_coverage: float = 70.0       # eligible spend covered below this % -> opportunity
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values

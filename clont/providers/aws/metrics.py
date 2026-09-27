@@ -27,24 +27,38 @@ def _chunks[T](items: list[T], size: int) -> Iterator[list[T]]:
         yield items[i : i + size]
 
 
-def metric_query(
-    qid: str, namespace: str, name: str, dim_name: str, dim_value: str,
+def metric_query_dims(
+    qid: str, namespace: str, name: str, dims: dict[str, str],
     period_seconds: int, stat: str = "Average",
 ) -> dict:
-    """One CloudWatch ``MetricDataQuery`` for a single resource's metric."""
+    """One ``MetricDataQuery`` with however many dimensions the metric needs.
+
+    Most metrics key off one resource id; s3 storage needs two (bucket *and*
+    storage type), and a query missing one matches nothing at all.
+    """
     return {
         "Id": qid,
         "MetricStat": {
             "Metric": {
                 "Namespace": namespace,
                 "MetricName": name,
-                "Dimensions": [{"Name": dim_name, "Value": dim_value}],
+                "Dimensions": [{"Name": k, "Value": v} for k, v in dims.items()],
             },
             "Period": period_seconds,
             "Stat": stat,
         },
         "ReturnData": True,
     }
+
+
+def metric_query(
+    qid: str, namespace: str, name: str, dim_name: str, dim_value: str,
+    period_seconds: int, stat: str = "Average",
+) -> dict:
+    """One CloudWatch ``MetricDataQuery`` for a single resource's metric."""
+    return metric_query_dims(
+        qid, namespace, name, {dim_name: dim_value}, period_seconds, stat
+    )
 
 
 def run_metric_queries(

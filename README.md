@@ -93,6 +93,13 @@ the same event pipeline:
   (`finops.allow_cloudwatch_metrics`) if an account isn't enrolled.
 - **idle load balancers** — alb / nlb with nothing registered behind them.
 - **stale ebs snapshots** — orphaned (source volume gone) or just old.
+- **s3 storage waste** — buckets with no lifecycle rule, versioning that keeps
+  every overwrite forever, and incomplete multipart uploads: parts that never
+  finished, billed as storage and invisible in the console. a rule scoped to one
+  prefix does not count as covering the bucket. with
+  `finops.allow_cloudwatch_metrics` it also sizes what sits in Standard with
+  nothing moving it anywhere cheaper — a candidate, not a finding, because read
+  frequency needs s3 request metrics and those are billed.
 - **off-hours scheduling** — always-on non-prod instances (you pick the tag
   convention) that could sleep at night and on weekends.
 - **tag hygiene** — ec2, ebs, rds, load balancers, lambda and s3 buckets missing
@@ -360,6 +367,10 @@ with the rest. it only gives up if *no* account authenticates.
 - `idle_rds_max_connections` (float, default `1`) — average connections below
   which an rds instance counts as idle.
 - `snapshot_max_age_days` (int, default `90`) — snapshots older than this are "old".
+- `s3_multipart_min_age_days` (int, default `7`) — incomplete multipart uploads
+  older than this count as abandoned.
+- `s3_cold_min_gb` (float, default `100`) — don't suggest a storage-class
+  transition for a bucket with less than this in Standard.
 - `ri_sp_min_utilization` (float, default `90`) — flag a savings plan / ri used
   below this percent.
 - `ri_sp_min_coverage` (float, default `70`) — flag when eligible usage is covered

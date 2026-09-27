@@ -167,6 +167,8 @@ def build_agent(config: Config) -> Agent:
             idle_lookback_days=config.finops.idle_lookback_days,
             idle_rds_max_connections=config.finops.idle_rds_max_connections,
             snapshot_max_age_days=config.finops.snapshot_max_age_days,
+            s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
+            s3_cold_min_gb=config.finops.s3_cold_min_gb,
             ri_sp_min_utilization=config.finops.ri_sp_min_utilization,
             ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
             nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},

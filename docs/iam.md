@@ -58,7 +58,13 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
         "ec2:DescribeVolumes",
         "ec2:DescribeAddresses",
         "ec2:DescribeNetworkInterfaces",
-        "ec2:DescribeVpcEndpoints"
+        "ec2:DescribeVpcEndpoints",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetBucketVersioning",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts"
       ],
       "Resource": "*"
     }
@@ -68,10 +74,11 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
 
 all of that is free. the list grows as you turn on more collectors.
 
-> upgrading? `ec2:DescribeVpcEndpoints` is new — it pairs with
-> `ec2:DescribeNatGateways` to find nat processing an s3/dynamodb gateway endpoint
-> would carry for free. without it that one collector is skipped and you keep
-> everything else.
+> upgrading? `ec2:DescribeVpcEndpoints` pairs with `ec2:DescribeNatGateways` to
+> find nat processing an s3/dynamodb gateway endpoint would carry for free, and
+> the six `s3:*` reads are the storage-waste collector (lifecycle rules, old
+> versions, abandoned multipart uploads). without either you lose that one
+> collector and keep everything else.
 
 ## the two billed grants — only if you want them
 
@@ -167,6 +174,15 @@ two things worth remembering:
   `nat` bucket of the data transfer report, which comes from cur.
 - **stale snapshots** (old or orphaned) — `ec2:DescribeSnapshots`,
   `ec2:DescribeVolumes` (to tell orphaned from live)
+- **s3 storage waste** (no lifecycle rule, noncurrent versions, abandoned
+  multipart uploads) — `s3:ListAllMyBuckets`, `s3:GetBucketLocation`,
+  `s3:GetLifecycleConfiguration`, `s3:GetBucketVersioning`,
+  `s3:ListBucketMultipartUploads`, `s3:ListMultipartUploadParts`. all free, and a
+  denied bucket costs that bucket, not the report. the **cold-data** finding
+  (bytes in Standard with no transition rule) also needs
+  `cloudwatch:GetMetricData`, so it stays off unless
+  `finops.allow_cloudwatch_metrics` is set — one metric per bucket per refresh.
+  s3 publishes the daily storage metrics for free; reading them is what bills
 - **metric-based idle detectors** (idle ec2 by cpu, idle rds by connections, nat
   with almost no traffic) — off unless `finops.allow_cloudwatch_metrics` is set,
   for accounts not enrolled in compute optimizer. then:

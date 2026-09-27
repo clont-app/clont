@@ -74,6 +74,11 @@ finops:
   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
 
+  # S3 storage hygiene. The cold-data check needs allow_cloudwatch_metrics too
+  # (one metric per bucket); lifecycle, versions and uploads are free.
+  s3_multipart_min_age_days: 7   # incomplete uploads older than this are abandoned
+  s3_cold_min_gb: 100            # ignore Standard-class buckets smaller than this
+
   # Commitment (Reserved Instance / Savings Plans) utilization & coverage.
   ri_sp_min_utilization: 90      # WARN when a commitment is used less than this %
   ri_sp_min_coverage: 70         # WARN when eligible spend is covered less than this %

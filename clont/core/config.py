@@ -200,6 +200,10 @@ class FinOpsConfig(_Model):
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # EBS snapshots older than this are "old"
 
+    # S3 storage hygiene: lifecycle rules, noncurrent versions, abandoned uploads
+    s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned
+    s3_cold_min_gb: float = 100.0          # ignore standard-class buckets smaller than this
+
     # Commitment (RI/SP) utilization & coverage thresholds
     ri_sp_min_utilization: float = 90.0    # WARN when a commitment is used less than this %
     ri_sp_min_coverage: float = 70.0       # WARN when eligible spend is covered less than this %
@@ -333,6 +337,8 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   idle_lookback_days: 14         # trailing window the idle averages span
 #   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
 #   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
+#   s3_multipart_min_age_days: 7   # incomplete multipart uploads older than this are abandoned
+#   s3_cold_min_gb: 100            # ignore standard-class buckets smaller than this
 #   ri_sp_min_utilization: 90      # WARN when a commitment is used less than this %
 #   ri_sp_min_coverage: 70         # WARN when eligible spend is covered less than this %
 #   nonprod_tags:                  # tags marking schedulable non-prod resources (off-hours)
