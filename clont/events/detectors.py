@@ -24,6 +24,7 @@ from clont.events.stats import (
     project_month_end,
 )
 from clont.finops.models import CostRecord, Recommendation
+from clont.finops.showback import UNATTRIBUTED, showback
 from clont.monitoring.models import HealthCheck, HealthStatus, MetricPoint
 
 # Minimum same-phase samples (same weekday / same hour-of-day) before a detector
@@ -107,6 +108,61 @@ class SpendDigestDetector:
                         "total": str(total),
                         "currency": currency,
                         "services": {r.service: str(r.cost.amount) for r in today},
+                    },
+                )
+            )
+        return events
+
+
+class ShowbackDetector:
+    """Tagged spend -> one event per account and tag key.
+
+    Cloud-agnostic: it reads `CostRecord.tags`, so whatever fills them (cur now,
+    an on-prem usage stream later) gets the same report. WARN once the
+    unattributed share crosses the threshold — that share is the number that
+    justifies a tagging push, so it leads the message.
+    """
+
+    _TOP_N = 5
+
+    def __init__(self, keys: tuple[str, ...] = (), unattributed_pct: float = 20.0) -> None:
+        self._keys = keys
+        self._limit = Decimal(str(unattributed_pct))
+
+    def detect(self, records: list[CostRecord]) -> list[Event]:
+        events: list[Event] = []
+        for report in showback(records, self._keys):
+            if report.total <= 0:  # a window of pure credits has nothing to split
+                continue
+            alias = report.alias or "-"
+            over = report.unattributed_pct >= self._limit
+            top = [ln for ln in report.lines if ln.value != UNATTRIBUTED][: self._TOP_N]
+            breakdown = ", ".join(f"{ln.value} {ln.amount} ({ln.share_pct}%)" for ln in top)
+            events.append(
+                Event(
+                    key=f"finops:showback:{alias}:{report.key}",
+                    severity=EventSeverity.WARN if over else EventSeverity.INFO,
+                    domain="finops",
+                    cloud=_cloud_of(records),
+                    title=(
+                        f"[{alias}] Showback by {report.key}: "
+                        f"{report.unattributed_pct}% unattributed"
+                    ),
+                    message=(
+                        f"{report.start}..{report.end}: {report.total} {report.currency} "
+                        f"total, {report.unattributed} {report.currency} "
+                        f"({report.unattributed_pct}%) with no {report.key} tag — "
+                        f"top: {breakdown or 'none'}"
+                    ),
+                    payload={
+                        "tag_key": report.key,
+                        "start": report.start.isoformat(),
+                        "end": report.end.isoformat(),
+                        "total": str(report.total),
+                        "currency": report.currency,
+                        "unattributed": str(report.unattributed),
+                        "unattributed_pct": str(report.unattributed_pct),
+                        "values": {ln.value: str(ln.amount) for ln in report.lines},
                     },
                 )
             )
@@ -204,6 +260,16 @@ class _AccountMonth:
 
     def days_in_month(self) -> int:
         return calendar.monthrange(self.anchor.year, self.anchor.month)[1]
+
+
+def _cloud_of(records: list[CostRecord]) -> Cloud:
+    # events carry one cloud; records in a cycle come from one provider
+    for record in records:
+        try:
+            return Cloud(record.cloud)
+        except ValueError:
+            break
+    return Cloud.AWS
 
 
 def _account_months(records: list[CostRecord]) -> list[_AccountMonth]:

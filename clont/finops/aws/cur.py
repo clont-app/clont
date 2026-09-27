@@ -56,15 +56,30 @@ _SERVICE = (
 
 _ABSENT = {"NoSuchKey", "NoSuchBucket", "404"}
 
+# user cost-allocation tag columns: legacy, then the data-exports spelling
+_TAG_PREFIXES = ("resourceTags/user:", "resource_tags_user_")
+# splitting by tag multiplies the rows: days x services x distinct combos. a
+# high-cardinality required tag (Name, say) would otherwise eat the box, so
+# surplus combos fold into one labelled bucket instead of being dropped
+_MAX_GROUPS = 5000
+_OTHER = "(other)"
+
+_Group = tuple[date, str, tuple[tuple[str, str], ...]]
+
 
 @dataclass
 class _Spend:
-    """Daily per-service totals for whole billing periods."""
+    """Daily per-service totals for whole billing periods, split by tag combo."""
 
-    totals: dict[tuple[date, str], Decimal] = field(
-        default_factory=lambda: defaultdict(Decimal)
-    )
+    totals: dict[_Group, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     currency: str = "USD"
+    seen_tags: set[str] = field(default_factory=set)  # keys the report actually carries
+
+    def add(self, day: date, service: str, tags: tuple[tuple[str, str], ...], amount: Decimal) -> None:
+        group: _Group = (day, service, tags)
+        if group not in self.totals and len(self.totals) >= _MAX_GROUPS:
+            group = (day, service, tuple((k, _OTHER) for k, _ in tags))
+        self.totals[group] += amount
 
 
 _cache: dict[str, tuple[float, _Spend]] = {}
@@ -84,15 +99,18 @@ class CURCostCollector:
 
     def __init__(self, provider: Provider, tuning=None) -> None:
         self._provider = provider
+        # the showback keys. splitting costs nothing downstream: every line is
+        # still counted once, so service totals are unchanged
+        self._tags = tuple(tuning.required_tags) if tuning else ()
 
     def collect(self, period: Period) -> list[CostRecord]:
         config = getattr(self._provider, "cur", None)
         if config is None:
             return []
 
-        spend = _spend(self._provider, config, period)
+        spend = _spend(self._provider, config, period, self._tags)
         records: list[CostRecord] = []
-        for (day, service), amount in sorted(spend.totals.items()):
+        for (day, service, tags), amount in sorted(spend.totals.items()):
             if not period.start <= day <= period.end:
                 continue
             records.append(
@@ -102,6 +120,7 @@ class CURCostCollector:
                     period=Period(start=day, end=day),
                     alias=self._provider.alias,
                     cost=Money(amount=amount, currency=spend.currency),
+                    tags=dict(tags) if tags else None,
                 )
             )
         return records
@@ -110,9 +129,11 @@ class CURCostCollector:
         return []
 
 
-def _spend(provider: Provider, config, period: Period) -> _Spend:
+def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = ()) -> _Spend:
     folders = _billing_periods(period)
-    key = "|".join([str(provider.alias), config.bucket, config.prefix, config.report_name, *folders])
+    key = "|".join(
+        [str(provider.alias), config.bucket, config.prefix, config.report_name, *folders, *tags]
+    )
     hit = _cache.get(key)
     now = time.monotonic()
     if hit is not None and now - hit[0] < config.refresh_minutes * 60:
@@ -132,7 +153,17 @@ def _spend(provider: Provider, config, period: Period) -> _Spend:
             continue
         _check_format(manifest, folder)
         for data_key in manifest.get("reportKeys", []):
-            _read_into(s3, config.bucket, data_key, account, spend)
+            _read_into(s3, config.bucket, data_key, account, spend, tags)
+
+    absent = [k for k in tags if k not in spend.seen_tags]
+    if absent:
+        # the tag exists on the resources but was never activated as a cost
+        # allocation tag, so cur has no column for it -> reads as 100% untagged
+        log.warning(
+            "CUR carries no user tag column for %s — that spend shows as unattributed; "
+            "activate the cost allocation tag in Billing",
+            ", ".join(absent),
+        )
 
     # only the current window is ever asked for; don't accumulate old months
     _cache.clear()
@@ -187,11 +218,21 @@ def _check_format(manifest: dict, folder: str) -> None:
         )
 
 
-def _read_into(s3, bucket: str, key: str, account: str | None, spend: _Spend) -> None:
+def _read_into(
+    s3,
+    bucket: str,
+    key: str,
+    account: str | None,
+    spend: _Spend,
+    tags: tuple[str, ...] = (),
+) -> None:
     """Stream one gzipped csv part, folding its rows into `spend`."""
     body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     with gzip.GzipFile(fileobj=body) as gz:
-        for row in csv.DictReader(io.TextIOWrapper(gz, encoding="utf-8")):
+        reader = csv.DictReader(io.TextIOWrapper(gz, encoding="utf-8"))
+        columns = _tag_columns(reader.fieldnames, tags)
+        spend.seen_tags.update(k for k, column in columns if column)
+        for row in reader:
             if account is not None:
                 owner = _pick(row, _ACCOUNT)
                 if owner and owner != account:
@@ -200,10 +241,42 @@ def _read_into(s3, bucket: str, key: str, account: str | None, spend: _Spend) ->
             amount = _amount(row)
             if day is None or not amount:
                 continue
-            spend.totals[(day, _service(row))] += amount
+            spend.add(day, _service(row), _row_tags(row, columns), amount)
             currency = _pick(row, _CURRENCY)
             if currency and currency != spend.currency:
                 spend.currency = currency
+
+
+def _tag_columns(
+    fieldnames: list[str] | None, tags: tuple[str, ...]
+) -> tuple[tuple[str, str | None], ...]:
+    """Each requested tag key paired with its column, None when the report has none.
+
+    Every key stays in the result so a report missing one still says "untagged"
+    for it rather than silently dropping the key from the showback.
+    """
+    if not tags:
+        return ()
+    present: dict[str, str] = {}
+    for column in fieldnames or ():
+        for prefix in _TAG_PREFIXES:
+            if column.startswith(prefix):
+                present[_norm(column[len(prefix) :])] = column
+    return tuple((k, present.get(_norm(k))) for k in tags)
+
+
+def _row_tags(
+    row: dict, columns: tuple[tuple[str, str | None], ...]
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (k, (row.get(column) or "").strip() if column else "") for k, column in columns
+    )
+
+
+def _norm(name: str) -> str:
+    # data exports lowercase and snake_case the key (CostCenter -> cost_center),
+    # legacy cur keeps it verbatim; compare on letters and digits only
+    return "".join(c for c in name.lower() if c.isalnum())
 
 
 def _pick(row: dict, names: tuple[str, ...]) -> str:

@@ -21,6 +21,7 @@ from moto import mock_aws
 from clont.core.config import CURConfig
 from clont.core.models import Period
 from clont.finops.aws import cur
+from clont.finops.base import FinOpsTuning
 
 BUCKET = "billing-bucket"
 JAN = "20240101-20240201"
@@ -115,9 +116,9 @@ def _no_cache():
     cur.clear_cache()
 
 
-def _collect(provider, period: Period | None = None):
+def _collect(provider, period: Period | None = None, tuning=None):
     period = period or Period(start=date(2024, 1, 1), end=date(2024, 1, 31))
-    return cur.CURCostCollector(provider).collect(period)
+    return cur.CURCostCollector(provider, tuning).collect(period)
 
 
 def test_rows_fold_into_daily_per_service_records():
@@ -295,3 +296,132 @@ def test_reads_a_real_gzipped_object(aws_creds):
     assert [(r.period.start, r.service, r.cost.amount) for r in records] == [
         (date(2024, 1, 5), "Amazon Elastic Compute Cloud", Decimal("2.00")),
     ]
+
+
+# --- cost allocation tags: the showback split ------------------------------
+
+
+def _gz_cols(columns: list[str], rows: list[dict]) -> bytes:
+    out = io.StringIO()
+    out.write(",".join(columns) + "\n")
+    for row in rows:
+        out.write(",".join(str(row.get(c, "")) for c in columns) + "\n")
+    return gzip.compress(out.getvalue().encode())
+
+
+def _tagged_objects(columns: list[str], rows: list[dict]) -> dict[str, bytes]:
+    return {
+        f"reports/clont-cur/{JAN}/clont-cur-Manifest.json": _manifest(
+            "reports/clont-cur/data-1.csv.gz"
+        ),
+        "reports/clont-cur/data-1.csv.gz": _gz_cols(columns, rows),
+    }
+
+
+_BASE_COLUMNS = [
+    "lineItem/UsageStartDate",
+    "lineItem/UnblendedCost",
+    "lineItem/CurrencyCode",
+    "lineItem/LineItemType",
+    "lineItem/UsageAccountId",
+    "product/ProductName",
+]
+
+
+def _tuning(*keys: str) -> FinOpsTuning:
+    return FinOpsTuning(required_tags=keys)
+
+
+def test_rows_split_by_tag_value_without_changing_the_service_total():
+    rows = [
+        _row("2024-01-01", "1.50", "Amazon Elastic Compute Cloud")
+        | {"resourceTags/user:Owner": "team-a"},
+        _row("2024-01-01", "0.50", "Amazon Elastic Compute Cloud")
+        | {"resourceTags/user:Owner": "team-b"},
+    ]
+    objects = _tagged_objects([*_BASE_COLUMNS, "resourceTags/user:Owner"], rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)), tuning=_tuning("Owner"))
+
+    assert [(r.cost.amount, r.tags) for r in records] == [
+        (Decimal("1.50"), {"Owner": "team-a"}),
+        (Decimal("0.50"), {"Owner": "team-b"}),
+    ]
+    # the day's ec2 total is the same 2.00 the untagged run reports
+    assert sum(r.cost.amount for r in records) == Decimal("2.00")
+
+
+def test_data_exports_column_spelling_matches_a_camelcase_key():
+    rows = [
+        _row("2024-01-01", "4.00", "Amazon Elastic Compute Cloud")
+        | {"resource_tags_user_cost_center": "cc-42"},
+    ]
+    objects = _tagged_objects([*_BASE_COLUMNS, "resource_tags_user_cost_center"], rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)), tuning=_tuning("CostCenter"))
+
+    assert [r.tags for r in records] == [{"CostCenter": "cc-42"}]
+
+
+def test_a_key_with_no_column_reads_as_untagged_and_warns(caplog):
+    # the tag is on the resources but was never activated in Billing, so the
+    # report has no column for it — say so instead of reporting 0 spend
+    objects = _tagged_objects(_BASE_COLUMNS, [_row("2024-01-01", "4.00", "Amazon RDS")])
+
+    with caplog.at_level("WARNING"):
+        records = _collect(_FakeProvider(_FakeS3(objects)), tuning=_tuning("Owner"))
+
+    assert [r.tags for r in records] == [{"Owner": ""}]
+    assert "no user tag column for Owner" in caplog.text
+
+
+def test_untagged_rows_keep_a_blank_value():
+    rows = [
+        _row("2024-01-01", "1.00", "Amazon RDS") | {"resourceTags/user:Owner": "team-a"},
+        _row("2024-01-02", "2.00", "Amazon RDS") | {"resourceTags/user:Owner": ""},
+    ]
+    objects = _tagged_objects([*_BASE_COLUMNS, "resourceTags/user:Owner"], rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)), tuning=_tuning("Owner"))
+
+    assert [r.tags for r in records] == [{"Owner": "team-a"}, {"Owner": ""}]
+
+
+def test_no_required_tags_leaves_records_tagless():
+    records = _collect(_FakeProvider(_FakeS3(_objects())))
+
+    assert {r.tags for r in records} == {None}
+
+
+def test_changing_the_tag_keys_bypasses_the_cache():
+    # the cached totals are keyed by tag combo, so a different key set is a
+    # different aggregation and must not be served from the old one
+    rows = [
+        _row("2024-01-01", "1.00", "Amazon RDS")
+        | {"resourceTags/user:Owner": "team-a", "resourceTags/user:Environment": "dev"},
+    ]
+    columns = [*_BASE_COLUMNS, "resourceTags/user:Owner", "resourceTags/user:Environment"]
+    s3 = _FakeS3(_tagged_objects(columns, rows))
+    provider = _FakeProvider(s3)
+
+    first = _collect(provider, tuning=_tuning("Owner"))
+    second = _collect(provider, tuning=_tuning("Environment"))
+
+    assert [r.tags for r in first] == [{"Owner": "team-a"}]
+    assert [r.tags for r in second] == [{"Environment": "dev"}]
+
+
+def test_surplus_tag_values_fold_into_one_bucket(monkeypatch):
+    # a high-cardinality required tag must not let the group table grow forever
+    monkeypatch.setattr(cur, "_MAX_GROUPS", 2)
+    rows = [
+        _row("2024-01-01", "1.00", "Amazon RDS") | {"resourceTags/user:Name": f"n-{i}"}
+        for i in range(5)
+    ]
+    objects = _tagged_objects([*_BASE_COLUMNS, "resourceTags/user:Name"], rows)
+
+    records = _collect(_FakeProvider(_FakeS3(objects)), tuning=_tuning("Name"))
+
+    assert len(records) == 3  # two real values plus the fold-in bucket
+    assert {"Name": "(other)"} in [r.tags for r in records]
+    assert sum(r.cost.amount for r in records) == Decimal("5.00")  # no dollars lost

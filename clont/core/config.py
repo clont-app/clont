@@ -190,6 +190,8 @@ class FinOpsConfig(_Model):
     # Governance: non-prod identification (off-hours) + required tag keys (tag hygiene)
     nonprod_tags: dict[str, list[str]] = Field(default_factory=dict)  # tag key -> non-prod values
     required_tags: list[str] = Field(default_factory=list)            # tag keys every resource must carry
+    # showback groups spend by required_tags; WARN when this much of it carries no value
+    showback_unattributed_pct: float = 20.0
 
 
 class MetricsConfig(_Model):
@@ -314,6 +316,7 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   nonprod_tags:                  # tags marking schedulable non-prod resources (off-hours)
 #     Environment: [dev, staging, test, qa]
 #   required_tags: [Owner, Environment]   # tag keys every cost-bearing resource must carry
+#   showback_unattributed_pct: 20  # WARN when this share of spend carries no required tag
 
 # Monitoring metric-anomaly detection + Tier-1 default rules (thresholds + forecast).
 # monitoring:

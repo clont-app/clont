@@ -106,6 +106,7 @@ def build_agent(config: Config) -> Agent:
             allow_cost_explorer=config.finops.allow_cost_explorer,
             allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
         ),
+        showback_unattributed_pct=config.finops.showback_unattributed_pct,
         anomaly_sigma=config.monitoring.anomaly_sigma,
         anomaly_min_points=config.monitoring.anomaly_min_points,
         free_storage_min_pct=config.monitoring.free_storage_min_pct,

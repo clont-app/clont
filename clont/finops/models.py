@@ -18,6 +18,9 @@ class CostRecord:
     alias: str | None = None  # account alias the cost belongs to
     resource: CloudResource | None = None
     dimensions: dict[str, str] | None = None  # e.g. {"usage_type": "..."}
+    # cost-allocation tags behind this line, for showback. None = the collector
+    # reads no tags; a blank value = untagged, i.e. unattributed spend
+    tags: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
