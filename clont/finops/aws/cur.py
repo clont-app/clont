@@ -15,6 +15,11 @@ whose manifest isn't there yet is skipped, not an error.
 
 The report is rewritten a few times a day, so re-reading it every 300s cycle
 would be pure waste — parsed totals are cached for `refresh_minutes`.
+
+A payer's report (`include_linked`) is grouped by `lineItem/UsageAccountId`, and
+each linked account's records carry that account's own alias — so the digest,
+spike, forecast, budget and showback detectors all work per account without
+knowing anything about organizations.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from clont.core.logging import get_logger
 from clont.core.models import Cloud, Money, Period
 from clont.core.registry import register
 from clont.finops.models import CostRecord, Recommendation
+from clont.providers.aws.organizations import account_names
 from clont.providers.base import Provider
 
 log = get_logger("clont.finops.aws.cur")
@@ -64,21 +70,29 @@ _TAG_PREFIXES = ("resourceTags/user:", "resource_tags_user_")
 _MAX_GROUPS = 5000
 _OTHER = "(other)"
 
-_Group = tuple[date, str, tuple[tuple[str, str], ...]]
+# day, usage account ("" when the report is not split by account), service, tags
+_Group = tuple[date, str, str, tuple[tuple[str, str], ...]]
 
 
 @dataclass
 class _Spend:
-    """Daily per-service totals for whole billing periods, split by tag combo."""
+    """Daily per-account per-service totals, split by tag combo."""
 
     totals: dict[_Group, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     currency: str = "USD"
     seen_tags: set[str] = field(default_factory=set)  # keys the report actually carries
 
-    def add(self, day: date, service: str, tags: tuple[tuple[str, str], ...], amount: Decimal) -> None:
-        group: _Group = (day, service, tags)
+    def add(
+        self,
+        day: date,
+        account: str,
+        service: str,
+        tags: tuple[tuple[str, str], ...],
+        amount: Decimal,
+    ) -> None:
+        group: _Group = (day, account, service, tags)
         if group not in self.totals and len(self.totals) >= _MAX_GROUPS:
-            group = (day, service, tuple((k, _OTHER) for k, _ in tags))
+            group = (day, account, service, tuple((k, _OTHER) for k, _ in tags))
         self.totals[group] += amount
 
 
@@ -109,8 +123,9 @@ class CURCostCollector:
             return []
 
         spend = _spend(self._provider, config, period, self._tags)
+        names = _linked_names(self._provider, config, spend)
         records: list[CostRecord] = []
-        for (day, service, tags), amount in sorted(spend.totals.items()):
+        for (day, account, service, tags), amount in sorted(spend.totals.items()):
             if not period.start <= day <= period.end:
                 continue
             records.append(
@@ -118,8 +133,9 @@ class CURCostCollector:
                     cloud=str(Cloud.AWS),
                     service=service,
                     period=Period(start=day, end=day),
-                    alias=self._provider.alias,
+                    alias=names.get(account, self._provider.alias),
                     cost=Money(amount=amount, currency=spend.currency),
+                    dimensions={"account_id": account} if account else None,
                     tags=dict(tags) if tags else None,
                 )
             )
@@ -129,10 +145,38 @@ class CURCostCollector:
         return []
 
 
+def _linked_names(provider: Provider, config, spend: _Spend) -> dict[str, str]:
+    """usage account id -> the alias its spend is reported under.
+
+    Empty unless the payer report is split by account. The payer keeps the alias
+    from `clont.yaml`; members get their Organizations name, or the bare id when
+    that call isn't available.
+    """
+    if not config.include_linked:
+        return {}
+    seen = {account for _, account, _, _ in spend.totals if account}
+    own = str(getattr(provider, "account_id", None) or "")
+    if not seen - {own}:  # single-account report, no need to ask organizations
+        return dict.fromkeys(seen, provider.alias)
+    org = account_names(provider)
+    return {
+        account: provider.alias if account == own else org.get(account, account)
+        for account in seen
+    }
+
+
 def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = ()) -> _Spend:
     folders = _billing_periods(period)
     key = "|".join(
-        [str(provider.alias), config.bucket, config.prefix, config.report_name, *folders, *tags]
+        [
+            str(provider.alias),
+            config.bucket,
+            config.prefix,
+            config.report_name,
+            str(config.include_linked),
+            *folders,
+            *tags,
+        ]
     )
     hit = _cache.get(key)
     now = time.monotonic()
@@ -140,7 +184,7 @@ def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = (
         return hit[1]
 
     s3 = provider.client("s3", config.region)
-    account = None if config.include_linked else getattr(provider, "account_id", None)
+    only = None if config.include_linked else getattr(provider, "account_id", None)
     spend = _Spend()
     for folder in folders:
         manifest = _manifest(s3, config, folder)
@@ -153,7 +197,9 @@ def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = (
             continue
         _check_format(manifest, folder)
         for data_key in manifest.get("reportKeys", []):
-            _read_into(s3, config.bucket, data_key, account, spend, tags)
+            _read_into(
+                s3, config.bucket, data_key, only, spend, tags, split=config.include_linked
+            )
 
     absent = [k for k in tags if k not in spend.seen_tags]
     if absent:
@@ -222,26 +268,37 @@ def _read_into(
     s3,
     bucket: str,
     key: str,
-    account: str | None,
+    only: str | None,
     spend: _Spend,
     tags: tuple[str, ...] = (),
+    *,
+    split: bool = False,
 ) -> None:
-    """Stream one gzipped csv part, folding its rows into `spend`."""
+    """Stream one gzipped csv part, folding its rows into `spend`.
+
+    `only` keeps just that usage account's rows; `split` groups whatever is left
+    by usage account instead of lumping the whole payer report together.
+    """
     body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     with gzip.GzipFile(fileobj=body) as gz:
         reader = csv.DictReader(io.TextIOWrapper(gz, encoding="utf-8"))
         columns = _tag_columns(reader.fieldnames, tags)
         spend.seen_tags.update(k for k, column in columns if column)
         for row in reader:
-            if account is not None:
-                owner = _pick(row, _ACCOUNT)
-                if owner and owner != account:
-                    continue
+            owner = _pick(row, _ACCOUNT) if (only is not None or split) else ""
+            if only is not None and owner and owner != only:
+                continue
             day = _day(row)
             amount = _amount(row)
             if day is None or not amount:
                 continue
-            spend.add(day, _service(row), _row_tags(row, columns), amount)
+            spend.add(
+                day,
+                owner if split else "",
+                _service(row),
+                _row_tags(row, columns),
+                amount,
+            )
             currency = _pick(row, _CURRENCY)
             if currency and currency != spend.currency:
                 spend.currency = currency

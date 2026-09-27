@@ -22,6 +22,7 @@ from clont.core.config import CURConfig
 from clont.core.models import Period
 from clont.finops.aws import cur
 from clont.finops.base import FinOpsTuning
+from clont.providers.aws import organizations
 
 BUCKET = "billing-bucket"
 JAN = "20240101-20240201"
@@ -78,14 +79,52 @@ class _FakeS3:
         return {"Body": io.BytesIO(body)}
 
 
+class _FakePaginator:
+    def __init__(self, pages: list[dict]) -> None:
+        self._pages = pages
+
+    def paginate(self, **kw):
+        return iter(self._pages)
+
+
+class _FakeOrganizations:
+    """Just enough of the organizations client for the ListAccounts paginator."""
+
+    def __init__(self, names: dict[str, str]) -> None:
+        self._names = names
+        self.calls = 0
+
+    def get_paginator(self, name: str):
+        assert name == "list_accounts"
+        self.calls += 1
+        accounts = [{"Id": i, "Name": n} for i, n in self._names.items()]
+        return _FakePaginator([{"Accounts": accounts}])
+
+
 class _FakeProvider:
-    def __init__(self, s3: _FakeS3, *, cur_config=None, account_id: str | None = "111") -> None:
+    def __init__(
+        self,
+        s3: _FakeS3,
+        *,
+        cur_config=None,
+        account_id: str | None = "111",
+        org_names: dict[str, str] | None = None,
+    ) -> None:
         self._s3 = s3
         self.alias = "prod"
         self.account_id = account_id
         self.cur = cur_config if cur_config is not None else _config()
+        # None = the role has no organizations access, the usual member-account case
+        self.organizations = _FakeOrganizations(org_names) if org_names is not None else None
 
     def client(self, service: str, region: str | None = None):
+        if service == "organizations":
+            if self.organizations is None:
+                raise ClientError(
+                    {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+                    "ListAccounts",
+                )
+            return self.organizations
         assert service == "s3"
         return self._s3
 
@@ -112,8 +151,10 @@ def _objects(**kw) -> dict[str, bytes]:
 @pytest.fixture(autouse=True)
 def _no_cache():
     cur.clear_cache()
+    organizations.clear_cache()
     yield
     cur.clear_cache()
+    organizations.clear_cache()
 
 
 def _collect(provider, period: Period | None = None, tuning=None):
@@ -157,6 +198,47 @@ def test_include_linked_keeps_the_whole_payer_report():
     records = _collect(provider)
 
     assert ("Amazon RDS", Decimal("99.00")) in [(r.service, r.cost.amount) for r in records]
+
+
+def test_payer_report_reports_each_linked_account_under_its_own_alias():
+    objects = _objects(extra=[_row("2024-01-01", "99.00", "Amazon RDS", account="999")])
+    provider = _FakeProvider(
+        _FakeS3(objects),
+        cur_config=_config(include_linked=True),
+        org_names={"111": "payer", "999": "sandbox"},
+    )
+
+    records = _collect(provider)
+
+    # the payer keeps its configured alias; the member gets its organizations name
+    assert {(r.alias, r.service) for r in records} == {
+        ("prod", "Amazon Elastic Compute Cloud"),
+        ("prod", "Amazon Simple Storage Service"),
+        ("sandbox", "Amazon RDS"),
+    }
+    assert {r.dimensions["account_id"] for r in records} == {"111", "999"}
+    # and the split doesn't double-count: same total as the unsplit report
+    assert sum(r.cost.amount for r in records) == Decimal("106.00")
+
+
+def test_linked_account_falls_back_to_its_id_without_organizations_access():
+    objects = _objects(extra=[_row("2024-01-01", "99.00", "Amazon RDS", account="999")])
+    provider = _FakeProvider(_FakeS3(objects), cur_config=_config(include_linked=True))
+
+    records = _collect(provider)
+
+    assert {r.alias for r in records} == {"prod", "999"}
+
+
+def test_a_single_account_report_never_asks_organizations():
+    provider = _FakeProvider(
+        _FakeS3(_objects()), cur_config=_config(include_linked=True), org_names={"111": "payer"}
+    )
+
+    records = _collect(provider)
+
+    assert {r.alias for r in records} == {"prod"}
+    assert provider.organizations.calls == 0
 
 
 def test_tax_lines_fall_back_to_their_line_item_type():
