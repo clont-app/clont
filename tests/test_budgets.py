@@ -88,3 +88,10 @@ def test_specific_account_does_not_match_others():
     records = _month(10, "10", alias="prod") + _month(10, "10", alias="staging")
     events = BudgetDetector([_rule("50", account="prod")]).detect(records)
     assert {e.key for e in events} == {"finops:budget:prod:account"}
+
+
+def test_sparse_service_is_not_projected_at_its_billed_day_rate():
+    # billed on 3 of the first 10 days: 21 days left, not 28, and the level is
+    # ~$3/day, not $10. the old run rate forecast 310 and warned on a $200 budget.
+    records = [_cost("EC2", "10", date(2024, 1, 1) + timedelta(days=i)) for i in (0, 4, 9)]
+    assert BudgetDetector([_rule("200")]).detect(records) == []

@@ -59,10 +59,16 @@ like spikes.
 
 ### budgets and forecast
 
-a month-end **forecast** (`info`) from month-to-date plus a weighted daily rate,
-and **budget alerts** against ceilings you set: `warn` when the forecast gets
-close or is heading over, `critical` once you've actually blown through it. it's
-plain arithmetic — no model, no extra api calls.
+a month-end **forecast** (`info`) from month-to-date plus the days still to come,
+each priced at a weighted daily rate times its **weekday** factor — a remainder
+full of weekends forecasts lower than one full of mondays. the event carries a
+range, and says "too early to be precise" while that range is wide, instead of
+quoting the same confident figure on the 2nd as on the 25th.
+
+**budget alerts** against ceilings you set run off the same projection (two
+different month-end numbers in one digest would only cost you trust): `warn` when
+the forecast gets close or is heading over, `critical` once you've actually blown
+through it. plain arithmetic — no model, no extra api calls.
 
 ### savings findings
 

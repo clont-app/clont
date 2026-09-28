@@ -10,18 +10,19 @@ from __future__ import annotations
 import calendar
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from clont.core.config import BudgetRule
 from clont.core.models import Cloud, CloudResource
 from clont.events.models import Event, EventSeverity
 from clont.events.stats import (
+    Projection,
     mean,
     median,
     modified_zscore,
     periods_to_cross,
-    project_month_end,
+    project_seasonal,
 )
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.showback import UNATTRIBUTED, showback
@@ -382,44 +383,85 @@ def _account_months(records: list[CostRecord]) -> list[_AccountMonth]:
     return out
 
 
-def _ordered(daily: dict[date, Decimal]) -> list[Decimal]:
-    """Daily totals ordered oldest-first (the shape `project_month_end` wants)."""
-    return [daily[d] for d in sorted(daily)]
+def _project(
+    daily: dict[date, Decimal], anchor: date, days_in_month: int, alpha: float
+) -> Projection:
+    """Forecast the calendar month from one daily series.
+
+    Two things the old run rate got wrong. Remaining days are counted off the
+    **calendar** (`days_in_month - anchor.day`), not off how many days the series
+    happens to carry — a service billed on 3 of 10 days was projecting 28 more
+    days at a 3-day rate. And a gap *inside* the window is a zero-spend day,
+    while days *before* it were never observed, so they are estimated at the
+    level instead of counted as zero.
+    """
+    first = min(daily)
+    span = (anchor - first).days + 1
+    samples = [
+        ((first + timedelta(days=i)).weekday(), daily.get(first + timedelta(days=i), Decimal(0)))
+        for i in range(span)
+    ]
+    remaining = [
+        anchor.replace(day=day).weekday()
+        for day in range(anchor.day + 1, days_in_month + 1)
+    ]
+    return project_seasonal(
+        samples, remaining, alpha, missing=first.day - 1, min_samples=_MIN_SEASONAL_SAMPLES
+    )
 
 
 class SpendForecastDetector:
     """Daily spend -> one INFO month-end forecast per account.
 
-    Run-rate projection: month-to-date actual plus an EWMA daily rate applied to
-    the remaining days of the calendar month.
+    Month-to-date actual plus the remaining days of the calendar month, each one
+    priced at the deseasonalized daily level times its weekday factor — so a
+    remainder that is mostly weekend forecasts lower than one that is mostly
+    Mondays. The event carries a range as well as the point, and says so when the
+    range is too wide to act on: with three days of data the honest answer is
+    "somewhere between", not a number to the dollar.
     """
 
-    def __init__(self, alpha: float = 0.5) -> None:
+    def __init__(self, alpha: float = 0.5, wide_band_pct: float = 25.0) -> None:
         self._alpha = alpha
+        self._wide = Decimal(str(wide_band_pct))
 
     def detect(self, records: list[CostRecord]) -> list[Event]:
         events: list[Event] = []
         for acc in _account_months(records):
             days = acc.days_in_month()
             mtd = sum(acc.account_daily.values(), Decimal(0))
-            forecast = project_month_end(_ordered(acc.account_daily), days, self._alpha)
+            proj = _project(acc.account_daily, acc.anchor, days, self._alpha)
             alias = acc.alias or "-"
             cur = acc.currency
+            basis = "weekday-shaped" if proj.shaped else "flat rate"
+            early = proj.band is None or proj.band_pct > self._wide
+            if proj.band is None:  # one day of data — nothing to be spread about
+                range_txt = f" ({basis}, too early to be precise)"
+            elif proj.band == 0:
+                range_txt = f" ({basis})"
+            else:
+                note = ", too early to be precise" if early else ""
+                range_txt = f" (range {proj.low:.0f}-{proj.high:.0f}, {basis}{note})"
             events.append(
                 Event(
                     key=f"finops:spend:forecast:{alias}",
                     severity=EventSeverity.INFO,
                     domain="finops",
                     cloud=Cloud.AWS,
-                    title=f"[{alias}] Month-end forecast: ~{forecast:.0f} {cur}",
+                    title=f"[{alias}] Month-end forecast: ~{proj.total:.0f} {cur}",
                     message=(
                         f"{acc.anchor.year}-{acc.anchor.month:02d}: {mtd:.2f} {cur} "
                         f"MTD over {len(acc.account_daily)}/{days} days "
-                        f"-> ~{forecast:.0f} {cur} projected"
+                        f"-> ~{proj.total:.0f} {cur} projected{range_txt}"
                     ),
                     payload={
                         "mtd": str(mtd),
-                        "forecast": str(forecast),
+                        "forecast": str(proj.total),
+                        "forecast_low": str(proj.low),
+                        "forecast_high": str(proj.high),
+                        "band_pct": f"{proj.band_pct:.1f}",
+                        "basis": basis,
+                        "confidence": "low" if early else "normal",
                         "currency": cur,
                         "days_elapsed": str(len(acc.account_daily)),
                         "days_in_month": str(days),
@@ -475,7 +517,9 @@ class BudgetDetector:
         if limit <= 0:
             return None
         mtd = sum(daily.values(), Decimal(0))
-        forecast = project_month_end(_ordered(daily), acc.days_in_month(), self._alpha)
+        # same projection the forecast event publishes — two different numbers for
+        # "month-end" in one digest is how a budget alert loses its credibility
+        forecast = _project(daily, acc.anchor, acc.days_in_month(), self._alpha).total
 
         if mtd >= limit:
             severity = EventSeverity.CRITICAL
