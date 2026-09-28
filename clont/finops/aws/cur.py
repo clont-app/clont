@@ -31,7 +31,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from botocore.exceptions import ClientError
@@ -39,8 +39,10 @@ from botocore.exceptions import ClientError
 from clont.core.logging import get_logger
 from clont.core.models import Cloud, Money, Period
 from clont.core.registry import register
+from clont.finops.aws.dynamodb import capacity_mode_recommendations, throughput_kind
 from clont.finops.aws.usage_types import DIMENSION as _TRANSFER
 from clont.finops.aws.usage_types import transfer_bucket
+from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
 from clont.providers.aws.organizations import account_names
 from clont.providers.base import Provider
@@ -63,7 +65,18 @@ _SERVICE = (
     "line_item_product_code",
 )
 
+_USAGE_AMOUNT = ("lineItem/UsageAmount", "line_item_usage_amount")
+_RESOURCE = ("lineItem/ResourceId", "line_item_resource_id")
+
 _ABSENT = {"NoSuchKey", "NoSuchBucket", "404"}
+
+# dynamodb throughput rows are also kept per table and per report bucket, because
+# the capacity-mode check needs the usage *amount*, not just the money. a cap
+# keeps a huge payer report from turning that into a memory problem: the advice
+# is dropped rather than computed from half the rows.
+_MAX_DDB_KEYS = 200_000
+# bucket start, usage account (empty when the report isn't split), table arn, kind
+_DdbGroup = tuple[datetime, str, str, str]
 
 # user cost-allocation tag columns: legacy, then the data-exports spelling
 _TAG_PREFIXES = ("resourceTags/user:", "resource_tags_user_")
@@ -89,6 +102,19 @@ class _Spend:
     currency: str = "USD"
     seen_tags: set[str] = field(default_factory=set)  # keys the report actually carries
     combos: set[tuple[tuple[str, str], ...]] = field(default_factory=set)
+    ddb: dict[_DdbGroup, tuple[Decimal, Decimal]] = field(default_factory=dict)
+    ddb_capped: bool = False     # hit _MAX_DDB_KEYS, so the usage is incomplete
+    ddb_no_ids: bool = False      # dynamodb rows with no resource id column
+
+    def add_ddb(
+        self, start: datetime, account: str, table: str, kind: str, usage: Decimal, cost: Decimal
+    ) -> None:
+        key = (start, account, table, kind)
+        if key not in self.ddb and len(self.ddb) >= _MAX_DDB_KEYS:
+            self.ddb_capped = True
+            return
+        seen_usage, seen_cost = self.ddb.get(key, (Decimal(0), Decimal(0)))
+        self.ddb[key] = (seen_usage + usage, seen_cost + cost)
 
     def add(
         self,
@@ -124,9 +150,10 @@ class CURCostCollector:
 
     def __init__(self, provider: Provider, tuning=None) -> None:
         self._provider = provider
+        self._tuning = tuning or FinOpsTuning()
         # the showback keys. splitting costs nothing downstream: every line is
         # still counted once, so service totals are unchanged
-        self._tags = tuple(tuning.required_tags) if tuning else ()
+        self._tags = tuple(self._tuning.required_tags)
 
     def collect(self, period: Period) -> list[CostRecord]:
         config = getattr(self._provider, "cur", None)
@@ -158,7 +185,33 @@ class CURCostCollector:
         return records
 
     def recommendations(self, period: Period) -> list[Recommendation]:
-        return []
+        """DynamoDB billing-mode advice, derived from the report already parsed."""
+        config = getattr(self._provider, "cur", None)
+        if config is None:
+            return []
+        spend = _spend(self._provider, config, period, self._tags)
+        if spend.ddb_capped:
+            log.warning(
+                "CUR carries more than %d dynamodb usage rows — skipping the "
+                "capacity-mode check rather than judging on part of it",
+                _MAX_DDB_KEYS,
+            )
+            return []
+        if spend.ddb_no_ids and not spend.ddb:
+            # without resource ids the rows are a regional lump, and "some table
+            # in eu-west-1 is on the wrong mode" is not something you can act on
+            log.info(
+                "CUR has no resource ids — enable them on the report for the "
+                "dynamodb capacity-mode check"
+            )
+            return []
+        return capacity_mode_recommendations(
+            spend.ddb,
+            _linked_names(self._provider, config, spend),
+            self._provider.alias,
+            self._tuning,
+            spend.currency,
+        )
 
 
 def _linked_names(provider: Provider, config, spend: _Spend) -> dict[str, str]:
@@ -306,9 +359,15 @@ def _read_into(
                 continue
             day = _day(row)
             amount = _amount(row)
-            if day is None or not amount:
+            if day is None:
                 continue
             service = _service(row)
+            # before the zero-cost skip below: a free-tier dynamodb row carries no
+            # money but real traffic, and dropping it would understate the capacity
+            # a provisioned table needs
+            _ddb_into(row, service, owner if split else "", amount, spend)
+            if not amount:
+                continue
             spend.add(
                 day,
                 owner if split else "",
@@ -320,6 +379,27 @@ def _read_into(
             currency = _pick(row, _CURRENCY)
             if currency and currency != spend.currency:
                 spend.currency = currency
+
+
+def _ddb_into(
+    row: dict, service: str, account: str, cost: Decimal, spend: _Spend
+) -> None:
+    """Keep a dynamodb throughput row's usage amount, keyed by table and bucket."""
+    if "dynamodb" not in service.lower().replace(" ", ""):
+        return
+    if _pick(row, _KIND) != "Usage":
+        return  # a credit or refund says nothing about what the table served
+    kind = throughput_kind(_pick(row, _USAGE_TYPE))
+    if kind is None:
+        return  # storage, backups, streams — billed the same in either mode
+    table = _pick(row, _RESOURCE)
+    if not table:
+        spend.ddb_no_ids = True
+        return
+    start = _start(row)
+    if start is None:
+        return
+    spend.add_ddb(start, account, table, kind, _usage(row), cost)
 
 
 def _tag_columns(
@@ -370,9 +450,25 @@ def _day(row: dict) -> date | None:
         return None
 
 
+def _start(row: dict) -> datetime | None:
+    """The row's bucket start, hour included — an hourly report shows the shape."""
+    stamp = _pick(row, _DAY)
+    try:
+        return datetime.fromisoformat(stamp[:19].replace("Z", ""))
+    except ValueError:
+        return None
+
+
 def _amount(row: dict) -> Decimal:
     try:
         return Decimal(_pick(row, _COST) or "0")
+    except InvalidOperation:
+        return Decimal(0)
+
+
+def _usage(row: dict) -> Decimal:
+    try:
+        return Decimal(_pick(row, _USAGE_AMOUNT) or "0")
     except InvalidOperation:
         return Decimal(0)
 

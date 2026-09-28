@@ -1,8 +1,14 @@
 {
  "base_region": "us-east-1",
- "generated_at": "2026-09-27T23:15:00Z",
+ "generated_at": "2026-09-28T11:15:23Z",
  "regions": {
   "af-south-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00017493",
+    "read_request_unit": "0.000000168",
+    "write_capacity_unit_hourly": "0.00087465",
+    "write_request_unit": "0.00000084"
+   },
    "ebs_gb_month": {
     "gp2": "0.1309",
     "gp3": "0.1047",
@@ -82,6 +88,12 @@
    "snapshot_gb_month": "0.0595"
   },
   "ap-east-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001628",
+    "read_request_unit": "0.000000155",
+    "write_capacity_unit_hourly": "0.000814",
+    "write_request_unit": "0.000000785"
+   },
    "ebs_gb_month": {
     "gp2": "0.132",
     "gp3": "0.1056",
@@ -154,6 +166,12 @@
    "snapshot_gb_month": "0.055"
   },
   "ap-east-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00013356",
+    "read_request_unit": "0.0000001282",
+    "write_capacity_unit_hourly": "0.0006678",
+    "write_request_unit": "0.0000006435"
+   },
    "ebs_gb_month": {
     "gp2": "0.108",
     "gp3": "0.0864",
@@ -216,6 +234,12 @@
    "snapshot_gb_month": "0.045"
   },
   "ap-northeast-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001484",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.000742",
+    "write_request_unit": "0.000000715"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -359,6 +383,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-northeast-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00014098",
+    "read_request_unit": "0.0000001355",
+    "write_capacity_unit_hourly": "0.0007049",
+    "write_request_unit": "0.00000068"
+   },
    "ebs_gb_month": {
     "gp2": "0.114",
     "gp3": "0.0912",
@@ -467,6 +497,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-northeast-3": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001484",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.000742",
+    "write_request_unit": "0.000000715"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -541,6 +577,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-south-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000148",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.00074",
+    "write_request_unit": "0.00000071"
+   },
    "ebs_gb_month": {
     "gp2": "0.114",
     "gp3": "0.0912",
@@ -653,6 +695,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-south-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000148",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.00074",
+    "write_request_unit": "0.00000071"
+   },
    "ebs_gb_month": {
     "gp2": "0.114",
     "gp3": "0.0912",
@@ -732,6 +780,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-southeast-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000148",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.00074",
+    "write_request_unit": "0.00000071"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -854,6 +908,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-southeast-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000148",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.00074",
+    "write_request_unit": "0.00000071"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -977,6 +1037,12 @@
    "snapshot_gb_month": "0.055"
   },
   "ap-southeast-3": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000148",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.00074",
+    "write_request_unit": "0.00000071"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -1048,6 +1114,12 @@
    "snapshot_gb_month": "0.05"
   },
   "ap-southeast-4": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000148",
+    "read_request_unit": "0.0000001425",
+    "write_capacity_unit_hourly": "0.00074",
+    "write_request_unit": "0.00000071"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -1110,6 +1182,12 @@
    "snapshot_gb_month": "0.055"
   },
   "ap-southeast-5": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001332",
+    "read_request_unit": "0.0000001285",
+    "write_capacity_unit_hourly": "0.000666",
+    "write_request_unit": "0.00000064"
+   },
    "ebs_gb_month": {
     "gp2": "0.108",
     "gp3": "0.0864",
@@ -1187,6 +1265,12 @@
    "snapshot_gb_month": "0.045"
   },
   "ap-southeast-6": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001554",
+    "read_request_unit": "0.0000001496",
+    "write_capacity_unit_hourly": "0.000777",
+    "write_request_unit": "0.0000007455"
+   },
    "ebs_gb_month": {
     "gp2": "0.126",
     "gp3": "0.1008",
@@ -1253,6 +1337,12 @@
    "snapshot_gb_month": "0.0577"
   },
   "ap-southeast-7": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001332",
+    "read_request_unit": "0.0000001285",
+    "write_capacity_unit_hourly": "0.000666",
+    "write_request_unit": "0.00000064"
+   },
    "ebs_gb_month": {
     "gp2": "0.108",
     "gp3": "0.0864",
@@ -1319,6 +1409,12 @@
    "snapshot_gb_month": "0.045"
   },
   "ca-central-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000143",
+    "read_request_unit": "0.0000001375",
+    "write_capacity_unit_hourly": "0.000715",
+    "write_request_unit": "0.0000006875"
+   },
    "ebs_gb_month": {
     "gp2": "0.11",
     "gp3": "0.088",
@@ -1427,6 +1523,12 @@
    "snapshot_gb_month": "0.055"
   },
   "ca-west-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000143",
+    "read_request_unit": "0.0000001375",
+    "write_capacity_unit_hourly": "0.000715",
+    "write_request_unit": "0.0000006875"
+   },
    "ebs_gb_month": {
     "gp2": "0.11",
     "gp3": "0.088",
@@ -1493,6 +1595,12 @@
    "snapshot_gb_month": "0.055"
   },
   "eu-central-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001586",
+    "read_request_unit": "0.0000001525",
+    "write_capacity_unit_hourly": "0.000793",
+    "write_request_unit": "0.0000007625"
+   },
    "ebs_gb_month": {
     "gp2": "0.119",
     "gp3": "0.0952",
@@ -1635,6 +1743,12 @@
    "snapshot_gb_month": "0.054"
   },
   "eu-central-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000175",
+    "read_request_unit": "0.000000168",
+    "write_capacity_unit_hourly": "0.000872",
+    "write_request_unit": "0.000000835"
+   },
    "ebs_gb_month": {
     "gp2": "0.143",
     "gp3": "0.1142",
@@ -1706,6 +1820,12 @@
    "snapshot_gb_month": "0.059"
   },
   "eu-north-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00014",
+    "read_request_unit": "0.0000001345",
+    "write_capacity_unit_hourly": "0.000698",
+    "write_request_unit": "0.00000067"
+   },
    "ebs_gb_month": {
     "gp2": "0.1045",
     "gp3": "0.0836",
@@ -1802,6 +1922,12 @@
    "snapshot_gb_month": "0.0475"
   },
   "eu-south-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00015435",
+    "read_request_unit": "0.0000001485",
+    "write_capacity_unit_hourly": "0.00077175",
+    "write_request_unit": "0.00000074"
+   },
    "ebs_gb_month": {
     "gp2": "0.1155",
     "gp3": "0.0924",
@@ -1883,6 +2009,12 @@
    "snapshot_gb_month": "0.0525"
   },
   "eu-south-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000147",
+    "read_request_unit": "0.0000001415",
+    "write_capacity_unit_hourly": "0.000735",
+    "write_request_unit": "0.000000705"
+   },
    "ebs_gb_month": {
     "gp2": "0.11",
     "gp3": "0.088",
@@ -1984,6 +2116,12 @@
    "snapshot_gb_month": "0.05"
   },
   "eu-west-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000147",
+    "read_request_unit": "0.0000001415",
+    "write_capacity_unit_hourly": "0.000735",
+    "write_request_unit": "0.000000705"
+   },
    "ebs_gb_month": {
     "gp2": "0.11",
     "gp3": "0.088",
@@ -2129,6 +2267,12 @@
    "snapshot_gb_month": "0.05"
   },
   "eu-west-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001544",
+    "read_request_unit": "0.0000001487",
+    "write_capacity_unit_hourly": "0.000772",
+    "write_request_unit": "0.0000007423"
+   },
    "ebs_gb_month": {
     "gp2": "0.116",
     "gp3": "0.0928",
@@ -2240,6 +2384,12 @@
    "snapshot_gb_month": "0.053"
   },
   "eu-west-3": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001544",
+    "read_request_unit": "0.0000001487",
+    "write_capacity_unit_hourly": "0.000772",
+    "write_request_unit": "0.0000007423"
+   },
    "ebs_gb_month": {
     "gp2": "0.116",
     "gp3": "0.0928",
@@ -2339,6 +2489,12 @@
    "snapshot_gb_month": "0.053"
   },
   "il-central-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001764",
+    "read_request_unit": "0.00000017",
+    "write_capacity_unit_hourly": "0.000882",
+    "write_request_unit": "0.00000085"
+   },
    "ebs_gb_month": {
     "gp2": "0.132",
     "gp3": "0.1056",
@@ -2404,6 +2560,12 @@
    "snapshot_gb_month": "0.06"
   },
   "me-central-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001617",
+    "read_request_unit": "0.0000001555",
+    "write_capacity_unit_hourly": "0.0008085",
+    "write_request_unit": "0.0000007755"
+   },
    "ebs_gb_month": {
     "gp2": "0.121",
     "gp3": "0.0968",
@@ -2467,6 +2629,12 @@
    "snapshot_gb_month": "0.055"
   },
   "me-south-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001617",
+    "read_request_unit": "0.0000001555",
+    "write_capacity_unit_hourly": "0.0008085",
+    "write_request_unit": "0.000000775"
+   },
    "ebs_gb_month": {
     "gp2": "0.121",
     "gp3": "0.0968",
@@ -2526,6 +2694,12 @@
    "snapshot_gb_month": "0.055"
   },
   "mx-central-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.0001365",
+    "read_request_unit": "0.0000001315",
+    "write_capacity_unit_hourly": "0.0006825",
+    "write_request_unit": "0.000000655"
+   },
    "ebs_gb_month": {
     "gp2": "0.105",
     "gp3": "0.084",
@@ -2588,6 +2762,12 @@
    "snapshot_gb_month": "0.053"
   },
   "sa-east-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000195",
+    "read_request_unit": "0.0000001875",
+    "write_capacity_unit_hourly": "0.000975",
+    "write_request_unit": "0.0000009375"
+   },
    "ebs_gb_month": {
     "gp2": "0.19",
     "gp3": "0.152",
@@ -2697,6 +2877,12 @@
    "snapshot_gb_month": "0.068"
   },
   "us-east-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00013",
+    "read_request_unit": "0.000000125",
+    "write_capacity_unit_hourly": "0.00065",
+    "write_request_unit": "0.000000625"
+   },
    "ebs_gb_month": {
     "gp2": "0.1",
     "gp3": "0.08",
@@ -2854,6 +3040,12 @@
    "snapshot_gb_month": "0.05"
   },
   "us-east-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00013",
+    "read_request_unit": "0.000000125",
+    "write_capacity_unit_hourly": "0.00065",
+    "write_request_unit": "0.000000625"
+   },
    "ebs_gb_month": {
     "gp2": "0.1",
     "gp3": "0.08",
@@ -3000,6 +3192,12 @@
    "snapshot_gb_month": "0.05"
   },
   "us-gov-east-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000156",
+    "read_request_unit": "0.00000015",
+    "write_capacity_unit_hourly": "0.00078",
+    "write_request_unit": "0.00000075"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -3086,6 +3284,12 @@
    "snapshot_gb_month": "0.066"
   },
   "us-gov-west-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000156",
+    "read_request_unit": "0.00000015",
+    "write_capacity_unit_hourly": "0.00078",
+    "write_request_unit": "0.00000075"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -3192,6 +3396,12 @@
    "snapshot_gb_month": "0.066"
   },
   "us-west-1": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.000145",
+    "read_request_unit": "0.0000001395",
+    "write_capacity_unit_hourly": "0.000725",
+    "write_request_unit": "0.000000695"
+   },
    "ebs_gb_month": {
     "gp2": "0.12",
     "gp3": "0.096",
@@ -3296,6 +3506,12 @@
    "snapshot_gb_month": "0.055"
   },
   "us-west-2": {
+   "dynamodb": {
+    "read_capacity_unit_hourly": "0.00013",
+    "read_request_unit": "0.000000125",
+    "write_capacity_unit_hourly": "0.00065",
+    "write_request_unit": "0.000000625"
+   },
    "ebs_gb_month": {
     "gp2": "0.1",
     "gp3": "0.08",

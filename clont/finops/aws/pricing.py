@@ -113,6 +113,15 @@ S3_API_CLASS = {
     "EXPRESS_ONEZONE": "express_onezone",
 }
 
+# DynamoDB throughput, us-east-1. One provisioned unit delivers 3600 requests an
+# hour, so provisioned capacity beats on-demand from ~29% sustained utilization up
+# — which is the whole question `dynamodb.py` answers.
+_DDB = _BASE.get("dynamodb", {})
+_DDB_RCU_HOURLY = Decimal(_DDB.get("read_capacity_unit_hourly", "0.00013"))
+_DDB_WCU_HOURLY = Decimal(_DDB.get("write_capacity_unit_hourly", "0.00065"))
+# requests one provisioned capacity unit covers in an hour
+DDB_UNIT_REQUESTS_PER_HOUR = Decimal(3600)
+
 # AWS instance-size normalization factors, rebased so large == 1.
 _SIZE_FACTOR = {
     "nano": Decimal("0.0625"),
@@ -258,6 +267,22 @@ def public_ipv4_daily_quote(region: str | None = None) -> Quote:
     """One billable public IPv4 address, USD per day — what `collect()` stamps."""
     quote = _public_ipv4_hourly(region)
     return Quote(quote.amount * HOURS_PER_DAY, quote.region, quote.approximate)
+
+
+def dynamodb_provisioned_quote(
+    read_units: Decimal, write_units: Decimal, hours: Decimal, region: str | None = None
+) -> Quote:
+    """Cost of holding `read_units`/`write_units` of provisioned capacity for `hours`.
+
+    Throughput only — storage is billed the same in both modes, so it cancels out
+    of any capacity-mode comparison. The always-free 25 units are *not* deducted:
+    that allowance is account-wide, not per table, and leaving it in keeps the
+    provisioned side of the comparison pessimistic.
+    """
+    rcu = _rate(region, ("dynamodb", "read_capacity_unit_hourly"), _DDB_RCU_HOURLY)
+    wcu = _rate(region, ("dynamodb", "write_capacity_unit_hourly"), _DDB_WCU_HOURLY)
+    amount = (rcu.amount * read_units + wcu.amount * write_units) * hours
+    return Quote(amount, rcu.region, rcu.approximate or wcu.approximate)
 
 
 def nat_gateway_quote(region: str | None = None) -> Quote:

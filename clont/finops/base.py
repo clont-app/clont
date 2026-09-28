@@ -28,6 +28,11 @@ class FinOpsTuning:
     s3_cold_min_gb: float = 100.0          # standard-class buckets below this aren't worth a transition
     ri_sp_min_utilization: float = 90.0    # commitment used below this % -> wasted spend
     ri_sp_min_coverage: float = 70.0       # eligible spend covered below this % -> opportunity
+    # dynamodb billing mode, read off the bill's own usage amounts
+    ddb_target_utilization: float = 0.7    # load the modelled provisioned capacity would run at
+    ddb_min_hours: float = 72.0            # shorter windows can't show whether traffic is steady
+    ddb_min_savings_pct: float = 25.0      # margin that survives the peaks cur can't show
+    ddb_min_savings_usd: float = 5.0       # per month; below this the switch isn't worth the risk
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
     required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
     allow_cost_explorer: bool = False      # off = the billed ce:GetCostAndUsage is never called

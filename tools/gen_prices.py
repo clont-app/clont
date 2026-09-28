@@ -7,6 +7,7 @@ never calls it at runtime. The bulk API is free, needs no credentials, no IAM.
     python tools/gen_prices.py                 # every region
     python tools/gen_prices.py us-east-1 eu-west-1
     python tools/gen_prices.py --s3            # only the s3 rates, merged in
+    python tools/gen_prices.py --dynamodb      # only the dynamodb rates
 
 The EC2 region shards are ~480 MB of pretty-printed JSON each, so they are
 scanned line by line and never held in memory — `json.load` on one wants more
@@ -26,8 +27,15 @@ Deep Archive is the exception: the AmazonS3 offer has no `TimedStorage-GDA-ByteH
 in the separate AmazonS3GlacierDeepArchive offer — and there the products carry no
 `productFamily`, so it needs its own classifier.
 
-Tiered rates (s3 standard, rrs) keep the *first* tier — the small-volume rate,
-which is what a bucket under 50 TB actually pays.
+Tiered rates (s3 standard, rrs) keep the first *charged* tier — the small-volume
+rate, which is what a bucket under 50 TB actually pays. A leading `0.00` tier is
+never a rate: dynamodb's capacity skus lead with the always-free 25 units, and
+taking that tier would price provisioned capacity at nothing.
+
+DynamoDB lives in its own offer too, and the four throughput skus are told apart
+by the `group` attribute, not the usagetype: `IA-ReadRequestUnits` (the IA table
+class) and `ReplWriteCapacityUnit-Hrs` (global tables) both look like the plain
+sku at the end of the string, and `group` is the only field that separates them.
 """
 
 from __future__ import annotations
@@ -73,6 +81,16 @@ _S3_GDA_USAGETYPE = "TimedStorage-GDA-ByteHrs"
 # outside us-east-1 the usagetype carries a region code (EUC1-, APS3-). the
 # prefix is uppercase, which is what keeps Files-/Annotation- out.
 _S3_USAGETYPE = re.compile(r"^(?:[A-Z]{2,5}[0-9]?-)?(TimedStorage-[A-Za-z0-9-]+)$")
+
+# dynamodb throughput, keyed by (group, usagetype suffix) -> our name. the group
+# is what keeps the IA table class and global-table replicated writes out.
+_DDB_OFFER = "AmazonDynamoDB"
+_DDB_SKUS = {
+    ("DDB-ReadUnits", "ReadCapacityUnit-Hrs"): "read_capacity_unit_hourly",
+    ("DDB-WriteUnits", "WriteCapacityUnit-Hrs"): "write_capacity_unit_hourly",
+    ("DDB-ReadUnits", "ReadRequestUnits"): "read_request_unit",
+    ("DDB-WriteUnits", "WriteRequestUnits"): "write_request_unit",
+}
 
 
 def _get_json(url: str) -> dict:
@@ -140,6 +158,18 @@ def _classify_s3(block: str) -> tuple[str, str] | None:
     return ("s3_gb_month", name) if name else None
 
 
+def _classify_ddb(block: str) -> tuple[str, str] | None:
+    """Same contract as `_classify`, for the AmazonDynamoDB offer."""
+    if _attr(block, "locationType") != "AWS Region":
+        return None
+    group = _attr(block, "group")
+    usagetype = _attr(block, "usagetype")
+    for (want_group, suffix), key in _DDB_SKUS.items():
+        if group == want_group and usagetype.endswith(suffix):
+            return ("dynamodb", key)
+    return None
+
+
 def _classify_s3_gda(block: str) -> tuple[str, str] | None:
     """Deep archive storage. Its offer leaves productFamily out, so don't ask."""
     if _attr(block, "locationType") != "AWS Region":
@@ -190,8 +220,10 @@ def _scan(url: str, into: dict, classify=_classify) -> None:
             if current:
                 m = _USD.match(line)
                 if m:
-                    bucket, key = wanted.pop(current)
                     rate = _trim(m.group(1))
+                    if float(rate) == 0:
+                        continue  # a free allowance tier, not this sku's rate
+                    bucket, key = wanted.pop(current)
                     if bucket == "flat":
                         into[key] = rate
                     else:
@@ -239,9 +271,32 @@ def _s3_only(regions: list[str]) -> None:
     _write(have)
 
 
+def _ddb_only(regions: list[str]) -> None:
+    """Refresh the dynamodb rates in place, leaving every other rate alone."""
+    table = json.loads(OUT.read_text())
+    have: dict[str, dict] = table["regions"]
+    urls = _region_urls(_DDB_OFFER)
+    for region in regions or sorted(have):
+        if region not in have or region not in urls:
+            print(f"  {region} not in the table, skipped", file=sys.stderr)
+            continue
+        print(f"{region} ...", file=sys.stderr, flush=True)
+        row: dict = {}
+        _scan(urls[region], row, _classify_ddb)
+        rates = row.get("dynamodb")
+        if len(rates or {}) < len(_DDB_SKUS):  # a partial read is worse than none
+            print(f"  incomplete dynamodb rates for {region}, kept", file=sys.stderr)
+            continue
+        have[region]["dynamodb"] = rates
+    _write(have)
+
+
 def main(argv: list[str]) -> None:
     if "--s3" in argv:
         _s3_only([a for a in argv if a != "--s3"])
+        return
+    if "--dynamodb" in argv:
+        _ddb_only([a for a in argv if a != "--dynamodb"])
         return
 
     ec2 = _region_urls("AmazonEC2")
@@ -249,6 +304,7 @@ def main(argv: list[str]) -> None:
     elb = _region_urls("AWSELB")
     s3 = _region_urls("AmazonS3")
     gda = _region_urls(_S3_GDA_OFFER)
+    ddb = _region_urls(_DDB_OFFER)
     targets = argv or sorted(set(ec2) & set(vpc) & set(elb))
 
     out: dict[str, dict] = {}
@@ -261,6 +317,8 @@ def main(argv: list[str]) -> None:
             _scan(s3[region], row, _classify_s3)
         if region in gda:
             _scan(gda[region], row, _classify_s3_gda)
+        if region in ddb:
+            _scan(ddb[region], row, _classify_ddb)
         if not row.get("ec2_family_large_hourly"):
             print(f"  no ec2 rates for {region}, skipped", file=sys.stderr)
             continue
