@@ -52,13 +52,21 @@ class WasteCollector:
                     out.append(self._rec(
                         "ebs", "unattached-ebs", vol.volume_id, region,
                         f"Unattached {vol.volume_type or 'volume'} ({vol.size} GiB) — delete",
-                        pricing.ebs_monthly(vol.volume_type, vol.size),
+                        pricing.ebs_monthly(
+                            vol.volume_type, vol.size, region, vol.iops, vol.throughput
+                        ),
                     ))
                 elif vol.state == "in-use" and vol.volume_type == "gp2":  # migrate to gp3
+                    # gp2 iops come off the size; gp3 must be provisioned to match
+                    # and that is billed, so a large volume saves less than the
+                    # storage delta suggests
+                    saving = pricing.ebs_gp2_to_gp3_monthly(vol.size, region, vol.iops or None)
+                    if saving <= 0:  # parity costs more than the cheaper storage saves
+                        continue
                     out.append(self._rec(
                         "ebs", "gp2-gp3", vol.volume_id, region,
                         f"gp2 -> gp3 migration ({vol.size} GiB) — cheaper, same baseline performance",
-                        pricing.ebs_gp2_to_gp3_monthly(vol.size),
+                        saving,
                     ))
         return out
 

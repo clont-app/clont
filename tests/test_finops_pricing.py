@@ -25,11 +25,54 @@ def test_ebs_monthly_unknown_type_falls_back_to_default():
     assert pricing.ebs_monthly("mystery", 10) == pricing._EBS_DEFAULT * 10
 
 
-def test_ebs_gp2_to_gp3_saving_is_rate_delta():
+def test_ebs_gp2_to_gp3_saving_is_rate_delta_on_a_small_volume():
+    # under 1000 GiB gp2's baseline iops fit in gp3's free 3000, so only the
+    # 3 MiBps gp2 gives above gp3's free 125 comes off the storage delta
     size = 200
-    expected = (Decimal("0.10") - Decimal("0.08")) * size
+    expected = (Decimal("0.10") - Decimal("0.08")) * size - Decimal("0.04") * 3
     assert pricing.ebs_gp2_to_gp3_monthly(size) == expected
     assert pricing.ebs_gp2_to_gp3_monthly(0) == Decimal(0)
+
+
+def test_ebs_iops_and_throughput_are_billed_above_the_free_tier():
+    region = pricing.BASE_REGION
+    storage = Decimal("0.08") * 500
+    quote = pricing.ebs_quote("gp3", 500, region, iops=6000, throughput_mbps=250)
+    assert quote.amount == storage + Decimal("0.005") * 3000 + Decimal("0.04") * 125
+    assert not quote.approximate
+    # exactly the free baseline costs nothing extra
+    assert pricing.ebs_quote("gp3", 500, region, 3000, 125).amount == storage
+
+
+def test_io2_bills_every_provisioned_iop():
+    region = pricing.BASE_REGION
+    quote = pricing.ebs_quote("io2", 100, region, iops=5000)
+    assert quote.amount == Decimal("0.125") * 100 + Decimal("0.065") * 5000
+
+
+def test_a_volume_type_with_no_iops_sku_bills_only_storage():
+    # gp2's `Iops` is the size-derived baseline; st1/sc1 have none at all
+    region = pricing.BASE_REGION
+    assert pricing.ebs_quote("gp2", 1000, region, iops=3000).amount == Decimal("0.10") * 1000
+    assert pricing.ebs_quote("st1", 1000, region, iops=500).amount == Decimal("0.045") * 1000
+
+
+def test_gp2_to_gp3_subtracts_the_iops_needed_for_parity():
+    size = 4000  # 12000 gp2 iops, 9000 of them billable on gp3
+    storage_delta = (Decimal("0.10") - Decimal("0.08")) * size
+    parity = Decimal("0.005") * 9000 + Decimal("0.04") * 125
+    assert pricing.ebs_gp2_to_gp3_monthly(size, pricing.BASE_REGION) == storage_delta - parity
+
+
+def test_gp2_to_gp3_never_advises_a_negative_saving():
+    # a caller-provided iops number can outrun the storage delta; floor at zero
+    assert pricing.ebs_gp2_to_gp3_monthly(100, pricing.BASE_REGION, iops=16000) == Decimal(0)
+
+
+def test_gp2_performance_matches_what_aws_delivers():
+    assert pricing.gp2_performance(10) == (100, 128)  # the 100 iops floor
+    assert pricing.gp2_performance(500) == (1500, 250)  # 3 iops/GiB, fast throughput
+    assert pricing.gp2_performance(20000) == (16000, 250)  # capped at 16k
 
 
 def test_snapshot_monthly_scales_with_size():
@@ -48,15 +91,41 @@ def test_pricing_returns_decimal_not_float():
 # --- ec2 instance rates -----------------------------------------------------
 
 
-def test_instance_hourly_known_family_scales_by_size():
+def test_instance_hourly_is_the_quoted_rate_per_type():
     assert pricing.instance_hourly("m5.large") == Decimal("0.096")
-    assert pricing.instance_hourly("m5.4xlarge") == Decimal("0.096") * 8
-    assert pricing.instance_hourly("m5.medium") == Decimal("0.096") / 2
+    assert pricing.instance_hourly("m5.4xlarge") == Decimal("0.768")
+    for itype in ("m5.large", "m5.4xlarge", "c5.metal"):
+        assert not pricing.instance_quote(itype, pricing.BASE_REGION).approximate
+
+
+def test_a_high_memory_type_is_not_its_family_scaled():
+    # the reason the table is per type: 32 TB of ram is not 448 larges
+    quote = pricing.instance_quote("u7in-32tb.224xlarge", pricing.BASE_REGION)
+    assert not quote.approximate
+    assert quote.amount > Decimal(300)
+    # the family table carried no `.large` for it, so scaling priced 32 TB at cents
+    scaled = pricing._FAMILY_DEFAULT_HOURLY * pricing._size_factor("224xlarge")
+    assert quote.amount > scaled * 5
+
+
+def test_a_size_aws_does_not_sell_scales_off_the_family():
+    # nobody can launch m5.medium, so it can only ever be a scaled guess
+    quote = pricing.instance_quote("m5.medium", pricing.BASE_REGION)
+    assert quote.amount == Decimal("0.096") / 2
+    assert quote.approximate
 
 
 def test_instance_hourly_unknown_family_falls_back():
     # A family we've never priced still costs something, scaled by its size.
     assert pricing.instance_hourly("zz9.2xlarge") == pricing._FAMILY_DEFAULT_HOURLY * 4
+
+
+def test_unlisted_sizes_still_scale():
+    # a size launched after the table was generated, and its metal spelling
+    assert pricing._size_factor("7xlarge") == Decimal(14)
+    assert pricing._size_factor("192xlarge") == Decimal(384)
+    assert pricing._size_factor("metal-48xl") == Decimal(96)
+    assert pricing._size_factor("mystery") == Decimal(1)
 
 
 def test_instance_hourly_never_returns_zero():
@@ -88,6 +157,23 @@ def test_every_region_in_the_table_resolves():
         assert quote.region == region, f"{region} fell back"
         assert not quote.approximate
         assert quote.amount > 0
+
+
+def test_every_region_prices_instances_per_type():
+    # a thin row reads as a real table and quietly scales everything off m5
+    for region in pricing.regions():
+        types = pricing._REGIONS[region].get("ec2_hourly", {})
+        assert len(types) > 100, f"{region} carries {len(types)} instance types"
+
+
+def test_every_region_prices_the_gp3_performance_it_sells():
+    # storage without the iops sku understates every gp2 -> gp3 saving
+    for region in pricing.regions():
+        row = pricing._REGIONS[region]
+        if "gp3" not in row.get("ebs_gb_month", {}):
+            continue
+        assert "gp3" in row.get("ebs_iops_month", {}), f"{region} has no gp3 iops rate"
+        assert "gp3" in row.get("ebs_throughput_month", {}), f"{region} has no gp3 mbps rate"
 
 
 def test_a_region_we_price_differs_from_virginia_somewhere():

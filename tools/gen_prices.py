@@ -14,6 +14,11 @@ scanned line by line and never held in memory — `json.load` on one wants more
 RAM than most machines will give it. Products come before terms in the file, so
 a single sequential pass collects the SKUs it wants, then their rates.
 
+EC2 rates are per *instance type*, not per family: AWS prices are not linear in
+size (`u7in-32tb.224xlarge` is $361/hr, `g6f.xlarge` is 41% under its family's
+`.large` x2, c4 is a shade under). A family table scaled by the size factor got
+199 of 1249 us-east-1 types wrong by more than 10%.
+
 Everything but the load balancer lives in the AmazonEC2 offer (NAT gateway and
 EBS included); only the ALB hourly comes from AWSELB. AmazonVPC carries the idle
 public IPv4 charge. S3 storage is its own offer, and its shards are ~0.5 MB —
@@ -26,6 +31,10 @@ Deep Archive is the exception: the AmazonS3 offer has no `TimedStorage-GDA-ByteH
 (only `GDA-Staging`, which is staging overhead at 20x the rate), the real one sits
 in the separate AmazonS3GlacierDeepArchive offer — and there the products carry no
 `productFamily`, so it needs its own classifier.
+
+Provisioned IOPS and gp3 throughput are their own skus (`System Operation` /
+`Provisioned Throughput`). Throughput is quoted per **GiBps-month**, so it is
+divided by 1024 to land on the per-MiBps rate everything else speaks.
 
 Tiered rates (s3 standard, rrs) keep the first *charged* tier — the small-volume
 rate, which is what a bucket under 50 TB actually pays. A leading `0.00` tier is
@@ -45,18 +54,34 @@ import re
 import sys
 import urllib.request
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 BULK = "https://pricing.us-east-1.amazonaws.com"
 OUT = Path(__file__).resolve().parent.parent / "clont" / "finops" / "aws" / "prices.json"
 
-# one rate per family at .large; other sizes scale by the normalization factor
-_LARGE = re.compile(r"^([a-z0-9\-]+)\.large$")
+_INSTANCE_TYPE = re.compile(r"^[a-z0-9\-]+\.[a-z0-9\-]+$")
 _PRODUCT_START = re.compile(r'^ {4}"([A-Z0-9]{10,20})" : \{')
 _TERM_SKU = re.compile(r'^ {6}"([A-Z0-9]{10,20})" : \{')
 _USD = re.compile(r'^\s*"USD" : "([0-9.]+)"')
+_UNIT = re.compile(r'^\s*"unit" : "([^"]*)"')
+
+# a rate quoted per GiBps-month is 1024 of the per-MiBps rate we store
+_UNIT_DIVISOR = {"GiBps-mo": 1024}
 
 _EBS_TYPES = {"gp3", "gp2", "io1", "io2", "st1", "sc1", "standard"}
+
+# `.metal` sits in its own product family; same attribute filters otherwise
+_COMPUTE_FAMILIES = {"Compute Instance", "Compute Instance (bare metal)"}
+
+# provisioned iops skus, keyed by the usagetype suffix. io2's tier2/tier3 are
+# cheaper per iops above 32k/64k; keeping tier1 over-states the cost, which
+# under-states every saving that subtracts it.
+_IOPS_SKUS = {
+    "EBS:VolumeP-IOPS.gp3": "gp3",
+    "EBS:VolumeP-IOPS.piops": "io1",
+    "EBS:VolumeP-IOPS.io2": "io2",
+}
 
 # s3 storage classes, keyed by usagetype so the staging/overhead skus (which
 # carry the same volumeType as real storage) can't be mistaken for a rate
@@ -114,7 +139,7 @@ def _classify(block: str) -> tuple[str, str] | None:
     usagetype = _attr(block, "usagetype")
     if _attr(block, "locationType") != "AWS Region":
         return None  # Outposts / Local Zones / Wavelength are not the region rate
-    if family == "Compute Instance":
+    if family in _COMPUTE_FAMILIES:
         if (
             _attr(block, "operatingSystem") != "Linux"
             or _attr(block, "tenancy") != "Shared"
@@ -123,11 +148,18 @@ def _classify(block: str) -> tuple[str, str] | None:
             or _attr(block, "licenseModel") != "No License required"
         ):
             return None
-        m = _LARGE.match(_attr(block, "instanceType"))
-        return ("ec2_family_large_hourly", m.group(1)) if m else None
+        itype = _attr(block, "instanceType")
+        return ("ec2_hourly", itype) if _INSTANCE_TYPE.match(itype) else None
     if family == "Storage":
         vol = _attr(block, "volumeApiName")
         return ("ebs_gb_month", vol) if vol in _EBS_TYPES else None
+    if family == "System Operation":
+        for suffix, vol in _IOPS_SKUS.items():
+            if usagetype.endswith(suffix):  # tier2/tier3 end past the type, so they miss
+                return ("ebs_iops_month", vol)
+        return None
+    if family == "Provisioned Throughput" and usagetype.endswith("EBS:VolumeP-Throughput.gp3"):
+        return ("ebs_throughput_month", "gp3")
     if family == "Storage Snapshot" and usagetype.endswith("EBS:SnapshotUsage"):
         return ("flat", "snapshot_gb_month")
     if family == "NAT Gateway" and usagetype.endswith("NatGateway-Hours"):
@@ -193,6 +225,7 @@ def _scan(url: str, into: dict, classify=_classify) -> None:
     in_product = False
     in_terms = False
     current = ""
+    divisor = 1
 
     with urllib.request.urlopen(url, timeout=900) as resp:
         for raw in resp:
@@ -216,13 +249,20 @@ def _scan(url: str, into: dict, classify=_classify) -> None:
             m = _TERM_SKU.match(line)
             if m:
                 current = m.group(1) if m.group(1) in wanted else ""
+                divisor = 1
                 continue
             if current:
+                m = _UNIT.match(line)
+                if m:
+                    divisor = _UNIT_DIVISOR.get(m.group(1), 1)
+                    continue
                 m = _USD.match(line)
                 if m:
                     rate = _trim(m.group(1))
                     if float(rate) == 0:
                         continue  # a free allowance tier, not this sku's rate
+                    if divisor != 1:
+                        rate = _trim(f"{Decimal(rate) / divisor:f}")
                     bucket, key = wanted.pop(current)
                     if bucket == "flat":
                         into[key] = rate
@@ -319,7 +359,7 @@ def main(argv: list[str]) -> None:
             _scan(gda[region], row, _classify_s3_gda)
         if region in ddb:
             _scan(ddb[region], row, _classify_ddb)
-        if not row.get("ec2_family_large_hourly"):
+        if not row.get("ec2_hourly"):
             print(f"  no ec2 rates for {region}, skipped", file=sys.stderr)
             continue
         out[region] = row

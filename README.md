@@ -446,11 +446,16 @@ everything comes out of `clont/finops/aws/prices.json` — public on-demand list
 prices, generated offline from the aws price list bulk api. nothing is fetched at
 runtime and no iam grant is involved.
 
-they're estimates and clont says so. one rate per instance family at `.large`,
-scaled by size; commitment discounts and provisioned iops aren't modelled. a
-resource in a region that's missing from the table gets priced at us-east-1 rates
-and marked approximate, so the report says "estimated at us-east-1 rates" instead
-of passing a guess off as a quote.
+instance rates are per *type*, per region, as aws publishes them — ~1400 types
+including `.metal`. ebs carries the provisioned iops and gp3 throughput skus too,
+so a gp2 -> gp3 saving is net of the performance the gp3 has to buy back.
+
+they're still estimates and clont says so. commitment discounts are flat guesses,
+io2's cheaper iops tiers above 32k aren't modelled, and a type launched after the
+table was generated falls back to its family's `.large` scaled by size. a resource
+in a region that's missing from the table gets priced at us-east-1 rates and
+marked approximate, so the report says "estimated at us-east-1 rates" instead of
+passing a guess off as a quote.
 
 public ipv4 has its own key (`public_ipv4_hourly`, the in-use sku). it's the same
 $0.005/hr as an idle elastic ip today, but they're separate skus and aws can move

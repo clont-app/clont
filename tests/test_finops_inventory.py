@@ -296,6 +296,15 @@ def test_uncovered_hourly_sums_the_price_table():
     assert inv.uncovered_monthly == inv.uncovered_hourly * pricing.HOURS_PER_MONTH
 
 
+def test_uncovered_hourly_prices_each_instance_in_its_own_region():
+    from clont.finops.aws import pricing
+
+    inv = build(FakeProvider(instances={"sa-east-1": [instance("i-1", az="sa-east-1a")]}))
+    assert inv.uncovered_hourly == pricing.instance_hourly("m5.large", "sa-east-1")
+    # sao paulo is dearer than virginia; virginia rates understate the commitment
+    assert inv.uncovered_hourly > pricing.instance_hourly("m5.large", "us-east-1")
+
+
 def test_build_caches_within_the_ttl():
     provider = FakeProvider(instances={"us-east-1": [instance("i-1")]})
     first = inventory.build(provider)
