@@ -688,6 +688,32 @@ def test_a_report_without_the_amortization_columns_falls_back_to_unblended():
     assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("730.00")}
 
 
+def test_an_ri_purchase_is_not_zeroed_when_nothing_can_spread_it():
+    # the arn says which reservation, but with no effective-cost or unused-fee
+    # column there is nothing to spread onto — zeroing here would lose the $1200
+    columns = [*_BASE_COLUMNS, "reservation/ReservationARN"]
+    rows = [
+        _row("2024-01-01", "1200.00", _EC2, kind="Fee") | {"reservation/ReservationARN": _ARN},
+        _row("2024-01-02", "0", _EC2, kind="DiscountedUsage"),
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(columns, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("1200.00")}
+
+
+def test_a_savings_plan_without_the_columns_still_nets_out():
+    # unblended already cancels covered usage against its negation, so zeroing the
+    # negation alone would count the plan twice
+    rows = [
+        _row("2024-01-01", "10.00", _EC2, kind="SavingsPlanCoveredUsage"),
+        _row("2024-01-01", "-10.00", _EC2, kind="SavingsPlanNegation"),
+        _row("2024-01-01", "24.00", _EC2, kind="SavingsPlanRecurringFee"),
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_BASE_COLUMNS, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("24.00")}
+
+
 def test_changing_amortization_bypasses_the_cache():
     rows = [
         _row("2024-01-01", "0", _EC2, kind="DiscountedUsage")

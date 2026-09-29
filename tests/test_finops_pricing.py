@@ -57,6 +57,19 @@ def test_a_volume_type_with_no_iops_sku_bills_only_storage():
     assert pricing.ebs_quote("st1", 1000, region, iops=500).amount == Decimal("0.045") * 1000
 
 
+def test_free_performance_is_skipped_by_type_not_by_a_missing_rate(monkeypatch):
+    # every caller sends the volume's iops, gp2's included, so a gp2 sku appearing
+    # in the table must not start charging for performance that ships free
+    region = pricing.BASE_REGION
+    monkeypatch.setitem(pricing._REGIONS[region]["ebs_iops_month"], "gp2", "0.005")
+    monkeypatch.setitem(pricing._REGIONS[region]["ebs_throughput_month"], "io2", "0.04")
+
+    assert pricing.ebs_quote("gp2", 1000, region, iops=3000).amount == Decimal("0.10") * 1000
+    # and io2 bills iops only — throughput comes with the iops, it is not a sku
+    io2 = pricing.ebs_quote("io2", 100, region, iops=5000, throughput_mbps=1000)
+    assert io2.amount == Decimal("0.125") * 100 + Decimal("0.065") * 5000
+
+
 def test_gp2_to_gp3_subtracts_the_iops_needed_for_parity():
     size = 4000  # 12000 gp2 iops, 9000 of them billable on gp3
     storage_delta = (Decimal("0.10") - Decimal("0.08")) * size
