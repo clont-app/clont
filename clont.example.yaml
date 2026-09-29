@@ -23,6 +23,10 @@ aws:
       refresh_minutes: 60          # AWS rewrites it a few times a day
       include_linked: false        # true = payer report: every linked account,
                                    # each reported under its own alias
+      amortize: true               # spread ri/sp commitments over their term;
+                                   # false = raw unblended, upfront fees land on one day
+      include_credits: true        # false = gross spend, before credits and refunds
+      include_tax: true            # false = drop tax lines
     # Payer only: discover the org's members and assume `role_name` in each, so
     # a new account is watched without editing this file. Members inherit these
     # regions but get no cur of their own — spend comes from the payer report.

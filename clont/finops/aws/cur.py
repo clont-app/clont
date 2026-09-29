@@ -20,6 +20,16 @@ A payer's report (`include_linked`) is grouped by `lineItem/UsageAccountId`, and
 each linked account's records carry that account's own alias — so the digest,
 spike, forecast, budget and showback detectors all work per account without
 knowing anything about organizations.
+
+Costs are **amortized** by default: an all-upfront RI or a savings plan fee is
+one huge unblended row on the day it is bought, which reads as a spike, wrecks
+the forecast and blows a budget for a month that didn't actually cost that. So
+the effective-cost columns are used instead — covered usage is priced at what
+the commitment makes it cost, and only the *unused* part of a fee is charged.
+
+Credits, refunds and tax are not usage: a credit landing on EC2 makes EC2 look
+like it got cheaper for a day. They keep their own service bucket (the names
+Cost Explorer uses) so the totals still net out while no service's trend moves.
 """
 
 from __future__ import annotations
@@ -67,6 +77,29 @@ _SERVICE = (
 
 _USAGE_AMOUNT = ("lineItem/UsageAmount", "line_item_usage_amount")
 _RESOURCE = ("lineItem/ResourceId", "line_item_resource_id")
+
+# amortization columns: what a covered hour really costs, and the slice of a
+# commitment nobody used. legacy cur first, then the data-exports spelling
+_RI_EFFECTIVE = ("reservation/EffectiveCost", "reservation_effective_cost")
+_RI_UNUSED_UPFRONT = (
+    "reservation/UnusedAmortizedUpfrontFeeForBillingPeriod",
+    "reservation_unused_amortized_upfront_fee_for_billing_period",
+)
+_RI_UNUSED_RECURRING = ("reservation/UnusedRecurringFee", "reservation_unused_recurring_fee")
+_RI_ARN = ("reservation/ReservationARN", "reservation_reservation_a_r_n")
+_SP_EFFECTIVE = (
+    "savingsPlan/SavingsPlanEffectiveCost",
+    "savings_plan_savings_plan_effective_cost",
+)
+_SP_TOTAL_COMMITMENT = (
+    "savingsPlan/TotalCommitmentToDate",
+    "savings_plan_total_commitment_to_date",
+)
+_SP_USED_COMMITMENT = ("savingsPlan/UsedCommitment", "savings_plan_used_commitment")
+
+# charge types that move the bill without saying anything about consumption.
+# value = the service bucket they land in, spelled as cost explorer does
+_ADJUSTMENTS = {"Credit": "Credit", "Refund": "Refund", "Tax": "Tax"}
 
 _ABSENT = {"NoSuchKey", "NoSuchBucket", "404"}
 
@@ -131,6 +164,22 @@ class _Spend:
             else:
                 self.combos.add(tags)
         self.totals[(day, account, service, transfer, tags)] += amount
+
+
+@dataclass(frozen=True)
+class _Charges:
+    """How non-usage line types are counted, straight off the cur config."""
+
+    amortize: bool = True
+    credits: bool = True
+    tax: bool = True
+
+    @classmethod
+    def of(cls, config) -> _Charges:
+        return cls(config.amortize, config.include_credits, config.include_tax)
+
+    def keeps(self, charge: str) -> bool:
+        return self.tax if charge == "Tax" else self.credits
 
 
 _cache: dict[str, tuple[float, _Spend]] = {}
@@ -236,6 +285,7 @@ def _linked_names(provider: Provider, config, spend: _Spend) -> dict[str, str]:
 
 def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = ()) -> _Spend:
     folders = _billing_periods(period)
+    charges = _Charges.of(config)
     key = "|".join(
         [
             str(provider.alias),
@@ -243,6 +293,8 @@ def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = (
             config.prefix,
             config.report_name,
             str(config.include_linked),
+            # different charge handling is a different aggregation, not a cache hit
+            str(charges),
             *folders,
             *tags,
         ]
@@ -267,7 +319,14 @@ def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = (
         _check_format(manifest, folder)
         for data_key in manifest.get("reportKeys", []):
             _read_into(
-                s3, config.bucket, data_key, only, spend, tags, split=config.include_linked
+                s3,
+                config.bucket,
+                data_key,
+                only,
+                spend,
+                tags,
+                split=config.include_linked,
+                charges=charges,
             )
 
     absent = [k for k in tags if k not in spend.seen_tags]
@@ -342,12 +401,14 @@ def _read_into(
     tags: tuple[str, ...] = (),
     *,
     split: bool = False,
+    charges: _Charges | None = None,
 ) -> None:
     """Stream one gzipped csv part, folding its rows into `spend`.
 
     `only` keeps just that usage account's rows; `split` groups whatever is left
     by usage account instead of lumping the whole payer report together.
     """
+    charges = charges or _Charges()
     body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     with gzip.GzipFile(fileobj=body) as gz:
         reader = csv.DictReader(io.TextIOWrapper(gz, encoding="utf-8"))
@@ -357,22 +418,26 @@ def _read_into(
             owner = _pick(row, _ACCOUNT) if (only is not None or split) else ""
             if only is not None and owner and owner != only:
                 continue
+            charge = _ADJUSTMENTS.get(_pick(row, _KIND))
+            if charge and not charges.keeps(charge):
+                continue
             day = _day(row)
-            amount = _amount(row)
+            amount = _amount(row, amortize=charges.amortize)
             if day is None:
                 continue
-            service = _service(row)
+            product = _service(row)
             # before the zero-cost skip below: a free-tier dynamodb row carries no
             # money but real traffic, and dropping it would understate the capacity
             # a provisioned table needs
-            _ddb_into(row, service, owner if split else "", amount, spend)
+            _ddb_into(row, product, owner if split else "", amount, spend)
             if not amount:
                 continue
             spend.add(
                 day,
                 owner if split else "",
-                service,
-                transfer_bucket(_pick(row, _USAGE_TYPE), service),
+                charge or product,
+                # a credit with an ec2 usage type is not data transfer
+                "" if charge else transfer_bucket(_pick(row, _USAGE_TYPE), product),
                 _row_tags(row, columns),
                 amount,
             )
@@ -459,9 +524,61 @@ def _start(row: dict) -> datetime | None:
         return None
 
 
-def _amount(row: dict) -> Decimal:
+def _amount(row: dict, *, amortize: bool = True) -> Decimal:
+    """What the line costs, with ri/sp commitments spread over their term.
+
+    Unblended puts the whole upfront fee on one day and prices covered usage at
+    zero, so the amortized view needs a different column per line type. A report
+    that carries no such column falls back to unblended — better a lump than a
+    silently dropped charge.
+    """
+    unblended = _decimal(_pick(row, _COST))
+    if not amortize:
+        return unblended
+    kind = _pick(row, _KIND)
+    if kind == "DiscountedUsage":  # ri-covered hour, unblended is 0
+        return _first(row, (_RI_EFFECTIVE,), unblended)
+    if kind == "SavingsPlanCoveredUsage":
+        return _first(row, (_SP_EFFECTIVE,), unblended)
+    if kind in ("SavingsPlanNegation", "SavingsPlanUpfrontFee"):
+        # the negation just cancels the on-demand price of covered usage, and the
+        # upfront is amortized through the recurring-fee and covered-usage lines
+        return Decimal(0)
+    if kind == "RIFee":
+        # only what nobody used — the used part is already on DiscountedUsage
+        return _first(row, (_RI_UNUSED_UPFRONT, _RI_UNUSED_RECURRING), unblended, add=True)
+    if kind == "SavingsPlanRecurringFee":
+        total = _maybe(row, _SP_TOTAL_COMMITMENT)
+        if total is None:
+            return unblended
+        return total - (_maybe(row, _SP_USED_COMMITMENT) or Decimal(0))
+    if kind == "Fee" and _pick(row, _RI_ARN):
+        return Decimal(0)  # all-upfront ri purchase, spread over its RIFee rows
+    return unblended
+
+
+def _first(
+    row: dict,
+    columns: tuple[tuple[str, ...], ...],
+    fallback: Decimal,
+    *,
+    add: bool = False,
+) -> Decimal:
+    """The named amortization columns, or `fallback` when the report has none."""
+    found = [v for v in (_maybe(row, names) for names in columns) if v is not None]
+    if not found:
+        return fallback
+    return sum(found, Decimal(0)) if add else found[0]
+
+
+def _maybe(row: dict, names: tuple[str, ...]) -> Decimal | None:
+    value = _pick(row, names)
+    return _decimal(value) if value else None
+
+
+def _decimal(value: str) -> Decimal:
     try:
-        return Decimal(_pick(row, _COST) or "0")
+        return Decimal(value or "0")
     except InvalidOperation:
         return Decimal(0)
 
@@ -474,6 +591,6 @@ def _usage(row: dict) -> Decimal:
 
 
 def _service(row: dict) -> str:
-    # tax/credit/refund lines carry no product, but their line-item type is
-    # exactly how Cost Explorer labels them
+    # a line with no product (a fee, an adjustment) is labelled by its line-item
+    # type, which is exactly how Cost Explorer spells those
     return _pick(row, _SERVICE) or _pick(row, _KIND) or "unknown"

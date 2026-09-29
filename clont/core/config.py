@@ -108,6 +108,11 @@ class CURConfig(_Model):
     Set it and spend comes from the report instead of Cost Explorer — same
     numbers, no per-request charge. Legacy CUR only: gzip + csv, the layout
     whose manifest sits at the billing-period root.
+
+    `amortize` is what keeps an all-upfront RI or savings plan from reading as a
+    one-day spike; turn it off only to reconcile against an unblended invoice.
+    Dropping credits or tax gives gross spend — useful when a credit pile is
+    masking what the account actually consumes.
     """
 
     bucket: str                      # bucket the report is delivered to
@@ -116,6 +121,9 @@ class CURConfig(_Model):
     region: str = "us-east-1"        # bucket region
     refresh_minutes: float = 60.0    # min gap between reads; AWS rewrites it a few times a day
     include_linked: bool = False     # payer report: count every linked account, not just this one
+    amortize: bool = True            # spread ri/sp commitments over their term, not one day
+    include_credits: bool = True     # count credits and refunds against spend
+    include_tax: bool = True         # count tax as spend
 
 
 class MembersConfig(_Model):
@@ -317,6 +325,7 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #       report_name: clont-cur
 #       prefix: reports
 #       include_linked: true     # payer report: every linked account, split per account
+#       amortize: true           # ri/sp fees spread over the term, not a one-day spike
 #     members:                   # payer only: discover the org and assume this role in each
 #       role_name: clont-readonly
 

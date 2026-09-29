@@ -570,3 +570,196 @@ def test_a_report_with_no_usage_type_column_has_no_transfer_dimension():
     records = _collect(_FakeProvider(_FakeS3(_objects())))
 
     assert {r.dimensions for r in records} == {None}
+
+
+# --- amortization: commitments must not land on one day ---------------------
+
+
+_RI_COLUMNS = [
+    *_BASE_COLUMNS,
+    "reservation/EffectiveCost",
+    "reservation/UnusedAmortizedUpfrontFeeForBillingPeriod",
+    "reservation/UnusedRecurringFee",
+    "reservation/ReservationARN",
+]
+_SP_COLUMNS = [
+    *_BASE_COLUMNS,
+    "savingsPlan/SavingsPlanEffectiveCost",
+    "savingsPlan/TotalCommitmentToDate",
+    "savingsPlan/UsedCommitment",
+]
+_EC2 = "Amazon Elastic Compute Cloud"
+_ARN = "arn:aws:ec2:us-east-1:111:reserved-instances/r-1"
+
+
+def _amounts(records) -> dict[tuple[str, date], Decimal]:
+    return {(r.service, r.period.start): r.cost.amount for r in records}
+
+
+def test_reserved_usage_is_priced_at_its_effective_cost():
+    # the hour itself is free on the unblended column; the money is in the ri
+    rows = [
+        _row("2024-01-01", "0", _EC2, kind="DiscountedUsage")
+        | {"reservation/EffectiveCost": "2.40"},
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_RI_COLUMNS, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("2.40")}
+
+
+def test_an_all_upfront_purchase_is_not_a_one_day_spike():
+    rows = [
+        _row("2024-01-01", "3.00", _EC2),
+        # the lump: a year of ec2 bought on day one
+        _row("2024-01-01", "8760.00", _EC2, kind="Fee") | {"reservation/ReservationARN": _ARN},
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_RI_COLUMNS, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("3.00")}
+
+
+def test_a_fee_with_no_reservation_is_still_spend():
+    # support and other flat fees are type Fee too, and they are real money
+    rows = [_row("2024-01-01", "100.00", "AWS Support (Business)", kind="Fee")]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_RI_COLUMNS, rows))))
+
+    assert _amounts(records) == {("AWS Support (Business)", date(2024, 1, 1)): Decimal("100.00")}
+
+
+def test_an_ri_fee_counts_only_the_part_nobody_used():
+    rows = [
+        _row("2024-01-01", "730.00", _EC2, kind="RIFee")
+        | {
+            "reservation/UnusedAmortizedUpfrontFeeForBillingPeriod": "10.00",
+            "reservation/UnusedRecurringFee": "5.00",
+        },
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_RI_COLUMNS, rows))))
+
+    # the used part is already on the DiscountedUsage lines; counting the whole
+    # fee here would bill the reservation twice
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("15.00")}
+
+
+def test_savings_plan_covered_usage_replaces_its_on_demand_price():
+    rows = [
+        _row("2024-01-01", "10.00", _EC2, kind="SavingsPlanCoveredUsage")
+        | {"savingsPlan/SavingsPlanEffectiveCost": "6.00"},
+        _row("2024-01-01", "-10.00", _EC2, kind="SavingsPlanNegation"),
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_SP_COLUMNS, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("6.00")}
+
+
+def test_savings_plan_fees_count_only_the_unused_commitment():
+    rows = [
+        _row("2024-01-01", "0", _EC2, kind="SavingsPlanUpfrontFee")
+        | {"savingsPlan/TotalCommitmentToDate": "100.00"},
+        _row("2024-01-01", "24.00", _EC2, kind="SavingsPlanRecurringFee")
+        | {"savingsPlan/TotalCommitmentToDate": "24.00", "savingsPlan/UsedCommitment": "18.00"},
+    ]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_SP_COLUMNS, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("6.00")}
+
+
+def test_amortize_off_keeps_the_raw_unblended_numbers():
+    rows = [
+        _row("2024-01-01", "8760.00", _EC2, kind="Fee") | {"reservation/ReservationARN": _ARN},
+        _row("2024-01-01", "0", _EC2, kind="DiscountedUsage")
+        | {"reservation/EffectiveCost": "2.40"},
+    ]
+    provider = _FakeProvider(
+        _FakeS3(_tagged_objects(_RI_COLUMNS, rows)), cur_config=_config(amortize=False)
+    )
+
+    records = _collect(provider)
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("8760.00")}
+
+
+def test_a_report_without_the_amortization_columns_falls_back_to_unblended():
+    # an old report has no effective-cost column; dropping the charge would be
+    # worse than reporting it as the lump it is
+    rows = [_row("2024-01-01", "730.00", _EC2, kind="RIFee")]
+    records = _collect(_FakeProvider(_FakeS3(_tagged_objects(_BASE_COLUMNS, rows))))
+
+    assert _amounts(records) == {(_EC2, date(2024, 1, 1)): Decimal("730.00")}
+
+
+def test_changing_amortization_bypasses_the_cache():
+    rows = [
+        _row("2024-01-01", "0", _EC2, kind="DiscountedUsage")
+        | {"reservation/EffectiveCost": "2.40"},
+        _row("2024-01-01", "8760.00", _EC2, kind="Fee") | {"reservation/ReservationARN": _ARN},
+    ]
+    s3 = _FakeS3(_tagged_objects(_RI_COLUMNS, rows))
+
+    first = _collect(_FakeProvider(s3))
+    second = _collect(_FakeProvider(s3, cur_config=_config(amortize=False)))
+
+    assert sum(r.cost.amount for r in first) == Decimal("2.40")
+    assert sum(r.cost.amount for r in second) == Decimal("8760.00")
+
+
+# --- credits, refunds, tax: not usage ---------------------------------------
+
+
+def test_a_credit_does_not_make_a_service_look_cheaper():
+    objects = _objects(extra=[_row("2024-01-02", "-3.00", _EC2, kind="Credit")])
+
+    records = _collect(_FakeProvider(_FakeS3(objects)))
+
+    # ec2 keeps the day it actually consumed; the credit is its own line
+    assert _amounts(records)[(_EC2, date(2024, 1, 2))] == Decimal("3.00")
+    assert _amounts(records)[("Credit", date(2024, 1, 2))] == Decimal("-3.00")
+    assert sum(r.cost.amount for r in records) == Decimal("4.00")
+
+
+def test_refunds_and_tax_get_their_own_buckets_too():
+    objects = _objects(
+        extra=[
+            _row("2024-01-02", "-1.00", _EC2, kind="Refund"),
+            _row("2024-01-02", "0.40", _EC2, kind="Tax"),
+        ]
+    )
+
+    records = _collect(_FakeProvider(_FakeS3(objects)))
+
+    assert _amounts(records)[("Refund", date(2024, 1, 2))] == Decimal("-1.00")
+    assert _amounts(records)[("Tax", date(2024, 1, 2))] == Decimal("0.40")
+
+
+def test_credits_can_be_dropped_for_gross_spend():
+    objects = _objects(
+        extra=[
+            _row("2024-01-02", "-3.00", _EC2, kind="Credit"),
+            _row("2024-01-02", "-1.00", _EC2, kind="Refund"),
+        ]
+    )
+    provider = _FakeProvider(_FakeS3(objects), cur_config=_config(include_credits=False))
+
+    records = _collect(provider)
+
+    assert {r.service for r in records} == {_EC2, "Amazon Simple Storage Service"}
+    assert sum(r.cost.amount for r in records) == Decimal("7.00")
+
+
+def test_tax_can_be_dropped():
+    objects = _objects(extra=[_row("2024-01-02", "0.40", _EC2, kind="Tax")])
+    provider = _FakeProvider(_FakeS3(objects), cur_config=_config(include_tax=False))
+
+    records = _collect(provider)
+
+    assert "Tax" not in {r.service for r in records}
+
+
+def test_a_discount_stays_on_the_service_it_discounts():
+    # unlike a credit, an edp discount tracks usage, so moving it would make the
+    # service look more expensive than it is billed
+    objects = _objects(extra=[_row("2024-01-02", "-0.30", _EC2, kind="EdpDiscount")])
+
+    records = _collect(_FakeProvider(_FakeS3(objects)))
+
+    assert _amounts(records)[(_EC2, date(2024, 1, 2))] == Decimal("2.70")
