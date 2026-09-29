@@ -85,7 +85,7 @@ _EBS_GB_MONTH = {
 }
 _EBS_DEFAULT = _EBS_GB_MONTH.get("gp2", Decimal("0.10"))
 
-# gp3 provisioned iops and throughput, USD per unit-month, us-east-1.
+# gp3 provisioned iops and throughput, usd per unit-month, us-east-1
 _EBS_IOPS_MONTH = {
     vol: Decimal(rate) for vol, rate in _BASE.get("ebs_iops_month", {}).items()
 }
@@ -93,11 +93,16 @@ _EBS_THROUGHPUT_MONTH = {
     vol: Decimal(rate) for vol, rate in _BASE.get("ebs_throughput_month", {}).items()
 }
 
-# gp3 ships this much performance in the per-GB price; only the excess is billed.
+# which types bill performance on top of storage. gp2/st1/sc1 carry theirs in the
+# per-GB price, so this is a property of ebs, not of whether the table has the sku
+_PROVISIONED_IOPS = {"gp3", "io1", "io2"}
+_PROVISIONED_THROUGHPUT = {"gp3"}
+
+# gp3 ships this much performance in the per-GB price, only the excess is billed
 GP3_FREE_IOPS = Decimal(3000)
 GP3_FREE_THROUGHPUT_MBPS = Decimal(125)
 # what a gp2 volume delivers, so a gp3 replacement can be quoted at parity:
-# 3 iops/GiB capped at 16k, and 250 MiBps from 334 GiB up.
+# 3 iops/GiB capped at 16k, 250 MiBps from 334 GiB up
 _GP2_IOPS_PER_GB = Decimal(3)
 _GP2_IOPS_FLOOR = Decimal(100)
 _GP2_IOPS_CAP = Decimal(16000)
@@ -105,7 +110,7 @@ _GP2_FAST_THROUGHPUT_FROM_GB = 334
 _GP2_THROUGHPUT_MBPS = Decimal(128)
 _GP2_FAST_THROUGHPUT_MBPS = Decimal(250)
 
-# General-purpose rate for a type we don't know; never let a miss cost nothing.
+# general-purpose rate for a type we don't know, never let a miss cost nothing
 _FAMILY_DEFAULT_HOURLY = Decimal(
     _BASE.get("ec2_hourly", {}).get("m5.large", "0.096")
 )
@@ -152,9 +157,9 @@ _DDB_WCU_HOURLY = Decimal(_DDB.get("write_capacity_unit_hourly", "0.00065"))
 # requests one provisioned capacity unit covers in an hour
 DDB_UNIT_REQUESTS_PER_HOUR = Decimal(3600)
 
-# AWS instance-size normalization factors, rebased so large == 1. Only the named
-# sizes are listed; `Nxlarge` and `metal-Nxl` are computed, so a size nobody has
-# launched yet still scales instead of quietly pricing as a large.
+# aws instance-size normalization factors, rebased so large == 1
+# only named sizes here — `Nxlarge` and `metal-Nxl` are computed, so an unseen
+# size still scales instead of quietly pricing as a large
 _SIZE_FACTOR = {
     "nano": Decimal("0.0625"),
     "micro": Decimal("0.125"),
@@ -222,20 +227,24 @@ def _provisioned_quote(
     """What the provisioned performance of one volume costs a month, on top of storage.
 
     gp3 bills iops above 3000 and throughput above 125 MiBps; io1/io2 bill every
-    provisioned iop. A type with no such sku (gp2, st1, sc1) bills nothing extra —
-    its performance is in the per-GB price — so a missing rate is zero, not a gap.
+    provisioned iop. gp2/st1/sc1 bill nothing extra — their performance is in the
+    per-GB price, and a gp2's `iops` is the free size-derived baseline, so they are
+    skipped by type rather than by the rate happening to be missing.
     """
     amount = Decimal(0)
     region_used = region or BASE_REGION
     approximate = region is None
-    free_iops = GP3_FREE_IOPS if volume_type == "gp3" else Decimal(0)
-    charges = (
-        (("ebs_iops_month", volume_type), Decimal(iops or 0) - free_iops),
-        (
-            ("ebs_throughput_month", volume_type),
-            Decimal(throughput_mbps or 0) - GP3_FREE_THROUGHPUT_MBPS,
-        ),
-    )
+    charges = []
+    if volume_type in _PROVISIONED_IOPS:
+        free = GP3_FREE_IOPS if volume_type == "gp3" else Decimal(0)
+        charges.append((("ebs_iops_month", volume_type), Decimal(iops or 0) - free))
+    if volume_type in _PROVISIONED_THROUGHPUT:
+        charges.append(
+            (
+                ("ebs_throughput_month", volume_type),
+                Decimal(throughput_mbps or 0) - GP3_FREE_THROUGHPUT_MBPS,
+            )
+        )
     for path, over in charges:
         if over <= 0:
             continue

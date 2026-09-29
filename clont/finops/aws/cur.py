@@ -97,7 +97,11 @@ _SP_TOTAL_COMMITMENT = (
 )
 _SP_USED_COMMITMENT = ("savingsPlan/UsedCommitment", "savings_plan_used_commitment")
 
-# charge types that move the bill without saying anything about consumption.
+# a report either carries these or it doesn't; without them nothing is amortized
+_RI_AMORTIZED = (_RI_EFFECTIVE, _RI_UNUSED_UPFRONT, _RI_UNUSED_RECURRING)
+_SP_AMORTIZED = (_SP_EFFECTIVE, _SP_TOTAL_COMMITMENT, _SP_USED_COMMITMENT)
+
+# charge types that move the bill without saying anything about consumption,
 # value = the service bucket they land in, spelled as cost explorer does
 _ADJUSTMENTS = {"Credit": "Credit", "Refund": "Refund", "Tax": "Tax"}
 
@@ -179,6 +183,7 @@ class _Charges:
         return cls(config.amortize, config.include_credits, config.include_tax)
 
     def keeps(self, charge: str) -> bool:
+        """Whether an adjustment row is counted — a refund rides with credits."""
         return self.tax if charge == "Tax" else self.credits
 
 
@@ -401,14 +406,13 @@ def _read_into(
     tags: tuple[str, ...] = (),
     *,
     split: bool = False,
-    charges: _Charges | None = None,
+    charges: _Charges = _Charges(),
 ) -> None:
     """Stream one gzipped csv part, folding its rows into `spend`.
 
     `only` keeps just that usage account's rows; `split` groups whatever is left
     by usage account instead of lumping the whole payer report together.
     """
-    charges = charges or _Charges()
     body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     with gzip.GzipFile(fileobj=body) as gz:
         reader = csv.DictReader(io.TextIOWrapper(gz, encoding="utf-8"))
@@ -529,46 +533,46 @@ def _amount(row: dict, *, amortize: bool = True) -> Decimal:
 
     Unblended puts the whole upfront fee on one day and prices covered usage at
     zero, so the amortized view needs a different column per line type. A report
-    that carries no such column falls back to unblended — better a lump than a
-    silently dropped charge.
+    that carries none of them stays unblended *everywhere*, zeroing included —
+    spreading a fee with nothing to spread it onto drops the charge instead of
+    moving it, and unblended at least nets out on its own.
     """
     unblended = _decimal(_pick(row, _COST))
     if not amortize:
         return unblended
     kind = _pick(row, _KIND)
     if kind == "DiscountedUsage":  # ri-covered hour, unblended is 0
-        return _first(row, (_RI_EFFECTIVE,), unblended)
-    if kind == "SavingsPlanCoveredUsage":
-        return _first(row, (_SP_EFFECTIVE,), unblended)
-    if kind in ("SavingsPlanNegation", "SavingsPlanUpfrontFee"):
-        # the negation just cancels the on-demand price of covered usage, and the
-        # upfront is amortized through the recurring-fee and covered-usage lines
-        return Decimal(0)
+        return _amortized(row, (_RI_EFFECTIVE,), unblended)
     if kind == "RIFee":
         # only what nobody used — the used part is already on DiscountedUsage
-        return _first(row, (_RI_UNUSED_UPFRONT, _RI_UNUSED_RECURRING), unblended, add=True)
+        return _amortized(row, (_RI_UNUSED_UPFRONT, _RI_UNUSED_RECURRING), unblended)
+    if kind == "Fee" and _pick(row, _RI_ARN) and _has(row, _RI_AMORTIZED):
+        return Decimal(0)  # all-upfront ri purchase, spread over its RIFee rows
+    if kind == "SavingsPlanCoveredUsage":
+        return _amortized(row, (_SP_EFFECTIVE,), unblended)
     if kind == "SavingsPlanRecurringFee":
         total = _maybe(row, _SP_TOTAL_COMMITMENT)
         if total is None:
             return unblended
         return total - (_maybe(row, _SP_USED_COMMITMENT) or Decimal(0))
-    if kind == "Fee" and _pick(row, _RI_ARN):
-        return Decimal(0)  # all-upfront ri purchase, spread over its RIFee rows
+    if kind in ("SavingsPlanNegation", "SavingsPlanUpfrontFee") and _has(row, _SP_AMORTIZED):
+        # the negation just cancels the on-demand price of covered usage, and the
+        # upfront is amortized through the recurring-fee and covered-usage lines
+        return Decimal(0)
     return unblended
 
 
-def _first(
-    row: dict,
-    columns: tuple[tuple[str, ...], ...],
-    fallback: Decimal,
-    *,
-    add: bool = False,
+def _amortized(
+    row: dict, columns: tuple[tuple[str, ...], ...], fallback: Decimal
 ) -> Decimal:
-    """The named amortization columns, or `fallback` when the report has none."""
+    """The named amortization columns summed, or `fallback` when the report has none."""
     found = [v for v in (_maybe(row, names) for names in columns) if v is not None]
-    if not found:
-        return fallback
-    return sum(found, Decimal(0)) if add else found[0]
+    return sum(found, Decimal(0)) if found else fallback
+
+
+def _has(row: dict, columns: tuple[tuple[str, ...], ...]) -> bool:
+    """Whether the report carries these columns at all — an empty cell still counts."""
+    return any(name in row for names in columns for name in names)
 
 
 def _maybe(row: dict, names: tuple[str, ...]) -> Decimal | None:
