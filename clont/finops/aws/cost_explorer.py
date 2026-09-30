@@ -3,10 +3,12 @@
 Cost Explorer is a global endpoint (pinned to us-east-1), so this collector is
 account-level and does not iterate regions.
 
-**Billed, so opt-in.** $0.01 per request, once per cycle — ~$86/mo per account at
-the default 300s interval, whatever the fleet size. The CUR collector reads the
-same numbers out of S3 for free, so this one stays dormant unless the operator
-sets `finops.allow_cost_explorer: true` and accepts the charge.
+**Billed, so opt-in.** $0.01 per request, once per cycle — at the default daily
+interval (86400s) that is ~$0.30/mo per account, whatever the fleet size. The CUR
+collector reads the same numbers out of S3 for free, so this one stays dormant
+unless the operator sets `finops.allow_cost_explorer: true` and accepts the charge.
+Off by default, so out of the box this collector costs $0 — the ~$0.30/mo only
+starts once it is enabled (and ~$88/mo if the interval is dropped to 300s).
 """
 
 from __future__ import annotations

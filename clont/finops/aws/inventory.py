@@ -47,7 +47,8 @@ class Running:
 
     @property
     def hourly(self) -> Decimal:
-        return pricing.instance_hourly(self.instance_type)
+        # priced in its own region: frankfurt is not virginia
+        return pricing.instance_hourly(self.instance_type, self.region)
 
 
 @dataclass(frozen=True)

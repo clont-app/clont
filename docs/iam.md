@@ -268,6 +268,19 @@ stuff that will bite you:
   grouped by `lineItem/UsageAccountId` instead of lumped under the payer alias.
   the label is the account's organizations name (slugified), or the bare 12-digit
   id when the role can't call `organizations:ListAccounts`.
+- **ri and savings plan costs are amortized**, so buying a year of ec2 upfront
+  doesn't read as a one-day spike, a blown budget and a wrecked forecast. covered
+  usage is priced at `reservation/EffectiveCost` /
+  `savingsPlan/SavingsPlanEffectiveCost`, a fee counts only the part nobody used,
+  and the purchase row itself is dropped. `amortize: false` gives the raw
+  unblended numbers back for an invoice reconciliation. an old report with no
+  effective-cost column falls back to unblended.
+- **credits, refunds and tax get their own service buckets**, spelled as cost
+  explorer spells them (`Credit`, `Refund`, `Tax`). a credit on ec2 is not ec2
+  getting cheaper, so it stays out of that service's trend while the account
+  total still nets out. `include_credits: false` / `include_tax: false` give
+  gross spend. usage-tracking discounts (edp, private rate, bundled) stay on the
+  service — they scale with the bill.
 - **the report is rewritten a few times a day**, so it's re-read at most every
   `refresh_minutes` (default 60), not every cycle.
 - **a brand new report can take 24h to appear.** until then spend is empty and

@@ -132,6 +132,10 @@ class _EBSVolume(BaseModel):
     size: int = Field(default=0, validation_alias="Size")
     volume_type: str = Field(default="", validation_alias="VolumeType")
     state: str = Field(default="", validation_alias="State")
+    # provisioned performance, billed on top of storage. absent on st1/sc1, and
+    # on gp2 `Iops` is the size-derived baseline, not something anyone chose
+    iops: int = Field(default=0, validation_alias="Iops")
+    throughput: int = Field(default=0, validation_alias="Throughput")
     tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
 
     def tag_map(self) -> dict[str, str]:
