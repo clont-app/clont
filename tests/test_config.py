@@ -205,3 +205,13 @@ def test_api_url_must_be_https(tmp_path, monkeypatch):
     insecure = "api:\n  url: http://api.example.com/ingest\n  api_key: k\n"
     with pytest.raises(Exception, match="https"):
         _load(tmp_path, monkeypatch, insecure)
+
+
+def test_the_rightsize_target_must_be_a_usable_share(tmp_path, monkeypatch):
+    # it divides the measured p95: 0 took the whole on-prem waste pass down with a
+    # DivisionByZero, and over 100 advised a size under the peak the vm actually hit
+    for bad in (0, 120):
+        with pytest.raises(Exception):
+            _load(tmp_path, monkeypatch, f"finops:\n  onprem_rightsize_target_pct: {bad}\n")
+    config = _load(tmp_path, monkeypatch, "finops:\n  onprem_rightsize_target_pct: 80\n")
+    assert config.finops.onprem_rightsize_target_pct == 80

@@ -130,7 +130,7 @@ finops:
   # idle and rightsizing need the perf pass (inventory.usage_window_days above zero).
   # cpu reuses idle_cpu_pct; a vm has to be quiet on both to count as idle
   onprem_idle_ram_pct: 20            # p95 ram below which a running vm is idle
-  onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking
+  onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking, 0 < x <= 100
 
   # S3 storage hygiene. The cold-data check needs allow_cloudwatch_metrics too
   # (one metric per bucket); lifecycle, versions and uploads are free.

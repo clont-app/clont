@@ -216,7 +216,9 @@ class FinOpsConfig(_Model):
     onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
     # measured kinds. cpu reuses idle_cpu_pct above; a vm needs both to be idle
     onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
-    onprem_rightsize_target_pct: float = 70.0  # headroom left over the p95 when shrinking
+    # the p95 is divided by it, so 0 took the whole waste pass down with a DivisionByZero
+    # and anything over 100 advised a size *under* the measured peak
+    onprem_rightsize_target_pct: float = Field(default=70.0, gt=0, le=100)
 
     # S3 storage hygiene: lifecycle rules, noncurrent versions, abandoned uploads
     s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned
