@@ -7,6 +7,7 @@ power, rack and lifetime for every cluster on the floor, so the config is two le
 
     onprem:
       dc1:
+        inventory: {kind: vsphere, endpoint: vc1.dc1, username: clont-ro, password_env: VC1_PW}
         rate_card: {power_and_cooling: 3400, rack_and_network: 1500, lifetime_months: 48}
         weights: {cpu: 0.5, ram: 0.3, storage: 0.2}
         clusters:
@@ -29,7 +30,9 @@ allocator uses, so there is one rule, not two that drift.
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -96,13 +99,50 @@ class ClusterConfig(_Model):
     weights: Weights | None = None
 
 
-class OnPremSite(_Model):
-    """One site: the default card, plus the clusters that differ from it.
+class InventoryConfig(_Model):
+    """Where the hypervisor is and which read-only account to read it with.
 
-    The inventory block (endpoint, read-only account) lands with the vsphere collector;
-    this half only prices what the collector finds.
+    The password is not a clont secret store: either it sits in the yaml (which is the
+    agent's own file, mode 600) or `password_env` names the variable it arrives in —
+    a k8s secret as `secretKeyRef`, systemd's `EnvironmentFile`. Exactly one of the two,
+    so a stale inline password can never shadow the env one.
     """
 
+    kind: Literal["vsphere"] = "vsphere"  # libvirt/proxmox join here, same pools out
+    endpoint: str                          # vcenter host, no scheme
+    username: str                          # the read-only role's account
+    password: str | None = None
+    password_env: str | None = None
+    port: int = Field(default=443, gt=0, lt=65536)
+    verify_ssl: bool = True                # a self-signed lab cert is the operator's call
+    ca_bundle: str | None = None           # pem for a private ca, instead of turning tls off
+
+    @model_validator(mode="after")
+    def _one_password_source(self) -> InventoryConfig:
+        if not self.endpoint.strip():
+            raise ValueError("inventory.endpoint is empty")
+        if bool(self.password) == bool(self.password_env):
+            raise ValueError("set exactly one of inventory.password / inventory.password_env")
+        return self
+
+    def secret(self) -> str:
+        """The password, read at use time — the env may be filled after load."""
+        if self.password:
+            return self.password
+        value = os.environ.get(self.password_env or "", "")
+        if not value:
+            raise ConfigError(f"{self.password_env} is not set, no vsphere password")
+        return value
+
+
+class OnPremSite(_Model):
+    """One site: where to read it, the default card, and the clusters that differ.
+
+    `inventory` is optional on purpose — a site can be priced before anyone hands over a
+    read-only account, and the card validates on its own either way.
+    """
+
+    inventory: InventoryConfig | None = None
     rate_card: RateCard = Field(default_factory=RateCard)
     weights: Weights = Field(default_factory=Weights)
     clusters: dict[str, ClusterConfig] = Field(default_factory=dict)
@@ -138,4 +178,12 @@ class OnPremSite(_Model):
 
 
 # re-exported so a reader of the config models can see what a card may hold
-__all__ = ["CAPEX_LINES", "COST_LINES", "ClusterConfig", "OnPremSite", "RateCard", "Weights"]
+__all__ = [
+    "CAPEX_LINES",
+    "COST_LINES",
+    "ClusterConfig",
+    "InventoryConfig",
+    "OnPremSite",
+    "RateCard",
+    "Weights",
+]

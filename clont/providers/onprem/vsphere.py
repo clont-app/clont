@@ -94,6 +94,8 @@ class VsphereInventory:
         self._si: Any = None
         self._content: Any = None
         self._vim: Any = None
+        # this vcenter's own id, filled on connect — it survives a rename, the endpoint does not
+        self.instance_uuid: str | None = None
 
     def __enter__(self) -> VsphereInventory:
         self.connect()
@@ -115,6 +117,7 @@ class VsphereInventory:
         # another round trip (one `Fetch` per property call, for a value that never changes)
         self._content = self._si.RetrieveContent()
         about = self._content.about
+        self.instance_uuid = getattr(about, "instanceUuid", None) or None
         log.debug("connected to %s (%s %s)", self.endpoint, about.apiType, about.apiVersion)
 
     def close(self) -> None:

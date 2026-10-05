@@ -10,10 +10,15 @@ from clont.api.uplink import ApiUplink
 from clont.core.config import AWSConfig, Config, MetricsConfig
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
+# the module, not the package: `core.config` already imports the onprem config models, so
+# registering from the package __init__ would drag the collectors into every config load
+from clont.finops.onprem import costs as _onprem_costs  # noqa: F401 - for registration
+from clont.finops.onprem.config import OnPremSite
 from clont.monitoring.base import PER_METRIC_USD, MetricsPolicy
 from clont.providers.aws import organizations
 from clont.providers.aws.provider import AWSProvider
 from clont.providers.base import Provider
+from clont.providers.onprem.provider import OnPremProvider
 
 log = get_logger("clont.bootstrap")
 
@@ -65,6 +70,28 @@ def _authenticate(alias: str, aws: AWSConfig) -> AWSProvider | None:
         log.warning("skipping account %s: %s", alias, exc)
         return None
     return provider
+
+
+def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
+    """One provider per site that has somewhere to read from.
+
+    A site priced but not yet connected is normal — the card can be written before anyone
+    hands over a read-only account — so it is a warning and not a failure. Same isolation
+    as aws: one unreachable vcenter does not take the rest of the floor down.
+    """
+    providers: list[Provider] = []
+    for alias, site in sites.items():
+        if site.inventory is None:
+            log.warning("onprem %s: priced but no inventory block, nothing will be collected", alias)
+            continue
+        provider = OnPremProvider(alias, site)
+        try:
+            provider.authenticate()
+        except Exception as exc:  # noqa: BLE001 - isolate one bad site
+            log.warning("skipping onprem site %s: %s", alias, exc)
+            continue
+        providers.append(provider)
+    return providers
 
 
 def _member_configs(payer: AWSProvider, aws: AWSConfig) -> list[tuple[str, AWSConfig]]:
@@ -144,6 +171,13 @@ def build_agent(config: Config) -> Agent:
 
     if config.aws and not providers:
         raise RuntimeError("no configured accounts could be authenticated")
+
+    # after the aws check on purpose: a live vcenter must not make a floor of dead roles
+    # look like a working fleet
+    onprem = _onprem_providers(config.onprem)
+    if not onprem and any(site.inventory is not None for site in config.onprem.values()):
+        raise RuntimeError("no configured on-prem site could be reached")
+    providers.extend(onprem)
 
     uplink = (
         ApiUplink(config.api.url, config.api.api_key, timeout=config.api.timeout_seconds)

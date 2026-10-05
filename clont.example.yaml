@@ -50,8 +50,20 @@ aws:
 # one line: naming either on a cluster replaces the site's hardware entirely.
 # weights split the pool over cpu/ram/storage, must sum to 1.0, and are printed in
 # the report beside every number they produced.
+# The inventory block says where to read the site: a read-only hypervisor account,
+# never an agent in a guest. Set exactly one of password / password_env — the yaml
+# is the agent's own file, but an env var is what a k8s secretKeyRef fills. Spend is
+# collected only for a site that has this block; a site with only a card is priced
+# and idle, which is normal while the read-only account is still being granted.
 # onprem:
 #   dc1:
+#     inventory:
+#       kind: vsphere              # libvirt/proxmox join here later
+#       endpoint: vc1.dc1.local    # host only, no scheme
+#       username: clont-ro@vsphere.local
+#       password_env: DC1_VSPHERE_PASSWORD
+#       verify_ssl: true           # false only for a self-signed lab cert
+#       # ca_bundle: /etc/clont/vcenter-ca.pem   # a private ca, instead of turning tls off
 #     rate_card:
 #       power_and_cooling: 3400    # or measured per chassis, later
 #       rack_and_network: 1500
