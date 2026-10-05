@@ -6,7 +6,9 @@ iron the split matters more, because the pass has no measured usage yet (see
 `providers/onprem/inventory.py`), so **idle and rightsizing are not here** — provisioned
 alone would call every vm idle. What is here holds on a single snapshot:
 
-* **a powered-off vm** still owns its disk, and nothing else: its ram went back to the pool
+* **a powered-off vm** still owns its disk, and nothing else: its ram went back to the
+  pool. the saving is the space it *occupies* — deleting a thin disk gives back the blocks
+  it wrote, not the size it was promised
 * **a template** is a powered-off vm nobody is going to boot, so it is its own line — an
   operator who keeps a golden image on purpose can ignore the kind wholesale
 * **a zombie host** is powered on, in the cluster, running nothing. its share of the pool
@@ -104,7 +106,7 @@ class OnPremWasteCollector:
             log.warning("%s: no pool priced, site-wide findings skipped", self._provider.alias)
         else:
             findings.extend(site_findings(site, rate, self._tuning))
-        return [self._rec(finding) for finding in findings]
+        return [self._rec(finding) for finding in _once(findings)]
 
     def _card(self, pool: Pool) -> dict:
         return self._provider.site.card_for(pool.key, pool.name)
@@ -130,22 +132,39 @@ class OnPremWasteCollector:
         )
 
 
+def _once(findings: Iterable[Finding]) -> list[Finding]:
+    """One finding per thing. A shared san is in every pool that mounts it, and a cluster
+    cannot fix it twice — the first pool keeps it, so the report says the array, not the
+    mount count. Vms and hosts belong to one pool, so nothing else collides."""
+    seen: set[tuple[str, str]] = set()
+    out: list[Finding] = []
+    for finding in findings:
+        key = (finding.kind, finding.resource_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(finding)
+    return out
+
+
 def pool_findings(pool: Pool, priced: dict, tuning: FinOpsTuning) -> list[Finding]:
     """What one priced pool is paying for and not using. `priced` is `allocate()`'s answer."""
     storage_rate = Decimal(str(priced["rates"]["storage_gib_month"]))
     floor = Decimal(str(tuning.onprem_min_savings_usd))
     out: list[Finding] = []
 
+    labels = pool.labels()
     for vm in pool.vms:
-        if vm.powered_on or vm.disk_gib <= 0:
+        if vm.powered_on or vm.committed_gib <= 0:
             continue
-        monthly = vm.disk_gib * storage_rate
+        # deleting it gives back the blocks it wrote, never the thin promise
+        monthly = vm.committed_gib * storage_rate
         if monthly < floor:
             continue
         out.append(
             Finding(
                 kind="template-disk" if vm.template else "stopped-vm",
-                resource_id=vm.name,
+                resource_id=labels[vm.uid],
                 region=pool.key,
                 summary=_disk_summary(vm),
                 monthly=monthly,
@@ -165,7 +184,7 @@ def site_findings(
     out: list[Finding] = []
 
     for vm in site.orphan_vms:
-        monthly = vm.disk_gib * storage_rate
+        monthly = vm.committed_gib * storage_rate
         if monthly < floor:
             continue
         out.append(
@@ -175,7 +194,8 @@ def site_findings(
                 region=_SITE,
                 summary=(
                     f"vcenter lists {vm.name} on no host, holding "
-                    f"{_gib(vm.disk_gib)} GiB — check it is not a leftover of a failed migration"
+                    f"{_gib(vm.committed_gib)} GiB — check it is not a leftover of a "
+                    "failed migration"
                 ),
                 monthly=monthly,
                 approximate=True,
@@ -222,17 +242,23 @@ def site_findings(
 
 
 def site_storage_rate(priced: Iterable[tuple[Pool, dict]]) -> Decimal | None:
-    """The site's mean $/GiB-month: every pool's storage money over every pool's capacity.
+    """The site's mean $/GiB-month: all the pools' storage money over the GiB it buys.
 
-    Weighted by capacity rather than averaged over pools, so a 10 TiB array does not get
-    priced by a tiny cluster's rate. None when no pool could be priced at all.
+    Weighted by capacity rather than averaged over pools, so a 10 TiB array is never
+    priced by a tiny cluster's rate. The divisor counts each array **once, by moref**: a
+    san mounted by three clusters sits in three pools, and summing the pools' capacity
+    would count it three times and leave the rate a third of the real one. Arrays nobody
+    mounts stay out of it — no pool's card is paying for their GiB. None when no pool
+    could be priced at all.
     """
     money = Decimal(0)
-    capacity = Decimal(0)
-    for _pool, result in priced:
+    arrays: dict[str, Decimal] = {}
+    for pool, result in priced:
         gib = Decimal(str(result["capacity"]["storage_gib"]))
         money += Decimal(str(result["rates"]["storage_gib_month"])) * gib
-        capacity += gib
+        for datastore in pool.datastores:
+            arrays[datastore.uid] = datastore.capacity_gib
+    capacity = sum(arrays.values(), Decimal(0))
     return money / capacity if capacity > 0 else None
 
 
@@ -321,9 +347,12 @@ def _disk_summary(vm: Vm) -> str:
     what = "a template" if vm.template else "powered off"
     # vcenter carries no power-off timestamp as a property, only as an event, so the
     # pass cannot say for how long — do not imply it can
+    promised = (
+        f", {_gib(vm.disk_gib)} GiB promised" if vm.disk_gib > vm.committed_gib else ""
+    )
     return (
-        f"{vm.name} is {what}, still holding {_gib(vm.disk_gib)} GiB "
-        f"({_gib(vm.committed_gib)} GiB written). its ram is back in the pool, its disk is not"
+        f"{vm.name} is {what}, still occupying {_gib(vm.committed_gib)} GiB"
+        f"{promised}. its ram is back in the pool, its disk is not"
     )
 
 

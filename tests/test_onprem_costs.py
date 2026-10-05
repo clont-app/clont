@@ -148,18 +148,49 @@ def test_the_site_total_is_what_the_operator_pays(site_config):
 def test_a_day_is_24_of_730_hours(site_config):
     records = by_service(collect(site_config))
     app = next(r for r in records["vm"] if r.resource.resource_id == "app-01")
-    # 4 vcpu + 8 gib while it runs, plus 100 gib it may grow into
-    monthly = 4 * 730 * 0.625 + 8 * 730 * 0.046875 + 100 * 1.46
+    # 4 vcpu + 8 gib while it runs, plus the 60 gib it has written — not the 100 it may
+    # grow into, which is nowhere on the operator's invoice
+    monthly = 4 * 730 * 0.625 + 8 * 730 * 0.046875 + 60 * 1.46
     assert float(app.cost.amount) == pytest.approx(monthly * DAY_SHARE, abs=0.01)
+    assert app.dimensions["disk_gib"] == "60"
+    assert app.dimensions["disk_promised_gib"] == "100"
     # cents: the division runs to 28 digits and those end up in a slack message
     assert app.cost.amount == app.cost.amount.quantize(Decimal("0.01"))
+
+
+def test_a_thin_promise_is_a_risk_and_never_spend(site_config):
+    # every disk 2x thin, cpu and ram untouched: the pool must still bill its own card
+    thin = {
+        key: props | {"summary.storage.uncommitted": props["summary.storage.committed"]}
+        for key, props in VMS.items()
+    }
+    records = collect(site_config, site_inventory(vms=thin))
+    assert sum(float(r.cost.amount) for r in records) == pytest.approx(POOL_MONTHLY * DAY_SHARE)
+    dims = by_service(records)["headroom"][0].dimensions
+    # occupied is what is billed, promised is the number a capacity talk needs
+    assert float(dims["overcommit_storage"]) == pytest.approx(160 / 1000)
+    assert float(dims["overcommit_storage_promised"]) == pytest.approx(320 / 1000)
+
+
+def test_two_vms_with_one_name_still_both_get_a_line(site_config):
+    # vcenter allows it (different folders), and keying by name would lose a vm's spend
+    twins = {
+        key: props | {"name": "web-01"} for key, props in VMS.items()
+    }
+    records = by_service(collect(site_config, site_inventory(vms=twins)))
+    assert len(records["vm"]) == 2
+    assert {r.resource.resource_id for r in records["vm"]} == {
+        "web-01 (vim.VirtualMachine:vm-10)",
+        "web-01 (vim.VirtualMachine:vm-11)",
+    }
+    assert {r.dimensions["moref"] for r in records["vm"]} == set(twins)
 
 
 def test_a_stopped_vm_is_charged_for_its_disk_only(site_config):
     records = by_service(collect(site_config))
     old = next(r for r in records["vm"] if r.resource.resource_id == "old-01")
     assert old.dimensions["state"] == "stopped"
-    assert float(old.cost.amount) == pytest.approx(100 * 1.46 * DAY_SHARE)
+    assert float(old.cost.amount) == pytest.approx(100 * 1.46 * DAY_SHARE, abs=0.01)
 
 
 def test_dimensions_carry_the_cluster_and_the_host(site_config):
@@ -204,6 +235,8 @@ def test_an_overcommitted_pool_has_no_headroom_to_bill(site_config):
     headroom = records["headroom"][0]
     assert headroom.cost.amount == Decimal(0)
     assert float(headroom.dimensions["allocated_ratio"]) == pytest.approx(2.0)
+    # the money is clamped, the figure is not: -7300 is the overshoot, in the record
+    assert float(headroom.dimensions["headroom_monthly"]) == pytest.approx(-POOL_MONTHLY)
     # and the vms are still charged in full - overcommit is reported, never clamped
     charged = sum(float(r.cost.amount) for r in records["vm"])
     assert charged == pytest.approx(2 * POOL_MONTHLY * DAY_SHARE)

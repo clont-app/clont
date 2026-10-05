@@ -15,7 +15,10 @@ Four decisions live here, and they are the ones that make the numbers add up:
   thing an operator can attribute, and `dimensions` carries its cluster and host
 * **the leftover pool cost is emitted too**, as a `headroom` record. The operator pays for
   the whole cluster whether it is full or not, so without that line the site's total spend
-  would be the sum of its vms and quietly under-report the real bill
+  would be the sum of its vms and quietly under-report the real bill. An overcommitted
+  pool has no leftover, so the money is zero — but the *signed* figure rides along as
+  `headroom_monthly`, next to `allocated_ratio`, because a clamp that hides the overshoot
+  is how a report ends up disagreeing with the invoice without saying so
 * **a pool that cannot be priced is skipped, not fatal.** One cluster with no datastore
   mounted must not blank the spend for the rest of the site; but if *every* pool fails
   the collector raises, because a $0.00 report is worse than an error
@@ -88,6 +91,7 @@ class OnPremCostCollector:
         result = allocate(pool.allocation_payload(card))
         when = Period(start=day, end=day)
         shared = {"cluster": pool.key, "pool_kind": pool.kind}
+        labels = pool.labels()
 
         records = [
             CostRecord(
@@ -95,11 +99,11 @@ class OnPremCostCollector:
                 service=_VM,
                 period=when,
                 alias=self._provider.alias,
-                cost=self._day_cost(result["vms"][vm.name]["provisioned"]),
+                cost=self._day_cost(result["vms"][vm.uid]["provisioned"]),
                 resource=CloudResource(
                     cloud=Cloud.ONPREM,
                     service=_VM,
-                    resource_id=vm.name,
+                    resource_id=labels[vm.uid],
                     region=pool.key,
                     alias=self._provider.alias,
                 ),
@@ -107,23 +111,40 @@ class OnPremCostCollector:
                 | {
                     "host": vm.host or "",
                     "state": _state(vm),
+                    "moref": vm.uid,
                     "vcpu": str(vm.vcpu),
                     "ram_gib": _num(vm.ram_gib),
-                    "disk_gib": _num(vm.disk_gib),
+                    # what it occupies is what it is billed for; the promise sits next to
+                    # it so the report can show the gap thin provisioning opened
+                    "disk_gib": _num(vm.committed_gib),
+                    "disk_promised_gib": _num(vm.disk_gib),
                 },
             )
             for vm in pool.vms
         ]
+        headroom = result["headroom"]
+        if headroom < 0:
+            # the vms reserve more than the pool costs, so there is nothing left to bill
+            # for — the pool still bills card x allocated_ratio, and both are dimensions
+            log.info(
+                "%s: pool %s is %.2fx allocated, headroom %.2f",
+                self._provider.alias,
+                pool.key,
+                result["allocated_ratio"],
+                headroom,
+            )
         records.append(
             CostRecord(
                 cloud=str(Cloud.ONPREM),
                 service=_HEADROOM,
                 period=when,
                 alias=self._provider.alias,
-                # negative headroom is an overcommitted pool: the vms already carry more
-                # than the pool costs, so there is nothing left to bill for
-                cost=self._day_cost(max(result["headroom"], 0.0)),
-                dimensions=shared | _pool_dimensions(pool, result),
+                cost=self._day_cost(max(headroom, 0.0)),
+                # the signed figure travels as a dimension: clamping the money must not
+                # make an overcommitted pool look merely full
+                dimensions=shared
+                | _pool_dimensions(pool, result)
+                | {"headroom_monthly": _num(headroom)},
             )
         )
         return records
@@ -177,7 +198,10 @@ def _pool_dimensions(pool: Pool, result: dict) -> dict[str, str]:
         "capacity_storage_gib": _num(result["capacity"]["storage_gib"]),
         "overcommit_vcpu": _num(overcommit["vcpu"]),
         "overcommit_ram": _num(overcommit["ram"]),
+        # occupied vs promised: the first is what the pool bills, the second is what the
+        # arrays would owe if every thin disk filled up
         "overcommit_storage": _num(overcommit["storage"]),
+        "overcommit_storage_promised": _num(_promised_ratio(pool, result)),
         "allocated_ratio": _num(result["allocated_ratio"]),
         "hosts": str(len(pool.hosts)),
         "hosts_powered_off": ",".join(pool.hosts_powered_off),
@@ -185,6 +209,12 @@ def _pool_dimensions(pool: Pool, result: dict) -> dict[str, str]:
         "incomplete_vms": ",".join(pool.incomplete_vms),
         "shared_datastores": ",".join(pool.shared_datastores),
     }
+
+
+def _promised_ratio(pool: Pool, result: dict) -> Decimal:
+    """What every thin disk in the pool could grow to, over the arrays it sits on."""
+    promised = sum((vm.disk_gib for vm in pool.vms), Decimal(0))
+    return promised / Decimal(str(result["capacity"]["storage_gib"]))
 
 
 def _state(vm) -> str:

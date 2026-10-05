@@ -17,7 +17,7 @@ from clont.core.models import Cloud, Period
 from clont.finops.base import FinOpsTuning
 from clont.finops.onprem.config import OnPremSite
 from clont.finops.onprem.waste import OnPremWasteCollector, site_storage_rate
-from clont.providers.onprem.inventory import build_site
+from clont.providers.onprem.inventory import Datastore, Pool, build_site
 
 GIB = 1024**3
 PERIOD = Period(start=date(2026, 10, 1), end=date(2026, 10, 4))
@@ -237,7 +237,37 @@ def test_a_shared_datastore_is_counted_once_across_pools():
     }
     found, _ = advise(inventory(clusters=clusters, hosts=hosts))
     gap = found["unaccounted-storage"]
-    assert float(gap.estimated_savings.amount) == pytest.approx(340 * STORAGE_RATE, abs=0.01)
+    # the gap is still 340 gib, counted off the site's flat list. both cards pay for the
+    # same 2000 gib, so the site mean is twice a single pool's rate — the array is in two
+    # pools' capacity and only exists once
+    assert float(gap.estimated_savings.amount) == pytest.approx(340 * STORAGE_RATE * 2, abs=0.01)
+
+
+def test_a_shared_arrays_thin_risk_is_reported_once():
+    clusters = {
+        **CLUSTERS,
+        "vim.ClusterComputeResource:domain-c8": {"name": "dev", "host": ["vim.HostSystem:host-3"]},
+    }
+    hosts = {
+        **HOSTS,
+        "vim.HostSystem:host-3": {
+            "name": "esx-03",
+            "hardware.cpuInfo.numCpuCores": 8,
+            "hardware.memorySize": 64 * GIB,
+            "runtime.powerState": "poweredOn",
+            "datastore": ["vim.Datastore:ds-1"],
+        },
+    }
+    datastores = {
+        "vim.Datastore:ds-1": {
+            **DATASTORES["vim.Datastore:ds-1"],
+            "summary.uncommitted": 3000 * GIB,
+        }
+    }
+    _, recs = advise(inventory(clusters=clusters, hosts=hosts, datastores=datastores))
+    # one array, one risk: two clusters mount it and neither can fix it twice
+    thin = [rec for rec in recs if rec.kind == "thin-overcommit"]
+    assert [rec.resource.resource_id for rec in thin] == ["san-01"]
 
 
 def test_thin_overcommit_is_a_risk_and_prices_at_zero():
@@ -305,8 +335,27 @@ def test_a_pool_nobody_could_price_is_skipped_not_fatal():
 
 
 def test_the_site_rate_is_weighted_by_capacity_not_averaged_over_pools():
-    small = ({}, {"capacity": {"storage_gib": 100.0}, "rates": {"storage_gib_month": 10.0}})
-    large = ({}, {"capacity": {"storage_gib": 900.0}, "rates": {"storage_gib_month": 1.0}})
+    small = (_pool("ds-a", 100), _priced(100, 10))
+    large = (_pool("ds-b", 900), _priced(900, 1))
     # 1000 gib and 1900 dollars of storage money
     assert site_storage_rate([small, large]) == Decimal("1.9")
     assert site_storage_rate([]) is None
+
+
+def test_the_site_rate_divides_by_each_array_once():
+    san = _pool("ds-shared", 1000)
+    priced = _priced(1000, 1)
+    # the same san in two pools: $2000 of storage money buys 1000 gib, not 2000
+    assert site_storage_rate([(san, priced), (san, priced)]) == Decimal("2")
+
+
+def _priced(gib: float, rate: float) -> dict:
+    return {"capacity": {"storage_gib": gib}, "rates": {"storage_gib_month": rate}}
+
+
+def _pool(ds_uid: str, gib: int) -> Pool:
+    store = Datastore(
+        uid=ds_uid, name=ds_uid, capacity_gib=Decimal(gib), free_gib=Decimal(0),
+        provisioned_gib=Decimal(gib),
+    )
+    return Pool(name="p", kind="cluster", datacenter=None, hosts=(), datastores=(store,), vms=())

@@ -18,8 +18,10 @@ place:
 * **cores, never threads.** `numCpuThreads` is read only to report the ratio
 * **provisioned means powered-on**, so a powered-off vm or a template is charged for its
   disk alone. its ram is not reserved — another vm is using it
-* **a vm's disk is `committed + uncommitted`**, i.e. what it may grow into, which is the
-  number thin provisioning puts at risk. `committed_gib` carries what it eats today
+* **a vm is charged for the disk it occupies** (`committed_gib`), never for what it was
+  promised. `disk_gib` carries `committed + uncommitted` — what it may grow into — and
+  that number is a *risk* (`thin-overcommit`), not spend: a 2x thin cluster would
+  otherwise bill ~20% over the card the operator actually pays
 * **a datastore mounted by two clusters counts fully in both.** either cluster can fill
   it, and the alternative is inventing a split. it only ever *lowers* the storage rate
   (the pool cost is the operator's per-cluster figure either way), so the error leans to
@@ -34,6 +36,7 @@ stays unreported until the perf-counter pass lands.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -62,6 +65,8 @@ class Host:
 
 @dataclass(frozen=True, slots=True)
 class Datastore:
+    # moref, same reason as a vm's: two datacenters each have a "LocalDS_0"
+    uid: str
     name: str
     capacity_gib: Decimal
     free_gib: Decimal
@@ -76,6 +81,8 @@ class Datastore:
 
 @dataclass(frozen=True, slots=True)
 class Vm:
+    # moref: the only id vcenter promises is unique, and it survives a rename
+    uid: str
     name: str
     host: str | None
     powered_on: bool
@@ -93,11 +100,17 @@ class Vm:
         return self.powered_on and not self.template
 
     def provisioned(self) -> dict[str, Decimal]:
-        """This vm's row for `rates.allocate()` — cpu and ram only while it runs."""
+        """This vm's row for `rates.allocate()` — cpu and ram only while it runs.
+
+        storage is what the vm *occupies*, not what it promised. a thin disk eats blocks
+        as it grows, so charging `committed + uncommitted` bills a 2x thin-provisioned
+        cluster ~20% over the operator's own card — money that is nowhere on the invoice.
+        the promise is a risk, and `thin-overcommit` is where it is reported.
+        """
         return {
             "vcpu": Decimal(self.vcpu) if self.running else Decimal(0),
             "ram_gib": self.ram_gib if self.running else Decimal(0),
-            "disk_gib": self.disk_gib,
+            "disk_gib": self.committed_gib,
         }
 
 
@@ -126,13 +139,29 @@ class Pool:
             "storage_gib": sum((ds.capacity_gib for ds in self.datastores), Decimal(0)),
         }
 
+    def labels(self) -> dict[str, str]:
+        """moref -> the id a report shows it under.
+
+        vcenter happily holds two vms called `web-01` — different folders, different
+        datacenters — so a colliding name carries its moref. without it one vm's line
+        would overwrite the other's and the cluster would silently lose a vm's spend.
+        """
+        seen = Counter(vm.name for vm in self.vms)
+        return {
+            vm.uid: vm.name if seen[vm.name] == 1 else f"{vm.name} ({vm.uid})" for vm in self.vms
+        }
+
     def allocation_payload(self, pool_card: dict) -> dict:
-        """Capacity + vms merged into the operator's card, ready for `allocate()`."""
+        """Capacity + vms merged into the operator's card, ready for `allocate()`.
+
+        Keyed by moref, not name: `allocate()` rejects a duplicate key rather than eat a
+        vm, and a pair of same-named vms would make the whole pool unpriceable.
+        """
         return {
             **pool_card,
             "capacity": {key: str(value) for key, value in self.capacity().items()},
             "vms": [
-                {"name": vm.name, "provisioned": {k: str(v) for k, v in vm.provisioned().items()}}
+                {"name": vm.uid, "provisioned": {k: str(v) for k, v in vm.provisioned().items()}}
                 for vm in self.vms
             ],
         }
@@ -325,6 +354,7 @@ def _datastore(ds_id: str, props: dict[str, object]) -> Datastore:
         raise ConfigError(f"datastore {name!r} reported no capacity, inventory incomplete")
     free = _int(props.get("summary.freeSpace"))
     return Datastore(
+        uid=ds_id,
         name=name,
         capacity_gib=Decimal(capacity) / BYTES_PER_GIB,
         free_gib=Decimal(free) / BYTES_PER_GIB,
@@ -342,6 +372,7 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
     committed = _int(props.get("summary.storage.committed"))
     uncommitted = _int(props.get("summary.storage.uncommitted"))
     return Vm(
+        uid=vm_id,
         name=name,
         # a finding names the host an operator can log into, not its moref
         host=host_names.get(host, host) or None,

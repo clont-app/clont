@@ -226,8 +226,11 @@ def test_provisioned_charges_cpu_and_ram_only_while_running(site):
     assert running == {
         "vcpu": Decimal(4),
         "ram_gib": Decimal(16),
-        "disk_gib": Decimal(100),  # committed + uncommitted, what it may grow into
+        # 40 gib written of the 100 it may grow into: the blocks it occupies are the
+        # bill, the promise is a risk and `thin-overcommit` is where it belongs
+        "disk_gib": Decimal(40),
     }
+    assert vms["app-01"].disk_gib == Decimal(100)
 
     # powered off: the ram is not reserved, another vm is using it. the disk is
     off = vms["old-jenkins"].provisioned()
@@ -280,12 +283,24 @@ def test_payload_feeds_the_allocator(site):
     result = allocate(site.pool("prod-gen11").allocation_payload(card))
 
     assert result["pool_monthly"] == 12000
-    assert set(result["vms"]) == {"app-01", "old-jenkins", "ubuntu-template"}
+    # keyed by moref: vcenter lets two vms share a name, and a duplicate key would make
+    # the whole pool unpriceable
+    assert set(result["vms"]) == {
+        "vim.VirtualMachine:vm-10",
+        "vim.VirtualMachine:vm-11",
+        "vim.VirtualMachine:vm-12",
+    }
+    assert set(site.pool("prod-gen11").labels().values()) == {
+        "app-01",
+        "old-jenkins",
+        "ubuntu-template",
+    }
     # no measured usage yet, so nothing is charged as waste - that is the perf pass
     assert result["total_used"] == result["total_provisioned"]
     assert all(vm["waste"] == 0 for vm in result["vms"].values())
-    # 4 of 32 cores asked for, 16 of 512 gib, 320 of 10240 gib disk
+    # 4 of 32 cores asked for, 16 of 512 gib, and 260 of 10240 gib of disk occupied
+    # (320 promised, which is the thin risk and not a charge)
     assert result["overcommit"]["vcpu"] == pytest.approx(4 / 32)
     assert result["overcommit"]["ram"] == pytest.approx(16 / 512)
-    assert result["overcommit"]["storage"] == pytest.approx(320 / 10240)
+    assert result["overcommit"]["storage"] == pytest.approx(260 / 10240)
     assert result["headroom"] > 0
