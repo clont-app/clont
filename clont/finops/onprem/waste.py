@@ -33,7 +33,7 @@ And what the measured window adds:
   headroom is left on top of the peak — so a vm already running near that target yields
   nothing and emits no finding, which is the gate rather than a second threshold
 
-Two rules about the money:
+Three rules about the money:
 
 * **per-pool findings are priced on the operator's own card**, so they are exact, not a
   ballpark — `approximate=False`, which is unusual for a clont recommendation and is the
@@ -41,6 +41,12 @@ Two rules about the money:
 * **site-wide findings have no pool** (an unmounted array is in no cluster, an orphan vm
   is on no host), so they are priced at the site's mean $/GiB-month — total storage money
   over total capacity — and they say so with `approximate=True`
+* **what a vm hands back is divided by the pool's oversubscription.** The rates split the
+  pool over *capacity*, so one allocated vcpu is priced as if the cluster were exactly
+  full; at 4:1 — an ordinary vmware ratio — switching off a 4-vcpu vm frees one physical
+  core, not four. Measured on 1250 real vms (test layer 3), the unscaled sum advised
+  $142k/month of savings on a cluster that costs $108k, and a report cannot offer back
+  more than the whole bill. A host finding is *not* scaled: a host is the iron
 """
 
 from __future__ import annotations
@@ -162,7 +168,7 @@ def _once(findings: Iterable[Finding]) -> list[Finding]:
 
 def pool_findings(pool: Pool, priced: dict, tuning: FinOpsTuning) -> list[Finding]:
     """What one priced pool is paying for and not using. `priced` is `allocate()`'s answer."""
-    storage_rate = Decimal(str(priced["rates"]["storage_gib_month"]))
+    storage_rate = _handback_rate(priced, "storage_gib_month", "storage")
     floor = Decimal(str(tuning.onprem_min_savings_usd))
     out: list[Finding] = []
 
@@ -198,9 +204,8 @@ def usage_findings(
     telling an operator to shrink a machine they are about to delete is noise.
     """
     hours = Decimal(str(priced["hours_per_month"]))
-    rates = priced["rates"]
-    cpu_rate = Decimal(str(rates["vcpu_hour"])) * hours
-    ram_rate = Decimal(str(rates["ram_gib_hour"])) * hours
+    cpu_rate = _handback_rate(priced, "vcpu_hour", "vcpu") * hours
+    ram_rate = _handback_rate(priced, "ram_gib_hour", "ram") * hours
     floor = Decimal(str(tuning.onprem_min_savings_usd))
     idle_cpu = Decimal(str(tuning.idle_cpu_pct))
     idle_ram = Decimal(str(tuning.onprem_idle_ram_pct))
@@ -273,6 +278,18 @@ def _rightsize(vm: Vm, row: Usage, target: Decimal) -> tuple[int, Decimal] | Non
 
 def _ceil_decimal(value: Decimal) -> Decimal:
     return value.to_integral_value(rounding=ROUND_CEILING)
+
+
+def _handback_rate(priced: dict, rate: str, dimension: str) -> Decimal:
+    """What one unit a *vm* gives back is worth, on a pool that may be oversubscribed.
+
+    `allocate()` divides the pool over capacity, so the rate assumes the cluster is
+    exactly full. Dividing by the oversubscription turns an allocated unit back into the
+    iron it really occupies; a pool with slack has a ratio under 1 and is left alone,
+    because the empty half is headroom and not a discount.
+    """
+    oversubscribed = max(Decimal(str(priced["overcommit"][dimension])), Decimal(1))
+    return Decimal(str(priced["rates"][rate])) / oversubscribed
 
 
 def site_findings(

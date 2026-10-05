@@ -192,6 +192,32 @@ def test_the_target_decides_how_much_comes_back():
     )
 
 
+def test_an_oversubscribed_pool_hands_back_iron_not_allocations():
+    # 60 vcpu on 16 cores is 3.75:1 (the powered-off vm reserves no cpu), so switching the
+    # vm off frees 16 cores and not 60. ram sits at half of capacity and is not scaled -
+    # that slack is headroom, as it is in every other test in this file
+    vms = {
+        uid: (
+            {**row, "config.hardware.numCPU": 60, "config.hardware.memoryMB": 64 * 1024}
+            if uid == "vim.VirtualMachine:vm-10"
+            else row
+        )
+        for uid, row in VMS.items()
+    }
+    inv = inventory(vms=vms)
+    inv.usage["vim.VirtualMachine:vm-10"] = Usage(
+        vcpu=Decimal("1.2"),
+        ram_gib=Decimal("6.4"),
+        cpu_pct=Decimal(2),
+        ram_pct=Decimal(10),
+        samples=48,
+    )
+    found, _ = advise(inv)
+    assert float(found["idle-vm"].estimated_savings.amount) == pytest.approx(
+        60 / 3.75 * VCPU_MONTH + 64 * RAM_MONTH, abs=0.01
+    )
+
+
 def test_the_savings_floor_silences_a_measured_finding_too():
     tuning = FinOpsTuning(onprem_min_savings_usd=10_000.0)
     found, _ = advise(measured(2, 10), tuning)
