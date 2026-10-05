@@ -38,6 +38,34 @@ aws:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]
 
+# Own iron, key is the site alias. A datacenter sends no invoice, so clont never
+# guesses a price: you give the monthly cost of a pool, clont measures that pool's
+# capacity and divides. The pool is a *cluster* — different hardware generations
+# and licensing mean different $/vcpu-hour, and a site average hides exactly the
+# comparison the report exists for.
+# A cluster card overrides the site card line by line, so the lines that hold for
+# the whole floor are written once. A cluster this file never names is priced on
+# the site card alone.
+# hardware_amortization and hardware_capex/lifetime_months are two spellings of
+# one line: naming either on a cluster replaces the site's hardware entirely.
+# weights split the pool over cpu/ram/storage, must sum to 1.0, and are printed in
+# the report beside every number they produced.
+# onprem:
+#   dc1:
+#     rate_card:
+#       power_and_cooling: 3400    # or measured per chassis, later
+#       rack_and_network: 1500
+#       licenses: 2000             # vmware/rhel/windows
+#       support: 0
+#       staff: 0                   # arguable, so off by default
+#       lifetime_months: 48        # what the clusters amortize their capex over
+#     weights: {cpu: 0.5, ram: 0.3, storage: 0.2}
+#     clusters:
+#       prod-gen11:
+#         rate_card: {hardware_capex: 480000, licenses: 6000}
+#       dev-gen9:
+#         rate_card: {hardware_capex: 120000, lifetime_months: 60}
+
 # FinOps. Spend events: a daily spend digest (info) every cycle, a spend spike
 # (warn) when a service's latest-day spend jumps over its baseline, a month-end
 # forecast (info), and budget alerts (warn/critical). The idle/snapshot

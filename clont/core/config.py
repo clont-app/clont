@@ -24,6 +24,7 @@ from pydantic_settings import (
 
 from clont.core.logging import LEVEL_NAMES, get_logger
 from clont.events.models import EventSeverity
+from clont.finops.onprem.config import OnPremSite
 
 log = get_logger("clont.config")
 
@@ -273,6 +274,7 @@ class Config(BaseSettings):
     lookback_days: int = 1               # window for cost/metric queries
     log_level: str = "info"              # daemon's own operational verbosity
     aws: dict[str, AWSConfig] = Field(default_factory=dict)   # alias -> account
+    onprem: dict[str, OnPremSite] = Field(default_factory=dict)  # alias -> site (own iron)
     finops: FinOpsConfig = Field(default_factory=FinOpsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)

@@ -69,7 +69,7 @@ def allocate(payload: dict) -> dict:
     hours = _positive(payload.get("hours_per_month", HOURS_PER_MONTH), "hours_per_month")
     weights = _weights(payload.get("weights"))
     capacity = _capacity(payload.get("capacity") or {})
-    pool = _pool_monthly(payload.get("rate_card") or {})
+    pool = pool_monthly(payload.get("rate_card") or {})
 
     rates = {
         "vcpu_hour": pool * weights["cpu"] / (capacity["vcpu"] * hours),
@@ -124,7 +124,8 @@ def allocate(payload: dict) -> dict:
     }
 
 
-def _pool_monthly(card: dict) -> Decimal:
+def pool_monthly(card: dict) -> Decimal:
+    """What one pool costs its owner per month. public so config can reject a dead card early."""
     if not card:
         raise ConfigError("rate card is empty, nothing to allocate")
     unknown = sorted(set(card) - set(COST_LINES) - set(CAPEX_LINES))
