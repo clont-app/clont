@@ -13,6 +13,7 @@ from clont.finops.base import FinOpsTuning
 # the module, not the package: `core.config` already imports the onprem config models, so
 # registering from the package __init__ would drag the collectors into every config load
 from clont.finops.onprem import costs as _onprem_costs  # noqa: F401 - for registration
+from clont.finops.onprem import waste as _onprem_waste  # noqa: F401 - for registration
 from clont.finops.onprem.config import OnPremSite
 from clont.monitoring.base import PER_METRIC_USD, MetricsPolicy
 from clont.providers.aws import organizations
@@ -201,6 +202,10 @@ def build_agent(config: Config) -> Agent:
             idle_lookback_days=config.finops.idle_lookback_days,
             idle_rds_max_connections=config.finops.idle_rds_max_connections,
             snapshot_max_age_days=config.finops.snapshot_max_age_days,
+            onprem_min_savings_usd=config.finops.onprem_min_savings_usd,
+            onprem_unaccounted_min_gib=config.finops.onprem_unaccounted_min_gib,
+            onprem_unaccounted_min_pct=config.finops.onprem_unaccounted_min_pct,
+            onprem_thin_overcommit_ratio=config.finops.onprem_thin_overcommit_ratio,
             s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
             s3_cold_min_gb=config.finops.s3_cold_min_gb,
             ri_sp_min_utilization=config.finops.ri_sp_min_utilization,

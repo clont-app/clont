@@ -33,6 +33,11 @@ class FinOpsTuning:
     ddb_min_hours: float = 72.0            # shorter windows can't show whether traffic is steady
     ddb_min_savings_pct: float = 25.0      # margin that survives the peaks cur can't show
     ddb_min_savings_usd: float = 5.0       # per month; below this the switch isn't worth the risk
+    # on-prem waste. priced off the operator's own card, so the floor is their money
+    onprem_min_savings_usd: float = 1.0        # per finding per month, below it is noise
+    onprem_unaccounted_min_gib: float = 100.0  # datastore space no vm claims
+    onprem_unaccounted_min_pct: float = 10.0   # ...and as a share of used space, both must pass
+    onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
     required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
     allow_cost_explorer: bool = False      # off = the billed ce:GetCostAndUsage is never called

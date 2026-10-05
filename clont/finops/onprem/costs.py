@@ -129,14 +129,7 @@ class OnPremCostCollector:
         return records
 
     def _card(self, pool: Pool) -> dict:
-        """The rate card for one pool. A qualified name wins over a bare one.
-
-        Two datacenters behind one vcenter may each hold a "prod" cluster, so an operator
-        who has to tell them apart writes `DC0/prod` in `clusters:` and that entry is used
-        for it alone.
-        """
-        site = self._provider.site
-        return site.pool(pool.key if pool.key in site.clusters else pool.name)
+        return self._provider.site.card_for(pool.key, pool.name)
 
     def _day_cost(self, monthly: float) -> Money:
         # allocate() hands back floats; money is Decimal, and str() keeps the float's
@@ -160,7 +153,7 @@ class OnPremCostCollector:
                 "%s: %d datastore(s) nothing mounts: %s",
                 self._provider.alias,
                 len(site.unmounted_datastores),
-                ", ".join(site.unmounted_datastores),
+                ", ".join(ds.name for ds in site.unmounted_datastores),
             )
 
 

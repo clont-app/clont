@@ -25,8 +25,11 @@ WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY clont ./clont
 
+# with the vsphere extra: a pip install stays aws-only and pulls no vcenter sdk, but the
+# image is one artifact for one product, and without pyvmomi in it the on-prem collectors
+# cannot read anything at all
 RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install .
+ && /opt/venv/bin/pip install '.[vsphere]'
 
 # --- runtime -----------------------------------------------------------------
 FROM python:3.14-slim

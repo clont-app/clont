@@ -186,7 +186,9 @@ def test_a_powered_off_host_is_capacity_and_a_finding(site):
 def test_shared_datastore_is_flagged_in_both_pools(site):
     assert site.pool("prod-gen11").shared_datastores == ("san-gold",)
     assert site.pool("esx-standalone").shared_datastores == ("san-gold",)
-    assert site.unmounted_datastores == ("retired-array",)
+    # the whole object, not the name: the waste pass prices its unusable capacity
+    assert [ds.name for ds in site.unmounted_datastores] == ["retired-array"]
+    assert site.unmounted_datastores[0].capacity_gib == Decimal(1024)
 
 
 def test_same_named_datastores_in_two_pools_are_not_shared():

@@ -159,6 +159,15 @@ class OnPremSite(_Model):
             "weights": (own.weights or self.weights).model_dump(),
         }
 
+    def card_for(self, key: str, name: str) -> dict[str, dict[str, Decimal]]:
+        """The card for a pool the collector found. A qualified name wins over a bare one.
+
+        Two datacenters behind one vcenter may each hold a "prod" cluster, so an operator
+        who has to tell them apart writes `DC0/prod` in `clusters:` and that entry prices
+        that one alone.
+        """
+        return self.pool(key if key in self.clusters else name)
+
     def pools(self) -> dict[str, dict[str, dict[str, Decimal]]]:
         """Every cluster the config names. Empty when the site card prices all of them."""
         return {name: self.pool(name) for name in self.clusters}

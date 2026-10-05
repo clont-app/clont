@@ -151,11 +151,18 @@ class SiteInventory:
     """One pass over one vcenter. The leftovers are findings, not errors."""
 
     pools: tuple[Pool, ...]
-    orphan_vms: tuple[Vm, ...] = ()            # on no host vcenter will admit to
-    unmounted_datastores: tuple[str, ...] = ()  # no host mounts them, nothing can use them
+    orphan_vms: tuple[Vm, ...] = ()                   # on no host vcenter will admit to
+    unmounted_datastores: tuple[Datastore, ...] = ()  # no host mounts them, nothing can use them
+    # every datastore of the site, once. a san mounted by three clusters sits in three
+    # pools on purpose, so a site-wide storage total can only be summed here
+    datastores: tuple[Datastore, ...] = ()
 
     def pool(self, key: str) -> Pool | None:
         return next((pool for pool in self.pools if pool.key == key or pool.name == key), None)
+
+    def vms(self) -> tuple[Vm, ...]:
+        """Every vm, placed or not. A vm runs on one host, so pools cannot overlap."""
+        return tuple(vm for pool in self.pools for vm in pool.vms) + self.orphan_vms
 
 
 def build_site(
@@ -235,8 +242,12 @@ def build_site(
         pools=pools,
         orphan_vms=tuple(vm for vm_id, vm in vm_objects.items() if vm_id not in placed),
         unmounted_datastores=tuple(
-            sorted(ds.name for ds_id, ds in ds_objects.items() if ds_id not in mounted)
+            sorted(
+                (ds for ds_id, ds in ds_objects.items() if ds_id not in mounted),
+                key=lambda ds: ds.name,
+            )
         ),
+        datastores=tuple(ds_objects.values()),
     )
 
 

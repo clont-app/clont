@@ -209,6 +209,12 @@ class FinOpsConfig(_Model):
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # EBS snapshots older than this are "old"
 
+    # On-prem waste: one inventory pass against the operator's own rate card
+    onprem_min_savings_usd: float = 1.0        # per finding per month, below it is noise
+    onprem_unaccounted_min_gib: float = 100.0  # datastore space no vm claims
+    onprem_unaccounted_min_pct: float = 10.0   # ...and as a share of used space, both must pass
+    onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
+
     # S3 storage hygiene: lifecycle rules, noncurrent versions, abandoned uploads
     s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned
     s3_cold_min_gb: float = 100.0          # ignore standard-class buckets smaller than this
