@@ -1,10 +1,11 @@
-"""Waste one inventory pass can prove — no metrics, no thresholds on a trend.
+"""What one inventory pass is paying for and not using.
 
-The aws side splits the same way: `waste.py` / `snapshots.py` name things that are
-provably paid for and carrying nothing, while `idle.py` needs a metric window. On own
-iron the split matters more, because the pass has no measured usage yet (see
-`providers/onprem/inventory.py`), so **idle and rightsizing are not here** — provisioned
-alone would call every vm idle. What is here holds on a single snapshot:
+Most of it holds on a single snapshot and needs no metrics at all. Two kinds do —
+`idle-vm` and `rightsize-vm` — and they are only emitted for the vms the perf pass could
+measure (`providers/onprem/metrics.py`): with no measurement a provisioned-only finding
+is a list of every vm, so a vm with too little history is simply not advised about.
+
+What the snapshot alone proves:
 
 * **a powered-off vm** still owns its disk, and nothing else: its ram went back to the
   pool. the saving is the space it *occupies* — deleting a thin disk gives back the blocks
@@ -22,6 +23,16 @@ alone would call every vm idle. What is here holds on a single snapshot:
 * **thin overcommit** is a risk, not a saving: it reports $0 and says what the promises
   add up to
 
+And what the measured window adds:
+
+* **an idle vm** is powered on and ran at nothing over the whole window — on cpu *and*
+  ram, because a cache does 2% cpu at 90% ram and switching it off is not advice. The
+  saving is its cpu and ram share only: its disk survives a shutdown
+* **an oversized vm** is busy enough to keep, with more vcpu or ram than its p95 ever
+  needed. The saving is what it hands back after `onprem_rightsize_target_pct` of
+  headroom is left on top of the peak — so a vm already running near that target yields
+  nothing and emits no finding, which is the gate rather than a second threshold
+
 Two rules about the money:
 
 * **per-pool findings are priced on the operator's own card**, so they are exact, not a
@@ -36,7 +47,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
 from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
@@ -46,6 +57,7 @@ from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.onprem.rates import allocate
 from clont.providers.onprem.inventory import Pool, SiteInventory, Vm
+from clont.providers.onprem.metrics import Usage
 from clont.providers.onprem.provider import OnPremProvider
 
 log = get_logger("clont.finops.onprem.waste")
@@ -91,13 +103,14 @@ class OnPremWasteCollector:
         priced: list[tuple[Pool, dict]] = []
         for pool in site.pools:
             try:
-                result = allocate(pool.allocation_payload(self._card(pool)))
+                result = allocate(pool.allocation_payload(self._card(pool), site.usage))
             except ConfigError as exc:
                 # same rule as the cost pass: one unpriceable cluster is not the floor
                 log.warning("%s: pool %s not priced: %s", self._provider.alias, pool.key, exc)
                 continue
             priced.append((pool, result))
             findings.extend(pool_findings(pool, result, self._tuning))
+            findings.extend(usage_findings(pool, result, site.usage, self._tuning))
 
         rate = site_storage_rate(priced)
         if rate is None:
@@ -174,6 +187,92 @@ def pool_findings(pool: Pool, priced: dict, tuning: FinOpsTuning) -> list[Findin
     out.extend(_host_findings(pool, priced, floor))
     out.extend(_thin_findings(pool, tuning))
     return out
+
+
+def usage_findings(
+    pool: Pool, priced: dict, usage: dict[str, Usage], tuning: FinOpsTuning
+) -> list[Finding]:
+    """Idle and oversized vms, for the vms the perf pass measured and nobody else.
+
+    One vm produces at most one of the two: an idle vm is advised to be switched off, and
+    telling an operator to shrink a machine they are about to delete is noise.
+    """
+    hours = Decimal(str(priced["hours_per_month"]))
+    rates = priced["rates"]
+    cpu_rate = Decimal(str(rates["vcpu_hour"])) * hours
+    ram_rate = Decimal(str(rates["ram_gib_hour"])) * hours
+    floor = Decimal(str(tuning.onprem_min_savings_usd))
+    idle_cpu = Decimal(str(tuning.idle_cpu_pct))
+    idle_ram = Decimal(str(tuning.onprem_idle_ram_pct))
+    target = Decimal(str(tuning.onprem_rightsize_target_pct)) / _HUNDRED
+
+    labels = pool.labels()
+    out: list[Finding] = []
+    for vm in pool.vms:
+        row = usage.get(vm.uid)
+        if row is None or not vm.running:
+            continue
+        monthly = Decimal(vm.vcpu) * cpu_rate + vm.ram_gib * ram_rate
+        if row.cpu_pct <= idle_cpu and row.ram_pct <= idle_ram:
+            if monthly < floor:
+                continue
+            out.append(
+                Finding(
+                    kind="idle-vm",
+                    resource_id=labels[vm.uid],
+                    region=pool.key,
+                    summary=(
+                        f"{vm.name} ran at {row.cpu_pct:.1f}% cpu and {row.ram_pct:.1f}% ram "
+                        f"(p95 over {row.samples} samples) — switching it off returns "
+                        f"{vm.vcpu} vcpu and {_gib(vm.ram_gib)} GiB to the pool. its "
+                        f"{_gib(vm.committed_gib)} GiB of disk stays, so that part is not in "
+                        "the saving"
+                    ),
+                    monthly=monthly,
+                )
+            )
+            continue
+        fit = _rightsize(vm, row, target)
+        if fit is None:
+            continue
+        vcpu, ram_gib = fit
+        saving = Decimal(vm.vcpu - vcpu) * cpu_rate + (vm.ram_gib - ram_gib) * ram_rate
+        if saving < floor:
+            continue
+        out.append(
+            Finding(
+                kind="rightsize-vm",
+                resource_id=labels[vm.uid],
+                region=pool.key,
+                summary=(
+                    f"{vm.name} peaked at {_gib(row.vcpu)} vcpu and {_gib(row.ram_gib)} GiB "
+                    f"(p95 over {row.samples} samples) on {vm.vcpu} vcpu / "
+                    f"{_gib(vm.ram_gib)} GiB — {vcpu} vcpu / {_gib(ram_gib)} GiB leaves the "
+                    f"peak at {tuning.onprem_rightsize_target_pct:.0f}% of the new size"
+                ),
+                monthly=saving,
+            )
+        )
+    return out
+
+
+def _rightsize(vm: Vm, row: Usage, target: Decimal) -> tuple[int, Decimal] | None:
+    """The smallest whole vcpu / whole GiB that leaves the p95 at `target` of it.
+
+    Rounded up, and never below one vcpu or one GiB: a vm that fits in nothing is still a
+    vm. None when neither number moves — then there is nothing to advise.
+    """
+    vcpu = max(1, int(_ceil_decimal(row.vcpu / target)))
+    ram_gib = max(Decimal(1), _ceil_decimal(row.ram_gib / target))
+    vcpu = min(vcpu, vm.vcpu)
+    ram_gib = min(ram_gib, vm.ram_gib)
+    if vcpu == vm.vcpu and ram_gib == vm.ram_gib:
+        return None
+    return vcpu, ram_gib
+
+
+def _ceil_decimal(value: Decimal) -> Decimal:
+    return value.to_integral_value(rounding=ROUND_CEILING)
 
 
 def site_findings(

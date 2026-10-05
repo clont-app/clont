@@ -63,6 +63,8 @@ aws:
 #       username: clont-ro@vsphere.local
 #       password_env: DC1_VSPHERE_PASSWORD
 #       verify_ssl: true           # false only for a self-signed lab cert
+#       usage_window_days: 14      # trailing p95 window; 0 = no perf read, all vms billed
+#                                  # at what they reserved and no idle/rightsize advice
 #       # ca_bundle: /etc/clont/vcenter-ca.pem   # a private ca, instead of turning tls off
 #     rate_card:
 #       power_and_cooling: 3400    # or measured per chassis, later
@@ -125,6 +127,10 @@ finops:
   onprem_unaccounted_min_gib: 100    # datastore space no vm claims
   onprem_unaccounted_min_pct: 10     # ...and as a share of used space, both must pass
   onprem_thin_overcommit_ratio: 1.5  # thin promises over capacity before it is a risk
+  # idle and rightsizing need the perf pass (inventory.usage_window_days above zero).
+  # cpu reuses idle_cpu_pct; a vm has to be quiet on both to count as idle
+  onprem_idle_ram_pct: 20            # p95 ram below which a running vm is idle
+  onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking
 
   # S3 storage hygiene. The cold-data check needs allow_cloudwatch_metrics too
   # (one metric per bucket); lifecycle, versions and uploads are free.

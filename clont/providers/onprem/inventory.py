@@ -27,20 +27,25 @@ place:
   (the pool cost is the operator's per-cluster figure either way), so the error leans to
   under-stating, and `shared_datastores` names them so the report can say so
 
-Measured *usage* is deliberately absent. vcenter's `quickStats` are a one-second
-snapshot in MHz, and turning that into "vcpu used" needs a host's hz-per-core and a
-window — a snapshot dressed up as the p95 the plan asks for would be the worst kind of
-wrong number. `allocate()` charges provisioned when `used` is missing, so the gap simply
-stays unreported until the perf-counter pass lands.
+Measured *usage* is not computed here, only carried: `metrics.py` turns perf counters
+into a row per vm and this module merges it into the allocator's payload. vcenter's
+`quickStats` would have been the cheap way and are the wrong one — a one-second snapshot
+in MHz, needing a host's hz-per-core, dressed up as a p95. A vm with no row keeps no
+`used` key at all, and `allocate()` then charges it what it reserved: an absent
+measurement must never read as zero usage.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from clont.core.errors import ConfigError
+
+if TYPE_CHECKING:  # metrics.py reads Vm, so the import only goes one way at runtime
+    from clont.providers.onprem.metrics import Usage
 
 BYTES_PER_GIB = Decimal(1024**3)
 MIB_PER_GIB = Decimal(1024)
@@ -151,20 +156,28 @@ class Pool:
             vm.uid: vm.name if seen[vm.name] == 1 else f"{vm.name} ({vm.uid})" for vm in self.vms
         }
 
-    def allocation_payload(self, pool_card: dict) -> dict:
+    def allocation_payload(self, pool_card: dict, usage: dict[str, Usage] | None = None) -> dict:
         """Capacity + vms merged into the operator's card, ready for `allocate()`.
 
         Keyed by moref, not name: `allocate()` rejects a duplicate key rather than eat a
         vm, and a pair of same-named vms would make the whole pool unpriceable.
+
+        A vm with no measured row simply carries no `used`, and `allocate()` charges it
+        what it reserved — an absent measurement must never read as zero usage.
         """
+        measured = usage or {}
         return {
             **pool_card,
             "capacity": {key: str(value) for key, value in self.capacity().items()},
-            "vms": [
-                {"name": vm.uid, "provisioned": {k: str(v) for k, v in vm.provisioned().items()}}
-                for vm in self.vms
-            ],
+            "vms": [self._vm_row(vm, measured.get(vm.uid)) for vm in self.vms],
         }
+
+    @staticmethod
+    def _vm_row(vm: Vm, row: Usage | None) -> dict:
+        out = {"name": vm.uid, "provisioned": {k: str(v) for k, v in vm.provisioned().items()}}
+        if row is not None:
+            out["used"] = {k: str(v) for k, v in row.used(vm.committed_gib).items()}
+        return out
 
     @property
     def hosts_powered_off(self) -> tuple[str, ...]:
@@ -185,6 +198,9 @@ class SiteInventory:
     # every datastore of the site, once. a san mounted by three clusters sits in three
     # pools on purpose, so a site-wide storage total can only be summed here
     datastores: tuple[Datastore, ...] = ()
+    # moref -> measured usage, for the vms with enough perf history. empty when the pass
+    # read no counters at all, which is not the same as every vm sitting at zero
+    usage: dict[str, Usage] = field(default_factory=dict)
 
     def pool(self, key: str) -> Pool | None:
         return next((pool for pool in self.pools if pool.key == key or pool.name == key), None)

@@ -116,6 +116,10 @@ class InventoryConfig(_Model):
     port: int = Field(default=443, gt=0, lt=65536)
     verify_ssl: bool = True                # a self-signed lab cert is the operator's call
     ca_bundle: str | None = None           # pem for a private ca, instead of turning tls off
+    # trailing window the perf pass asks for. 0 reads no counters at all, and then every
+    # vm is charged what it reserved. capped at 30 days, because that is how long vcenter
+    # keeps the 2-hour rollups by default and a longer ask just reads short
+    usage_window_days: int = Field(default=14, ge=0, le=30)
 
     @model_validator(mode="after")
     def _one_password_source(self) -> InventoryConfig:

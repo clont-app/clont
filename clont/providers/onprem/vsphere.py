@@ -25,11 +25,13 @@ value that never came back.
 from __future__ import annotations
 
 import ssl
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.providers.onprem.inventory import Props, SiteInventory, build_site
+from clont.providers.onprem.metrics import COUNTERS, Samples, usage_rows
 
 log = get_logger("clont.providers.onprem.vsphere")
 
@@ -63,6 +65,13 @@ FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)
 
 DEFAULT_PORT = 443
+
+# 2-hour rollups, because vcenter keeps those 30 days by default and the 5-minute series
+# only an hour — a 14-day lookback has nothing to read in the fine one
+PERF_INTERVAL_SECONDS = 7200
+# entities per QueryPerf. one call for 500 vms times two counters is a reply vcenter
+# builds in memory before it sends it, and the usual advice is batches of tens
+PERF_BATCH = 50
 
 
 class VsphereInventory:
@@ -130,8 +139,14 @@ class VsphereInventory:
             self._si = None
             self._content = None
 
-    def site(self) -> SiteInventory:
-        """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in."""
+    def site(self, *, usage_window_days: int = 0) -> SiteInventory:
+        """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in.
+
+        `usage_window_days` above zero adds the measured half — a `QueryPerf` over the
+        trailing window per vm. Zero skips it, and then every vm is charged what it
+        reserved; a failed perf read does the same rather than failing the pass, because
+        a site with no counter history still has a bill to report.
+        """
         vim = self._require_vim()
         compute = self.properties(vim.ComputeResource, COMPUTE_PATHS)
         hosts = self.properties(vim.HostSystem, HOST_PATHS)
@@ -143,15 +158,79 @@ class VsphereInventory:
 
         clusters = {key: props for key, props in compute.items() if key.startswith(CLUSTER_PREFIX)}
         site = build_site(clusters, hosts, datastores, vms, folders | compute, datacenters)
+        if usage_window_days > 0:
+            site.usage.update(usage_rows(site.vms(), self.samples(usage_window_days)))
         log.info(
-            "%s: %d pools, %d hosts, %d vms, %d datastores",
+            "%s: %d pools, %d hosts, %d vms, %d datastores, %d measured",
             self.endpoint,
             len(site.pools),
             len(hosts),
             len(vms),
             len(datastores),
+            len(site.usage),
         )
         return site
+
+    def samples(
+        self, window_days: int, *, interval_seconds: int = PERF_INTERVAL_SECONDS
+    ) -> Samples:
+        """Every vm's cpu and ram series over the trailing window, keyed by moref.
+
+        `QueryPerf` is a read method and stays inside the Read-Only role, same as the
+        property calls. It is also the one call here that can fail on a healthy vcenter —
+        statistics level 1 collects these two counters, but an operator may have turned
+        the historical intervals off — so a fault comes back as an empty dict and a
+        warning, never as a failed pass.
+        """
+        vim = self._require_vim()
+        perf = self._content.perfManager
+        counters = {
+            f"{c.groupInfo.key}.{c.nameInfo.key}.{c.rollupType}": c.key for c in perf.perfCounter
+        }
+        by_id = {counters[name]: name for name in COUNTERS if name in counters}
+        if len(by_id) != len(COUNTERS):
+            log.warning("%s: vcenter does not publish %s", self.endpoint, ", ".join(COUNTERS))
+            return {}
+
+        metrics = [vim.PerformanceManager.MetricId(counterId=cid, instance="") for cid in by_id]
+        end = datetime.now(UTC)
+        start = end - timedelta(days=window_days)
+        entities = self._entities(vim.VirtualMachine)
+        out: Samples = {}
+        for batch in (
+            entities[index : index + PERF_BATCH] for index in range(0, len(entities), PERF_BATCH)
+        ):
+            specs = [
+                vim.PerformanceManager.QuerySpec(
+                    entity=entity,
+                    metricId=metrics,
+                    intervalId=interval_seconds,
+                    startTime=start,
+                    endTime=end,
+                )
+                for entity in batch
+            ]
+            try:
+                results = perf.QueryPerf(querySpec=specs) or []
+            except Exception as exc:  # noqa: BLE001 - pyvmomi faults need the extra to name
+                log.warning("%s: perf query failed, usage unmeasured: %s", self.endpoint, exc)
+                return {}
+            for result in results:
+                out[_moref(result.entity)] = {
+                    by_id[series.id.counterId]: [float(value) for value in (series.value or [])]
+                    for series in (result.value or [])
+                    if series.id.counterId in by_id
+                }
+        return out
+
+    def _entities(self, managed_type: Any) -> list[Any]:
+        """The managed objects themselves — `QueryPerf` takes objects, not morefs."""
+        content = self._content
+        view = content.viewManager.CreateContainerView(content.rootFolder, [managed_type], True)
+        try:
+            return list(view.view)
+        finally:
+            view.Destroy()
 
     def properties(self, managed_type: Any, paths: tuple[str, ...]) -> Props:
         """Every object of one type, in one round trip, keyed by moref id."""

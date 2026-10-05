@@ -18,6 +18,7 @@ from clont.finops.base import FinOpsTuning
 from clont.finops.onprem.config import OnPremSite
 from clont.finops.onprem.waste import OnPremWasteCollector, site_storage_rate
 from clont.providers.onprem.inventory import Datastore, Pool, build_site
+from clont.providers.onprem.metrics import Usage
 
 GIB = 1024**3
 PERIOD = Period(start=date(2026, 10, 1), end=date(2026, 10, 4))
@@ -112,6 +113,89 @@ def advise(inv=None, tuning=None, site=None):
     provider = FakeProvider(site or OnPremSite(**CARD), inv or inventory())
     recs = OnPremWasteCollector(provider, tuning).recommendations(PERIOD)
     return {rec.kind: rec for rec in recs}, recs
+
+
+# app-01 is the only running vm: 4 vcpu of a 16-core pool, 8 of 128 gib
+VCPU_MONTH = 7300 * 0.5 / 16   # $228.125 a vcpu
+RAM_MONTH = 7300 * 0.3 / 128   # $17.109375 a gib
+
+
+def measured(cpu_pct, ram_pct, inv=None, samples=48):
+    """One measured row for app-01, the way the perf pass would hand it over."""
+    inv = inv or inventory()
+    inv.usage["vim.VirtualMachine:vm-10"] = Usage(
+        vcpu=Decimal(4) * Decimal(str(cpu_pct)) / 100,
+        ram_gib=Decimal(8) * Decimal(str(ram_pct)) / 100,
+        cpu_pct=Decimal(str(cpu_pct)),
+        ram_pct=Decimal(str(ram_pct)),
+        samples=samples,
+    )
+    return inv
+
+
+def test_an_unmeasured_vm_gets_no_idle_or_rightsize_advice():
+    # the whole reason these kinds waited for the perf pass: provisioned says nothing here
+    _, recs = advise()
+    assert {rec.kind for rec in recs} & {"idle-vm", "rightsize-vm"} == set()
+
+
+def test_an_idle_vm_hands_back_cpu_and_ram_but_keeps_its_disk():
+    found, _ = advise(measured(2, 10))
+    idle = found["idle-vm"]
+    assert idle.resource.resource_id == "app-01"
+    assert float(idle.estimated_savings.amount) == pytest.approx(
+        4 * VCPU_MONTH + 8 * RAM_MONTH, abs=0.01
+    )
+    # switching it off does not delete the disk, so that money is not in the figure
+    assert "disk stays" in idle.summary
+    assert idle.approximate is False
+
+
+def test_quiet_cpu_at_busy_ram_is_not_idle():
+    # a cache: 2% cpu, 85% ram. "switch it off" would be wrong advice
+    found, _ = advise(measured(2, 85))
+    assert "idle-vm" not in found
+    # it is still oversized on cpu, and only on cpu
+    assert float(found["rightsize-vm"].estimated_savings.amount) == pytest.approx(
+        3 * VCPU_MONTH, abs=0.01
+    )
+
+
+def test_an_oversized_vm_is_sized_to_its_peak_plus_headroom():
+    found, _ = advise(measured(40, 50))
+    fit = found["rightsize-vm"]
+    # p95 1.6 vcpu / 4 gib at a 70% target -> 3 vcpu and 6 gib, both rounded up
+    assert float(fit.estimated_savings.amount) == pytest.approx(
+        1 * VCPU_MONTH + 2 * RAM_MONTH, abs=0.01
+    )
+    assert "3 vcpu / 6 GiB" in fit.summary
+
+
+def test_a_vm_already_near_the_target_yields_nothing():
+    # 80% cpu / 90% ram: rounded up with headroom it needs more than it has, so no finding
+    found, _ = advise(measured(80, 90))
+    assert "rightsize-vm" not in found
+    assert "idle-vm" not in found
+
+
+def test_a_vm_is_never_both_idle_and_oversized():
+    found, _ = advise(measured(2, 10))
+    assert "rightsize-vm" not in found
+
+
+def test_the_target_decides_how_much_comes_back():
+    # at a 100% target the peak is the size: 2 vcpu / 4 gib, so one more vcpu comes back
+    tuning = FinOpsTuning(onprem_rightsize_target_pct=100.0)
+    found, _ = advise(measured(40, 50), tuning)
+    assert float(found["rightsize-vm"].estimated_savings.amount) == pytest.approx(
+        2 * VCPU_MONTH + 4 * RAM_MONTH, abs=0.01
+    )
+
+
+def test_the_savings_floor_silences_a_measured_finding_too():
+    tuning = FinOpsTuning(onprem_min_savings_usd=10_000.0)
+    found, _ = advise(measured(2, 10), tuning)
+    assert "idle-vm" not in found
 
 
 def test_a_stopped_vm_is_billed_for_its_disk_and_nothing_else():

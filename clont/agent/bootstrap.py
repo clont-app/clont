@@ -206,6 +206,8 @@ def build_agent(config: Config) -> Agent:
             onprem_unaccounted_min_gib=config.finops.onprem_unaccounted_min_gib,
             onprem_unaccounted_min_pct=config.finops.onprem_unaccounted_min_pct,
             onprem_thin_overcommit_ratio=config.finops.onprem_thin_overcommit_ratio,
+            onprem_idle_ram_pct=config.finops.onprem_idle_ram_pct,
+            onprem_rightsize_target_pct=config.finops.onprem_rightsize_target_pct,
             s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
             s3_cold_min_gb=config.finops.s3_cold_min_gb,
             ri_sp_min_utilization=config.finops.ri_sp_min_utilization,

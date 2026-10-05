@@ -214,6 +214,9 @@ class FinOpsConfig(_Model):
     onprem_unaccounted_min_gib: float = 100.0  # datastore space no vm claims
     onprem_unaccounted_min_pct: float = 10.0   # ...and as a share of used space, both must pass
     onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
+    # measured kinds. cpu reuses idle_cpu_pct above; a vm needs both to be idle
+    onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
+    onprem_rightsize_target_pct: float = 70.0  # headroom left over the p95 when shrinking
 
     # S3 storage hygiene: lifecycle rules, noncurrent versions, abandoned uploads
     s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned

@@ -38,6 +38,10 @@ class FinOpsTuning:
     onprem_unaccounted_min_gib: float = 100.0  # datastore space no vm claims
     onprem_unaccounted_min_pct: float = 10.0   # ...and as a share of used space, both must pass
     onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
+    # idle takes `idle_cpu_pct` from the aws side and adds ram: a cache runs 2% cpu at 90%
+    # ram, and "switch it off" is wrong advice for it
+    onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
+    onprem_rightsize_target_pct: float = 70.0  # headroom left over the p95 when shrinking
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
     required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
     allow_cost_explorer: bool = False      # off = the billed ce:GetCostAndUsage is never called

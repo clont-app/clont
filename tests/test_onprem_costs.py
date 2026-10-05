@@ -18,6 +18,7 @@ from clont.core.models import Cloud, Period
 from clont.finops.onprem.config import InventoryConfig, OnPremSite
 from clont.finops.onprem.costs import OnPremCostCollector
 from clont.providers.onprem.inventory import build_site
+from clont.providers.onprem.metrics import Usage
 from clont.providers.onprem.provider import OnPremProvider
 
 GIB = 1024**3
@@ -284,9 +285,62 @@ def test_no_pool_priced_at_all_raises(site_config):
         collect(site_config, site_inventory(clusters={}, hosts=hosts, vms={}))
 
 
-def test_recommendations_stay_empty_until_usage_is_measured(site_config):
+def test_recommendations_stay_with_the_waste_collector(site_config):
     provider = FakeProvider(site_config, site_inventory())
     assert OnPremCostCollector(provider).recommendations(PERIOD) == []
+
+
+# the measured half: the perf pass splits a record, it never changes it
+
+MEASURED = Usage(
+    vcpu=Decimal(1),       # 25% of 4
+    ram_gib=Decimal(4),    # 50% of 8
+    cpu_pct=Decimal(25),
+    ram_pct=Decimal(50),
+    samples=48,
+)
+
+
+def measured_inventory():
+    inv = site_inventory()
+    inv.usage["vim.VirtualMachine:vm-10"] = MEASURED
+    return inv
+
+
+def test_a_measured_vm_is_still_billed_what_it_reserved(site_config):
+    plain = by_service(collect(site_config))
+    split = by_service(collect(site_config, measured_inventory()))
+    # the invoice does not shrink because a vm ran quietly, so neither does the record
+    assert [r.cost.amount for r in plain["vm"]] == [r.cost.amount for r in split["vm"]]
+    assert plain["headroom"][0].cost.amount == split["headroom"][0].cost.amount
+
+
+def test_the_used_and_wasted_split_rides_along_as_dimensions(site_config):
+    records = by_service(collect(site_config, measured_inventory()))
+    app = next(r for r in records["vm"] if r.resource.resource_id == "app-01")
+    assert app.dimensions["measured"] == "yes"
+    assert app.dimensions["used_vcpu"] == "1"
+    assert app.dimensions["cpu_pct"] == "25"
+    assert app.dimensions["samples"] == "48"
+    # 1 vcpu + 4 gib + the same 60 gib of disk, against 4 vcpu + 8 gib + 60 gib
+    assert float(app.dimensions["used_monthly"]) == pytest.approx(680.725, abs=0.01)
+    assert float(app.dimensions["waste_monthly"]) == pytest.approx(1505.625, abs=0.01)
+
+
+def test_a_vm_with_no_history_says_so_instead_of_claiming_zero(site_config):
+    records = by_service(collect(site_config, measured_inventory()))
+    old = next(r for r in records["vm"] if r.resource.resource_id == "old-01")
+    assert old.dimensions["measured"] == "no"
+    # a 0 here would read as a perfectly idle vm to every detector downstream
+    assert not [key for key in old.dimensions if key.startswith("used_")]
+
+
+def test_the_pool_line_says_how_much_of_it_was_measured(site_config):
+    dims = by_service(collect(site_config, measured_inventory()))["headroom"][0].dimensions
+    # "40% wasted" off one measured vm out of two is a lie with a number on it
+    assert dims["measured_vms"] == "1"
+    assert dims["vms"] == "2"
+    assert float(dims["total_used_monthly"]) < float(dims["total_provisioned_monthly"])
 
 
 # the provider: everything that does not need a vcenter on the other end
@@ -295,9 +349,10 @@ INVENTORY = {"endpoint": "vc1.dc1", "username": "clont-ro", "password": "s3cret"
 
 
 class FakeSession:
-    def __init__(self, site, counter):
+    def __init__(self, site, counter, windows):
         self._site = site
         self._counter = counter
+        self._windows = windows
         self.instance_uuid = "uuid-1"
 
     def __enter__(self):
@@ -307,16 +362,19 @@ class FakeSession:
     def __exit__(self, *_exc):
         return None
 
-    def site(self):
+    def site(self, *, usage_window_days=0):
+        self._windows.append(usage_window_days)
         return self._site
 
 
-def provider_with(session_site, clock_value=None, **site_kwargs):
+def provider_with(session_site, clock_value=None, inventory=None, **site_kwargs):
     logins: list[int] = []
+    windows: list[int] = []
     now = [0.0] if clock_value is None else clock_value
-    site = OnPremSite(inventory=INVENTORY, **(site_kwargs or CARD))
+    site = OnPremSite(inventory=inventory or INVENTORY, **(site_kwargs or CARD))
     provider = OnPremProvider("dc1", site, clock=lambda: now[0])
-    provider._session = lambda: FakeSession(session_site, logins)
+    provider._session = lambda: FakeSession(session_site, logins, windows)
+    provider.windows = windows
     return provider, logins, now
 
 
@@ -357,6 +415,27 @@ def test_preflight_names_a_login_that_sees_nothing():
 def test_preflight_is_quiet_when_the_role_is_right():
     provider, _, _ = provider_with(site_inventory())
     assert provider.preflight() == []
+
+
+def test_the_perf_window_rides_on_the_same_pass():
+    provider, logins, _ = provider_with(site_inventory())
+    provider.inventory()
+    # one login for the inventory and the counters both: the perf read is the expensive
+    # half, and paying for it in a second pass would walk the whole vcenter twice
+    assert len(logins) == 1
+    assert provider.windows == [14]
+
+
+def test_a_zero_window_reads_no_counters_at_all():
+    provider, _, _ = provider_with(site_inventory(), inventory=INVENTORY | {"usage_window_days": 0})
+    provider.inventory()
+    assert provider.windows == [0]
+
+
+def test_the_window_cannot_outrun_what_vcenter_keeps():
+    # 2-hour rollups live 30 days by default, so a longer ask would silently read short
+    with pytest.raises(ValueError, match="usage_window_days"):
+        InventoryConfig(endpoint="vc1", username="ro", password="x", usage_window_days=60)
 
 
 def test_a_site_with_no_inventory_block_is_not_a_provider():

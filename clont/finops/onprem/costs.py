@@ -23,9 +23,13 @@ Four decisions live here, and they are the ones that make the numbers add up:
   mounted must not blank the spend for the rest of the site; but if *every* pool fails
   the collector raises, because a $0.00 report is worse than an error
 
-Measured usage is not here yet (see `inventory.py`), so `allocate()` charges provisioned
-and the waste column is zero. That is the honest shape until the perf-counter pass lands:
-the records are real spend, just not yet split into used and wasted.
+**The cost of a record is always what the vm reserved**, never the p95 it ran at — that
+is the money the operator's invoice is made of, and a spend line that quietly billed
+measured usage would make the site total smaller than the bill. The measured half rides
+along as dimensions (`used_daily`, `waste_daily`, `cpu_pct`, `ram_pct`, `samples`), which
+is what lets the showback report split one unchanged number into used and wasted. A vm
+with too little history carries `measured=no` and no usage keys at all — an absent
+measurement is not zero usage.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from clont.core.registry import register
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.onprem.rates import HOURS_PER_MONTH, allocate
 from clont.providers.onprem.inventory import Pool, SiteInventory
+from clont.providers.onprem.metrics import Usage
 from clont.providers.onprem.provider import OnPremProvider
 
 log = get_logger("clont.finops.onprem")
@@ -71,7 +76,7 @@ class OnPremCostCollector:
         failed: list[str] = []
         for pool in site.pools:
             try:
-                records.extend(self._pool_records(pool, day))
+                records.extend(self._pool_records(pool, day, site.usage))
             except ConfigError as exc:
                 # a pool with no capacity is a failed measurement, not free iron
                 log.warning("%s: pool %s not priced: %s", self._provider.alias, pool.key, exc)
@@ -82,13 +87,15 @@ class OnPremCostCollector:
         return records
 
     def recommendations(self, period: Period) -> list[Recommendation]:
-        # idle, orphan and rightsizing advice needs measured usage, and the pass has none
-        # yet — a finding off provisioned alone would just be a list of every vm
+        # this collector only ever emits spend; every finding lives in `waste.py`
         return []
 
-    def _pool_records(self, pool: Pool, day: date) -> list[CostRecord]:
+    def _pool_records(
+        self, pool: Pool, day: date, usage: dict[str, Usage] | None = None
+    ) -> list[CostRecord]:
         card = self._card(pool)
-        result = allocate(pool.allocation_payload(card))
+        measured = usage or {}
+        result = allocate(pool.allocation_payload(card, measured))
         when = Period(start=day, end=day)
         shared = {"cluster": pool.key, "pool_kind": pool.kind}
         labels = pool.labels()
@@ -118,7 +125,8 @@ class OnPremCostCollector:
                     # it so the report can show the gap thin provisioning opened
                     "disk_gib": _num(vm.committed_gib),
                     "disk_promised_gib": _num(vm.disk_gib),
-                },
+                }
+                | _measured_dimensions(measured.get(vm.uid), result["vms"][vm.uid]),
             )
             for vm in pool.vms
         ]
@@ -143,7 +151,7 @@ class OnPremCostCollector:
                 # the signed figure travels as a dimension: clamping the money must not
                 # make an overcommitted pool look merely full
                 dimensions=shared
-                | _pool_dimensions(pool, result)
+                | _pool_dimensions(pool, result, measured)
                 | {"headroom_monthly": _num(headroom)},
             )
         )
@@ -178,7 +186,7 @@ class OnPremCostCollector:
             )
 
 
-def _pool_dimensions(pool: Pool, result: dict) -> dict[str, str]:
+def _pool_dimensions(pool: Pool, result: dict, measured: dict[str, Usage]) -> dict[str, str]:
     """Everything the report needs to defend a number: the rates, and what produced them.
 
     The weights are arguable by design, so they travel next to the rates they split rather
@@ -208,6 +216,32 @@ def _pool_dimensions(pool: Pool, result: dict) -> dict[str, str]:
         "vms": str(len(pool.vms)),
         "incomplete_vms": ",".join(pool.incomplete_vms),
         "shared_datastores": ",".join(pool.shared_datastores),
+        # how much of the pool's spend is actually backed by a measurement. a report that
+        # says "40% wasted" off three measured vms out of ninety is a lie with a number
+        "measured_vms": str(sum(1 for vm in pool.vms if vm.uid in measured)),
+        "total_used_monthly": _num(result["total_used"]),
+        "total_provisioned_monthly": _num(result["total_provisioned"]),
+    }
+
+
+def _measured_dimensions(row: Usage | None, priced: dict) -> dict[str, str]:
+    """The measured half of one vm's line, or nothing at all.
+
+    No row means no history, not idleness, so the keys are absent rather than zero —
+    a `0` here would read as a perfectly idle vm to every detector downstream.
+    """
+    if row is None:
+        return {"measured": "no"}
+    return {
+        "measured": "yes",
+        "used_vcpu": _num(row.vcpu),
+        "used_ram_gib": _num(row.ram_gib),
+        "cpu_pct": _num(row.cpu_pct),
+        "ram_pct": _num(row.ram_pct),
+        "samples": str(row.samples),
+        # the same monthly figures the cost is derived from, so the split is checkable
+        "used_monthly": _num(priced["used"]),
+        "waste_monthly": _num(priced["waste"]),
     }
 
 

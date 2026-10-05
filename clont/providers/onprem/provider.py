@@ -75,13 +75,18 @@ class OnPremProvider:
         log.info("authenticated %s at %s (%s)", self.alias, self._config.endpoint, self.account_id)
 
     def inventory(self, *, refresh: bool = False) -> SiteInventory:
-        """One pass over the site, reused within the ttl."""
+        """One pass over the site, measured usage included, reused within the ttl.
+
+        The perf read rides on the same session on purpose: it is the expensive half of
+        the pass and both collectors want it, so paying for it twice an hour would be two
+        logins and two walks of the whole vcenter for one set of numbers.
+        """
         if not refresh and self._last is not None:
             age = self._clock() - self._last[0]
             if age < self._ttl:
                 return self._last[1]
         with self._session() as session:
-            site = session.site()
+            site = session.site(usage_window_days=self._config.usage_window_days)
         self._last = (self._clock(), site)
         return site
 
