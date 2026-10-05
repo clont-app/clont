@@ -328,6 +328,85 @@ def test_a_deduping_array_holds_less_than_the_vms_claim_and_that_is_not_a_findin
     assert "unaccounted-storage" not in advise(inventory(datastores=datastores))[0]
 
 
+def test_a_dead_arrays_space_is_not_also_counted_as_unaccounted():
+    datastores = {
+        **DATASTORES,
+        "vim.Datastore:ds-2": {
+            "name": "old-array",
+            "summary.capacity": 500 * GIB,
+            "summary.freeSpace": 100 * GIB,  # 400 gib still written on an array nobody mounts
+            "summary.uncommitted": 0,
+        },
+    }
+    found, _ = advise(inventory(datastores=datastores))
+    # the whole 500 gib already comes back as `unmounted-datastore`, so the 400 written on
+    # it must not be offered a second time as leftovers — the gap is the live san's 340
+    assert float(found["unaccounted-storage"].estimated_savings.amount) == pytest.approx(
+        340 * STORAGE_RATE, abs=0.01
+    )
+
+
+# two clusters, each with its own copy of a name vcenter does not keep unique
+TWO_CLUSTERS = {
+    **CLUSTERS,
+    "vim.ClusterComputeResource:domain-c8": {"name": "dev", "host": ["vim.HostSystem:host-3"]},
+}
+TWO_CLUSTER_HOSTS = {
+    **HOSTS,
+    "vim.HostSystem:host-3": {
+        "name": "esx-03",
+        "hardware.cpuInfo.numCpuCores": 8,
+        "hardware.memorySize": 64 * GIB,
+        "runtime.powerState": "poweredOn",
+        "datastore": ["vim.Datastore:ds-1"],
+        "vm": ["vim.VirtualMachine:vm-21"],
+    },
+}
+
+
+def test_each_cluster_keeps_its_own_same_named_vm():
+    # vcenter holds two `old-01`, one per cluster. deduping on the shown name called them
+    # one thing and dropped the second cluster's $73 out of the report
+    vms = {
+        **VMS,
+        "vim.VirtualMachine:vm-21": {
+            **VMS["vim.VirtualMachine:vm-11"],
+            "runtime.host": "vim.HostSystem:host-3",
+        },
+    }
+    _, recs = advise(inventory(clusters=TWO_CLUSTERS, hosts=TWO_CLUSTER_HOSTS, vms=vms))
+    stopped = [rec for rec in recs if rec.kind == "stopped-vm"]
+    assert sorted(rec.resource.region for rec in stopped) == ["dev", "prod"]
+    assert all(rec.resource.resource_id == "old-01" for rec in stopped)
+
+
+def test_two_arrays_with_the_same_name_are_two_risks():
+    # `LocalDS_0` is the default name in every datacenter, and these are different disks
+    datastores = {
+        "vim.Datastore:ds-1": {
+            **DATASTORES["vim.Datastore:ds-1"],
+            "name": "LocalDS_0",
+            "summary.uncommitted": 3000 * GIB,
+        },
+        "vim.Datastore:ds-9": {
+            **DATASTORES["vim.Datastore:ds-1"],
+            "name": "LocalDS_0",
+            "summary.uncommitted": 3000 * GIB,
+        },
+    }
+    hosts = {
+        **TWO_CLUSTER_HOSTS,
+        "vim.HostSystem:host-3": {
+            **TWO_CLUSTER_HOSTS["vim.HostSystem:host-3"],
+            "datastore": ["vim.Datastore:ds-9"],
+            "vm": [],
+        },
+    }
+    _, recs = advise(inventory(clusters=TWO_CLUSTERS, hosts=hosts, datastores=datastores))
+    thin = [rec for rec in recs if rec.kind == "thin-overcommit"]
+    assert sorted(rec.resource.region for rec in thin) == ["dev", "prod"]
+
+
 def test_a_shared_datastore_is_counted_once_across_pools():
     # two clusters mounting the same san: a per-pool subtraction would count it twice and
     # invent a second 500 gib of used space

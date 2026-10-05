@@ -85,6 +85,9 @@ class Finding:
     summary: str
     monthly: Decimal  # usd, 0 for a risk that has no saving
     approximate: bool = False
+    # what makes it the same thing twice — a moref, never the shown name. vcenter happily
+    # holds two `web-01` and two `LocalDS_0`, and `_once` would drop one of them
+    uid: str = ""
 
 
 @register("finops", Cloud.ONPREM, _SERVICE)
@@ -154,11 +157,16 @@ class OnPremWasteCollector:
 def _once(findings: Iterable[Finding]) -> list[Finding]:
     """One finding per thing. A shared san is in every pool that mounts it, and a cluster
     cannot fix it twice — the first pool keeps it, so the report says the array, not the
-    mount count. Vms and hosts belong to one pool, so nothing else collides."""
+    mount count.
+
+    Keyed on the moref and not on the shown name: two datacenters each hold a `LocalDS_0`
+    and a `web-01`, and a name key called them one thing and silently dropped a real
+    finding — the second cluster's stopped vm, its dead array, its thin risk.
+    """
     seen: set[tuple[str, str]] = set()
     out: list[Finding] = []
     for finding in findings:
-        key = (finding.kind, finding.resource_id)
+        key = (finding.kind, finding.uid or finding.resource_id)
         if key in seen:
             continue
         seen.add(key)
@@ -187,6 +195,7 @@ def pool_findings(pool: Pool, priced: dict, tuning: FinOpsTuning) -> list[Findin
                 region=pool.key,
                 summary=_disk_summary(vm),
                 monthly=monthly,
+                uid=vm.uid,
             )
         )
 
@@ -234,6 +243,7 @@ def usage_findings(
                         "the saving"
                     ),
                     monthly=monthly,
+                    uid=vm.uid,
                 )
             )
             continue
@@ -256,6 +266,7 @@ def usage_findings(
                     f"peak at {tuning.onprem_rightsize_target_pct:.0f}% of the new size"
                 ),
                 monthly=saving,
+                uid=vm.uid,
             )
         )
     return out
@@ -315,6 +326,7 @@ def site_findings(
                 ),
                 monthly=monthly,
                 approximate=True,
+                uid=vm.uid,
             )
         )
 
@@ -334,6 +346,7 @@ def site_findings(
                 ),
                 monthly=monthly,
                 approximate=True,
+                uid=datastore.uid,
             )
         )
 
@@ -413,6 +426,7 @@ def _host_findings(pool: Pool, priced: dict, floor: Decimal) -> list[Finding]:
                 region=pool.key,
                 summary=f"{host.name} {state}",
                 monthly=monthly,
+                uid=f"{pool.key}/{host.name}",
             )
         )
     return out
@@ -433,6 +447,7 @@ def _thin_findings(pool: Pool, tuning: FinOpsTuning) -> list[Finding]:
                 "it fills before the vms notice"
             ),
             monthly=Decimal(0),
+            uid=datastore.uid,
         )
         for datastore in pool.datastores
         if datastore.overcommit >= limit
@@ -446,9 +461,15 @@ def _unaccounted_gib(site: SiteInventory, tuning: FinOpsTuning) -> Decimal | Non
     pool that mounts it, so a per-pool subtraction would charge one cluster for another
     cluster's vms. A negative gap is normal on an array that dedupes or compresses — the
     vms claim more than the disks hold — and is not a finding.
+
+    An array nobody mounts is left out: `unmounted-datastore` already offers its whole
+    capacity back, so counting the space on it again would price the same gib twice and
+    bury the real leftovers on the live arrays under it.
     """
+    dead = {ds.uid for ds in site.unmounted_datastores}
     used = sum(
-        (ds.capacity_gib - ds.free_gib for ds in site.datastores), Decimal(0)
+        (ds.capacity_gib - ds.free_gib for ds in site.datastores if ds.uid not in dead),
+        Decimal(0),
     )
     claimed = sum((vm.committed_gib for vm in site.vms()), Decimal(0))
     gap = used - claimed
