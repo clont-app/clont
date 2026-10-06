@@ -99,6 +99,11 @@ class Vm:
     # true when vcenter answered without the config of the vm, e.g. its host is
     # disconnected. charged on what did come back, and counted in the report
     incomplete: bool = False
+    # the two ids a kubernetes node can be matched on. instance uuid is vcenter's own and
+    # cannot collide; bios uuid is smbios, so a clone or a restore from backup can carry a
+    # duplicate — both are kept because `vsphere://` in a providerID means either one
+    instance_uuid: str | None = None
+    bios_uuid: str | None = None
 
     @property
     def running(self) -> bool:
@@ -401,6 +406,8 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
         # a vm whose host is disconnected answers name and little else: charge what came
         # back, and let the report name it rather than dropping it
         incomplete=vcpu <= 0 or ram_mib <= 0,
+        instance_uuid=_text(props.get("config.instanceUuid")) or None,
+        bios_uuid=_text(props.get("config.uuid")) or None,
     )
 
 

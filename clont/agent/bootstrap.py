@@ -10,6 +10,7 @@ from clont.api.uplink import ApiUplink
 from clont.core.config import AWSConfig, Config, MetricsConfig
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
+from clont.finops.k8s.source import KubernetesSource
 # the module, not the package: `core.config` already imports the onprem config models, so
 # registering from the package __init__ would drag the collectors into every config load
 from clont.finops.onprem import costs as _onprem_costs  # noqa: F401 - for registration
@@ -93,6 +94,32 @@ def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
             continue
         providers.append(provider)
     return providers
+
+
+def _k8s_sources(config: Config, providers: list[Provider]) -> list[KubernetesSource]:
+    """One source per cluster whose pricing provider came up, each one mapped at startup.
+
+    The mapping is logged here because "how many of my nodes can clont price" is what an
+    operator has to see *before* any report exists — a cluster that maps nothing is a
+    `priced_by` pointing at the wrong site, and learning that from the first digest is a day
+    late. One unreachable cluster is isolated the way one unreachable vcenter is.
+    """
+    by_alias = {provider.alias: provider for provider in providers}
+    sources: list[KubernetesSource] = []
+    for name, cluster in config.kubernetes.items():
+        provider = by_alias.get(cluster.priced_by)
+        if provider is None:
+            # the alias is configured — the validator checked that — so it just did not come up
+            log.warning("kubernetes %s: %s is not available, nothing prices it", name, cluster.priced_by)
+            continue
+        source = KubernetesSource(name, cluster, provider)
+        try:
+            log.info("kubernetes %s", source.mapping().summary())
+        except Exception as exc:  # noqa: BLE001 - isolate one bad cluster
+            log.warning("skipping kubernetes cluster %s: %s", name, exc)
+            continue
+        sources.append(source)
+    return sources
 
 
 def _member_configs(payer: AWSProvider, aws: AWSConfig) -> list[tuple[str, AWSConfig]]:
@@ -179,6 +206,10 @@ def build_agent(config: Config) -> Agent:
     if not onprem and any(site.inventory is not None for site in config.onprem.values()):
         raise RuntimeError("no configured on-prem site could be reached")
     providers.extend(onprem)
+
+    # nodes are placed on the iron above, so this runs last and only reports for now;
+    # the namespace split is the collector that will consume these sources
+    _k8s_sources(config, providers)
 
     uplink = (
         ApiUplink(config.api.url, config.api.api_key, timeout=config.api.timeout_seconds)

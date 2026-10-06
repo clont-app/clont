@@ -60,6 +60,10 @@ VM_PATHS = (
     "config.hardware.memoryMB",
     "summary.storage.committed",
     "summary.storage.uncommitted",
+    # a kubernetes node's providerID is `vsphere://` one of these two, depending on which
+    # cloud provider wrote it, so both are read and either may match a node
+    "config.instanceUuid",
+    "config.uuid",
 )
 FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)

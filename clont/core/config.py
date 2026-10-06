@@ -14,7 +14,7 @@ import os
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -25,6 +25,7 @@ from pydantic_settings import (
 from clont.core.logging import LEVEL_NAMES, get_logger
 from clont.events.models import EventSeverity
 from clont.finops.onprem.config import OnPremSite
+from clont.providers.k8s.config import KubernetesCluster
 
 log = get_logger("clont.config")
 
@@ -286,6 +287,8 @@ class Config(BaseSettings):
     log_level: str = "info"              # daemon's own operational verbosity
     aws: dict[str, AWSConfig] = Field(default_factory=dict)   # alias -> account
     onprem: dict[str, OnPremSite] = Field(default_factory=dict)  # alias -> site (own iron)
+    # name -> cluster. not a provider: a cluster is a *source* priced through one of the above
+    kubernetes: dict[str, KubernetesCluster] = Field(default_factory=dict)
     finops: FinOpsConfig = Field(default_factory=FinOpsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
@@ -297,6 +300,23 @@ class Config(BaseSettings):
         if v.strip().lower() not in LEVEL_NAMES:
             raise ValueError(f"log_level must be one of {', '.join(LEVEL_NAMES)}")
         return v.strip().lower()
+
+    @model_validator(mode="after")
+    def _clusters_are_priced(self) -> Config:
+        """A cluster's `priced_by` must name a site or account that is actually configured.
+
+        This is the one cross-section rule in the file, and it is here because this is the
+        only place both halves are visible. A typo would otherwise come back at the first
+        cycle as a cluster whose nodes map to nothing — which reads like a broken match.
+        """
+        for name, cluster in self.kubernetes.items():
+            if cluster.priced_by not in self.aws and cluster.priced_by not in self.onprem:
+                known = ", ".join(sorted(set(self.aws) | set(self.onprem))) or "none configured"
+                raise ValueError(
+                    f"kubernetes.{name}.priced_by={cluster.priced_by!r} names no provider "
+                    f"({known}): a cluster is priced through a pool, never on its own"
+                )
+        return self
 
     @classmethod
     def settings_customise_sources(

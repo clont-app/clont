@@ -80,6 +80,22 @@ aws:
 #       dev-gen9:
 #         rate_card: {hardware_capex: 120000, lifetime_months: 60}
 
+# Kubernetes. Not a provider: a cluster is a *source*, priced through a pool that
+# already exists. priced_by names a site under `onprem:` (its vms) or an account
+# under `aws:` (its instances), it is required, and it has to be configured above —
+# clont places each node on the iron it already costed instead of guessing a node
+# price. A node it cannot place is reported unmapped, never priced at zero; the
+# startup log says how many of each cluster's nodes are mapped and why the rest are
+# not. Access is the kubeconfig's or the pod's: get/list on nodes is enough.
+# kubernetes:
+#   lab:
+#     priced_by: dc1               # the site whose vms these nodes run on
+#     kubeconfig: /etc/clont/kubeconfig
+#     context: lab-admin           # default: the kubeconfig's current-context
+#     # in_cluster: true           # instead of a kubeconfig: the pod's service account
+#     match_by_name: true          # last-resort match, node name == vm name. false =
+#                                  # an unidentifiable node is reported, not guessed
+
 # FinOps. Spend events: a daily spend digest (info) every cycle, a spend spike
 # (warn) when a service's latest-day spend jumps over its baseline, a month-end
 # forecast (info), and budget alerts (warn/critical). The idle/snapshot
