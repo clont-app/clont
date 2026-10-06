@@ -15,6 +15,7 @@ import pytest
 
 from clont.core.errors import ConfigError
 from clont.core.models import Cloud, Period
+from clont.finops.guests import GuestStorage
 from clont.finops.onprem.config import InventoryConfig, OnPremSite
 from clont.finops.onprem.costs import OnPremCostCollector
 from clont.providers.onprem.inventory import build_site
@@ -436,6 +437,21 @@ def test_the_window_cannot_outrun_what_vcenter_keeps():
     # 2-hour rollups live 30 days by default, so a longer ask would silently read short
     with pytest.raises(ValueError, match="usage_window_days"):
         InventoryConfig(endpoint="vc1", username="ro", password="x", usage_window_days=60)
+
+
+def test_every_attached_guest_is_asked_what_it_holds():
+    provider, _, _ = provider_with(site_inventory())
+    provider.attach_guest("lab", lambda: GuestStorage(source="lab", detached_gib=Decimal(10)))
+    provider.attach_guest("ci", lambda: GuestStorage(source="ci", detached_gib=Decimal(5)))
+    assert [held.source for held in provider.guest_storage()] == ["lab", "ci"]
+
+
+def test_a_guest_that_cannot_be_read_is_dropped_not_raised():
+    # one unreachable cluster must not cost the site its whole recommendation pass
+    provider, _, _ = provider_with(site_inventory())
+    provider.attach_guest("down", lambda: 1 / 0)
+    provider.attach_guest("lab", lambda: GuestStorage(source="lab"))
+    assert [held.source for held in provider.guest_storage()] == ["lab"]
 
 
 def test_a_site_with_no_inventory_block_is_not_a_provider():

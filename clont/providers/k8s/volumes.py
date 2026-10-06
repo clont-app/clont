@@ -78,12 +78,15 @@ def _claim(item: dict) -> Claim:
         phase=_text(status.get("phase")),
         storage_class=_text(spec.get("storageClassName")),
         volume=_text(spec.get("volumeName")),
-        created=_stamp(meta.get("creationTimestamp")),
+        created=stamp(meta.get("creationTimestamp")),
     )
 
 
-def _stamp(value: object) -> datetime | None:
-    """An api timestamp (`2026-10-06T11:12:13Z`) as an aware datetime, or None."""
+def stamp(value: object) -> datetime | None:
+    """An api timestamp (`2026-10-06T11:12:13Z`) as an aware datetime, or None.
+
+    Shared with `pvs.py`: one parser for one wire format.
+    """
     text = _text(value)
     if not text:
         return None

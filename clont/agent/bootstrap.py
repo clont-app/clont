@@ -153,6 +153,11 @@ def _k8s_sources(
         except Exception as exc:  # noqa: BLE001 - isolate one bad cluster
             log.warning("skipping kubernetes cluster %s: %s", name, exc)
             continue
+        # the site's storage gap counts this cluster's volumes as space no vm accounts for,
+        # so the cluster has to be able to say "those are mine" before the waste pass runs
+        attach = getattr(provider, "attach_guest", None)
+        if attach is not None:
+            attach(name, source.guest_storage)
         sources.append(source)
     return sources
 

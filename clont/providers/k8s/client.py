@@ -1,21 +1,22 @@
-"""The cluster wire: five list calls, and nothing else.
+"""The cluster wire: six list calls, and nothing else.
 
 The `kubernetes` client is an optional dependency (`pip install clont[k8s]`) — an aws-only
 install has no business carrying it — so it is imported when a session opens and not at
 module import. Same shape as `vsphere.py`.
 
-**Only `list`, only on `nodes`, `pods`, `namespaces`, `persistentvolumeclaims` and
-`pods.metrics.k8s.io`.** That is the whole api surface of this file, which is what lets
-clont run under a ClusterRole with `get,list` on those five and nothing else. No write
-verb, no secrets, no exec, no logs.
+**Only `list`, only on `nodes`, `pods`, `namespaces`, `persistentvolumeclaims`,
+`persistentvolumes` and `pods.metrics.k8s.io`.** That is the whole api surface of this
+file, which is what lets clont run under a ClusterRole with `get,list` on those six and
+nothing else. No write verb, no secrets, no exec, no logs.
 
-The last three are optional, and a cluster that refuses them is still fully priced — only
+The last four are optional, and a cluster that refuses them is still fully priced — only
 the extra findings go quiet. Namespaces are read for their *labels*, so a showback
 table can group by `team` the way the aws one groups by a cost-allocation tag. A role
 without them still prices every namespace — `labels()` answers empty and the table groups
 by name — so the read is optional on purpose and a 403 there is not a failed pass. Claims
-are the same: without them the volume findings are simply absent, which is better than a
-cluster that cannot be priced because a role was tight.
+and volumes are the same: without them the volume findings are simply absent and the
+on-prem storage gap stays unreconciled, which is better than a cluster that cannot be
+priced because a role was tight.
 
 Two things that are easy to get wrong and are decided here:
 
@@ -40,6 +41,7 @@ from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.providers.k8s.nodes import Node, build_nodes
 from clont.providers.k8s.pods import Pod, build_pods
+from clont.providers.k8s.pvs import Volume, build_volumes
 from clont.providers.k8s.usage import PodUsage, build_usage
 from clont.providers.k8s.volumes import Claim, build_claims
 
@@ -140,6 +142,22 @@ class KubernetesNodes:
             log.info("%s: persistent volume claims unavailable: %s", self.endpoint, exc)
             return []
         return build_claims(items)
+
+    def volumes(self) -> list[Volume]:
+        """Every pv, or empty when the role cannot list them.
+
+        Optional like `claims()`, and it costs a little more when it is missing: without
+        the pv there is no way to tell a volume on a datastore from one inside a node's own
+        disk, so the on-prem gap stays as large as it was.
+        """
+        try:
+            items = self._list(
+                "persistentvolumes", lambda: self._api.list_persistent_volume
+            )
+        except Exception as exc:  # noqa: BLE001 - optional read, see the module docstring
+            log.info("%s: persistent volumes unavailable: %s", self.endpoint, exc)
+            return []
+        return build_volumes(items)
 
     def usage(self) -> list[PodUsage]:
         """metrics-server's per-pod readings, or empty when there is nothing to read.

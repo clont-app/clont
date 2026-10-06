@@ -86,8 +86,12 @@ aws:
 # clont places each node on the iron it already costed instead of guessing a node
 # price. A node it cannot place is reported unmapped, never priced at zero; the
 # startup log says how many of each cluster's nodes are mapped and why the rest are
-# not. Access is the kubeconfig's or the pod's: get/list on nodes, pods, namespaces and
-# pods.metrics.k8s.io is the whole of it.
+# not. Access is the kubeconfig's or the pod's: get/list on nodes, pods, namespaces,
+# persistentvolumeclaims, persistentvolumes and pods.metrics.k8s.io is the whole of it.
+# Only nodes and pods are needed to price a cluster; each of the rest costs one report
+# if the role is tight. Volumes are also what keeps the site's storage gap honest — a
+# pvc nothing mounts is datastore space no vm accounts for, and without the pv read it
+# is reported twice.
 # kubernetes:
 #   lab:
 #     priced_by: dc1               # the site whose vms these nodes run on

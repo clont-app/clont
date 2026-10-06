@@ -19,7 +19,10 @@ What the snapshot alone proves:
 * **storage no vm accounts for** — datastore used space minus what every vm claims. this
   is the read-only twin of aws's unattached volume: clont runs under the vsphere
   Read-Only role, which cannot browse a datastore, so we can prove the *size* of the
-  leftovers (isos, orphaned vmdks, dead folders) but never list the files
+  leftovers (isos, orphaned vmdks, dead folders) but never list the files. a kubernetes
+  cluster on this iron holds volumes that look exactly like that from the hypervisor, and
+  it *can* name them — so whatever the clusters own up to comes off this gap and is
+  reported against their claims instead
 * **thin overcommit** is a risk, not a saving: it reports $0 and says what the promises
   add up to
 
@@ -60,6 +63,7 @@ from clont.core.logging import get_logger
 from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.base import FinOpsTuning
+from clont.finops.guests import GuestStorage
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.onprem.rates import allocate
 from clont.providers.onprem.inventory import Pool, SiteInventory, Vm
@@ -127,8 +131,19 @@ class OnPremWasteCollector:
             # would just read as a bug in the report
             log.warning("%s: no pool priced, site-wide findings skipped", self._provider.alias)
         else:
-            findings.extend(site_findings(site, rate, self._tuning))
+            # what the clusters on this iron own up to holding, so the storage gap is not
+            # offered back twice — see `_unaccounted_gib`
+            findings.extend(site_findings(site, rate, self._tuning, self._guests()))
         return [self._rec(finding) for finding in _once(findings)]
+
+    def _guests(self) -> list[GuestStorage]:
+        """What the clusters on this site hold, or nothing when none is attached.
+
+        Duck-typed: the collector is handed a provider and a backend with no guests to ask
+        simply has none, which is the state every site was in before kubernetes was read.
+        """
+        ask = getattr(self._provider, "guest_storage", None)
+        return list(ask()) if callable(ask) else []
 
     def _card(self, pool: Pool) -> dict:
         return self._provider.site.card_for(pool.key, pool.name)
@@ -304,7 +319,10 @@ def _handback_rate(priced: dict, rate: str, dimension: str) -> Decimal:
 
 
 def site_findings(
-    site: SiteInventory, storage_rate: Decimal, tuning: FinOpsTuning
+    site: SiteInventory,
+    storage_rate: Decimal,
+    tuning: FinOpsTuning,
+    guests: Iterable[GuestStorage] = (),
 ) -> list[Finding]:
     """The leftovers that belong to no pool, priced at the site's mean storage rate."""
     floor = Decimal(str(tuning.onprem_min_savings_usd))
@@ -350,20 +368,20 @@ def site_findings(
             )
         )
 
-    unaccounted = _unaccounted_gib(site, tuning)
-    if unaccounted is not None and unaccounted * storage_rate >= floor:
+    gap = _unaccounted_gib(site, tuning, guests)
+    if gap is not None and gap.unexplained * storage_rate >= floor:
         out.append(
             Finding(
                 kind="unaccounted-storage",
                 resource_id="datastore-leftovers",
                 region=_SITE,
                 summary=(
-                    f"{_gib(unaccounted)} GiB of datastore space no vm accounts for — "
+                    f"{_gib(gap.unexplained)} GiB of datastore space no vm accounts for — "
                     "isos, orphaned vmdks or dead vm folders. clont reads vcenter under the "
                     "Read-Only role and cannot browse a datastore, so this is the size, "
-                    "not the file list"
+                    f"not the file list{gap.credit}"
                 ),
-                monthly=unaccounted * storage_rate,
+                monthly=gap.unexplained * storage_rate,
                 approximate=True,
             )
         )
@@ -454,7 +472,35 @@ def _thin_findings(pool: Pool, tuning: FinOpsTuning) -> list[Finding]:
     ]
 
 
-def _unaccounted_gib(site: SiteInventory, tuning: FinOpsTuning) -> Decimal | None:
+@dataclass(frozen=True, slots=True)
+class _Gap:
+    """The storage gap, and how much of it a guest platform owned up to."""
+
+    raw: Decimal
+    explained: Decimal = Decimal(0)
+    volumes: int = 0
+    sources: tuple[str, ...] = ()
+
+    @property
+    def unexplained(self) -> Decimal:
+        return self.raw - self.explained
+
+    @property
+    def credit(self) -> str:
+        """The sentence that says the gap is partly somebody's, and whose."""
+        if self.explained <= 0:
+            return ""
+        return (
+            f". a further {_gib(self.explained)} GiB of the gap is {self.volumes} "
+            f"kubernetes volume(s) no vm holds in {', '.join(self.sources)} — ask the "
+            "cluster about those, it accounts for them and this figure does not count "
+            "them twice"
+        )
+
+
+def _unaccounted_gib(
+    site: SiteInventory, tuning: FinOpsTuning, guests: Iterable[GuestStorage] = ()
+) -> _Gap | None:
     """Used datastore space minus what every vm claims, once both thresholds are passed.
 
     Summed over the site's flat datastore list on purpose: a shared array sits in every
@@ -465,6 +511,13 @@ def _unaccounted_gib(site: SiteInventory, tuning: FinOpsTuning) -> Decimal | Non
     An array nobody mounts is left out: `unmounted-datastore` already offers its whole
     capacity back, so counting the space on it again would price the same gib twice and
     bury the real leftovers on the live arrays under it.
+
+    **A kubernetes volume no vm holds is part of this gap and is already reported as a
+    claim**, so what the clusters own up to (`finops/k8s/datastores.py`) comes off the top:
+    without that the same blocks are offered back twice, once as a pvc and once as
+    "orphaned vmdks". A cluster that admits to more than the gap holds leaves nothing to
+    report rather than a negative one, and the thresholds are applied to what is left —
+    the whole point is that the remainder is the part nobody has accounted for.
     """
     dead = {ds.uid for ds in site.unmounted_datastores}
     used = sum(
@@ -472,10 +525,17 @@ def _unaccounted_gib(site: SiteInventory, tuning: FinOpsTuning) -> Decimal | Non
         Decimal(0),
     )
     claimed = sum((vm.committed_gib for vm in site.vms()), Decimal(0))
-    gap = used - claimed
-    if used <= 0 or gap < Decimal(str(tuning.onprem_unaccounted_min_gib)):
+    raw = used - claimed
+    owned = [guest for guest in guests if guest.detached_gib > 0]
+    gap = _Gap(
+        raw=raw,
+        explained=min(sum((g.detached_gib for g in owned), Decimal(0)), max(raw, Decimal(0))),
+        volumes=sum(g.volumes for g in owned),
+        sources=tuple(sorted(g.source for g in owned)),
+    )
+    if used <= 0 or gap.unexplained < Decimal(str(tuning.onprem_unaccounted_min_gib)):
         return None
-    if gap / used * _HUNDRED < Decimal(str(tuning.onprem_unaccounted_min_pct)):
+    if gap.unexplained / used * _HUNDRED < Decimal(str(tuning.onprem_unaccounted_min_pct)):
         return None
     return gap
 

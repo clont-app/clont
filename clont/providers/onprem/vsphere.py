@@ -50,7 +50,15 @@ HOST_PATHS = (
     "runtime.powerState",
     "config.product.version",
 )
-DATASTORE_PATHS = ("name", "summary.capacity", "summary.freeSpace", "summary.uncommitted", "summary.type")
+DATASTORE_PATHS = (
+    "name",
+    "summary.capacity",
+    "summary.freeSpace",
+    "summary.uncommitted",
+    "summary.type",
+    # `ds:///vmfs/volumes/<uuid>/` — what a vsphere csi pv names its datastore by
+    "summary.url",
+)
 VM_PATHS = (
     "name",
     "runtime.host",

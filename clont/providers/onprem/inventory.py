@@ -78,6 +78,9 @@ class Datastore:
     # capacity - free + uncommitted: what every thin disk on it could grow to
     provisioned_gib: Decimal
     kind: str | None = None
+    # `ds:///vmfs/volumes/<uuid>/` — the id a vsphere csi volume names its datastore by;
+    # the shown name is not one, two datacenters each have a "LocalDS_0"
+    url: str | None = None
 
     @property
     def overcommit(self) -> Decimal:
@@ -382,6 +385,7 @@ def _datastore(ds_id: str, props: dict[str, object]) -> Datastore:
         provisioned_gib=Decimal(capacity - free + _int(props.get("summary.uncommitted")))
         / BYTES_PER_GIB,
         kind=_text(props.get("summary.type")) or None,
+        url=_text(props.get("summary.url")) or None,
     )
 
 

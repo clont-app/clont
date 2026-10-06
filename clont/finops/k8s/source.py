@@ -2,17 +2,18 @@
 
 `client.py` reads the cluster, `mapping.py` places the nodes on priced iron,
 `namespaces.py` divides that iron's cost, `workloads.py` sizes the pod templates against
-measured usage, `pools.py` asks whether the cluster needs every node vm at all and
-`volumes.py` finds the claims nothing mounts; this is the piece that knows *what to place
-them on* — and it is the only place in the k8s source that touches a provider. The rule it
-enforces is the plan's: a cluster is priced through a pool that already exists, so
-`priced_by` names an on-prem site (its vms) or an aws account (its instances), and nothing
-else can price a node.
+measured usage, `pools.py` asks whether the cluster needs every node vm at all,
+`volumes.py` finds the claims nothing mounts and `datastores.py` says whose blocks those
+are; this is the piece that knows *what to place them on* — and it is the only place in the
+k8s source that touches a provider. The rule it enforces is the plan's: a cluster is priced
+through a pool that already exists, so `priced_by` names an on-prem site (its vms) or an
+aws account (its instances), and nothing else can price a node.
 
 **The read is cached on the result, not the connection**, the same way `OnPremProvider`
 does it: all four reports want one node list per cycle, and a cluster that is read twice an
-hour is two api calls for one set of numbers. Nodes, pods, namespace labels, claims and pod
-metrics share one session per refresh — five lists on one connection, not five connections.
+hour is two api calls for one set of numbers. Nodes, pods, namespace labels, claims, pvs
+and pod metrics share one session per refresh — six lists on one connection, not six
+connections.
 
 **The usage samples are accumulated here**, because this object is the only thing that
 lives longer than a cycle. metrics-server answers with one instant reading, so the ring in
@@ -34,6 +35,8 @@ from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.core.models import Cloud, CloudResource, Money
 from clont.finops.base import FinOpsTuning
+from clont.finops.guests import GuestStorage
+from clont.finops.k8s.datastores import Placements, place
 from clont.finops.k8s.mapping import (
     ClusterMapping,
     Priced,
@@ -51,6 +54,7 @@ from clont.providers.k8s.config import KubernetesCluster
 from clont.providers.k8s.nodes import Node
 from clont.providers.k8s.pods import Pod, WorkloadRef
 from clont.providers.k8s.prometheus import Prometheus
+from clont.providers.k8s.pvs import Volume
 from clont.providers.k8s.usage import (
     METRICS_SERVER,
     PROMETHEUS,
@@ -85,6 +89,7 @@ class ClusterRead:
     labels: dict[str, dict[str, str]] = field(default_factory=dict)  # namespace -> labels
     usage: list[PodUsage] = field(default_factory=list)  # per pod, as the source gives it
     claims: list[Claim] = field(default_factory=list)
+    pvs: list[Volume] = field(default_factory=list)  # the volumes behind the claims
 
     @property
     def pending_pods(self) -> int:
@@ -171,8 +176,30 @@ class KubernetesSource:
             read.pending,
             read.claims,
             records,
+            placements=self.placements(refresh=refresh),
             tuning=self._tuning,
         )
+
+    def placements(self, *, refresh: bool = False) -> Placements:
+        """Which of the site's datastores this cluster's volumes are sitting on.
+
+        Empty for a cloud-priced cluster: an ebs volume is the account's own line in the
+        bill, so there is no gap to reconcile and no card to read a $/GiB off.
+        """
+        read = self.read(refresh=refresh)
+        if getattr(self.provider, "cloud", None) is not Cloud.ONPREM:
+            return Placements(cluster=self.name)
+        return place(self.name, read.claims, read.pvs, read.pods, self.provider.inventory())
+
+    def guest_storage(self) -> GuestStorage:
+        """What this cluster admits to holding on the site's datastores.
+
+        Called by the on-prem waste pass, through the hook `bootstrap` attached to the
+        provider — it runs *before* the k8s half of the cycle, and the read it triggers is
+        the one the reports reuse. Without it the site's storage gap offers the same blocks
+        back twice: once as a pvc here, once as an orphaned vmdk there.
+        """
+        return self.placements().storage or GuestStorage(source=self.name)
 
     def recommendations(self, records: list[CostRecord]) -> list[Recommendation]:
         """Every k8s finding as the same `Recommendation` every other collector emits.
@@ -296,19 +323,21 @@ class KubernetesSource:
             pods, pending = session.pods()
             labels = session.labels()
             claims = session.claims()
+            pvs = session.volumes()
             # the metrics api is on the same connection; prometheus is not, and is read
             # outside the session because it is not the cluster's api at all
             usage = session.usage() if self.config.usage == METRICS_SERVER else []
         if self.config.usage == PROMETHEUS:
             usage = self._prometheus().pod_usage()
         log.debug(
-            "%s: %d node(s), %d pod(s), %d pending, %d usage row(s), %d claim(s)",
+            "%s: %d node(s), %d pod(s), %d pending, %d usage row(s), %d claim(s), %d pv(s)",
             self.name,
             len(nodes),
             len(pods),
             len(pending),
             len(usage),
             len(claims),
+            len(pvs),
         )
         return ClusterRead(
             nodes=nodes,
@@ -317,6 +346,7 @@ class KubernetesSource:
             labels=labels,
             usage=usage,
             claims=claims,
+            pvs=pvs,
         )
 
     def _prometheus(self) -> Prometheus:

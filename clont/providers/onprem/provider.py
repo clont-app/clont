@@ -21,6 +21,13 @@ also what an operator watching the session list expects to see.
 So the caching is on the *result*, not the connection: `inventory()` keeps the last pass
 for `pass_ttl_seconds` so `collect()` and `recommendations()` in the same cycle share one
 login instead of walking the whole vcenter twice.
+
+One thing points the other way: **a guest platform knows something about this site that
+vcenter will not say.** A kubernetes volume nothing has attached is datastore space
+belonging to no vm, which from here is indistinguishable from an iso or a dead vm folder.
+So a cluster priced by this site registers itself with `attach_guest`, and the waste pass
+subtracts what it owns up to instead of offering the same blocks back twice. The hooks are
+plain callables and one that raises is dropped — a cluster is never the site's dependency.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from typing import Any
 from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.core.models import Cloud
+from clont.finops.guests import GuestStorage
 from clont.finops.onprem.config import InventoryConfig, OnPremSite
 from clont.providers.onprem.inventory import SiteInventory
 from clont.providers.onprem.vsphere import VsphereInventory
@@ -62,6 +70,7 @@ class OnPremProvider:
         self._ttl = pass_ttl_seconds
         self._clock = clock
         self._last: tuple[float, SiteInventory] | None = None
+        self._guests: list[tuple[str, Callable[[], GuestStorage]]] = []
 
     @property
     def site(self) -> OnPremSite:
@@ -89,6 +98,30 @@ class OnPremProvider:
             site = session.site(usage_window_days=self._config.usage_window_days)
         self._last = (self._clock(), site)
         return site
+
+    def attach_guest(self, name: str, reader: Callable[[], GuestStorage]) -> None:
+        """Register a guest platform that holds space on this site's datastores.
+
+        Wired by `bootstrap` for every kubernetes cluster this site prices. The site cannot
+        see which blocks on an array are a cluster's volumes — the cluster can, and the
+        storage gap is wrong by that much until it says so.
+        """
+        self._guests.append((name, reader))
+
+    def guest_storage(self) -> list[GuestStorage]:
+        """What every attached guest says it holds here, failures left out.
+
+        One unreachable cluster must not cost the site its whole recommendation pass, so a
+        reader that raises is dropped with a warning: the gap then simply stays as large as
+        it was before, which is the number clont reported for months.
+        """
+        out: list[GuestStorage] = []
+        for name, reader in self._guests:
+            try:
+                out.append(reader())
+            except Exception as exc:  # noqa: BLE001 - one guest is not the site
+                log.warning("%s: guest %s not reconciled: %s", self.alias, name, exc)
+        return out
 
     def regions(self) -> list[str]:
         """The pools. `region` is the protocol's word for "where", and here that is a cluster."""

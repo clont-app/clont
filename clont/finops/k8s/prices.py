@@ -126,7 +126,11 @@ class Prices:
 
     def card(self, target: Priced) -> PoolCard | None:
         """The pool line behind this target, or None when the provider publishes none."""
-        return self._cards.get((target.alias, target.pool))
+        return self.card_of(target.alias, target.pool)
+
+    def card_of(self, alias: str, pool: str) -> PoolCard | None:
+        """The same card by its two keys, for a claim that knows its pool but no node."""
+        return self._cards.get((alias, pool))
 
     def rates(self, target: Priced, node: Node) -> NodeRates | None:
         """Monthly $/vcpu and $/GiB for one node, or None when it is not priced at all.

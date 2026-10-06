@@ -9,12 +9,13 @@ This names them.
 
     pool card -> $/GiB-month -> the claim no pod mounts
 
-Two kinds, and a namespace gets **one** of them:
+Three kinds; a namespace gets **one** of the first two:
 
 | kind | when |
 |---|---|
 | `abandoned-namespace` | the namespace has no pod at all, live or pending, and still holds claims |
 | `unmounted-pvc` | a live namespace holding a bound claim no pod references |
+| `released-pv` | the claim is already deleted and `reclaimPolicy: Retain` kept the volume |
 
 **The rollup replaces the per-claim rows, never adds to them.** An operator deletes the
 namespace, not six pvcs one at a time, and pricing both would charge the same GiB twice.
@@ -25,8 +26,9 @@ Decisions worth keeping:
 * **a pending pod counts as life.** A pod stuck unschedulable because this very claim is
   unbound is the strongest possible evidence the namespace is in use — counting only
   scheduled pods would call it abandoned.
-* **`$/GiB-month` comes off the pool card** (`rate_storage_gib_month`), averaged over the
-  pools this cluster's nodes sit in. With no card — an eks cluster today — the finding is
+* **`$/GiB-month` comes off the pool card** (`rate_storage_gib_month`) of the pool whose
+  datastore actually holds the volume, and off the mean of the cluster's pools only when
+  the volume names no datastore. With no card — an eks cluster today — the finding is
   still emitted at `$0.00` and says the capacity is unpriced: a 500 GiB claim nothing
   mounts is worth reporting without a price on it.
 * **only `Bound` claims are priced.** A Pending claim has no blocks yet, so a price would
@@ -46,6 +48,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
+from clont.finops.k8s.datastores import Placements
 from clont.finops.k8s.mapping import ClusterMapping
 from clont.finops.k8s.prices import Prices
 from clont.finops.models import CostRecord
@@ -56,6 +59,7 @@ log = get_logger("clont.finops.k8s.volumes")
 
 ABANDONED = "abandoned-namespace"
 UNMOUNTED = "unmounted-pvc"
+RELEASED = "released-pv"
 
 _CENT = Decimal("0.01")
 _USD = "USD"
@@ -83,12 +87,15 @@ class VolumeReport:
     claims: int = 0
     unmounted_gib: Decimal = Decimal(0)
     gib_month: Decimal = Decimal(0)   # 0 = no pool card, so the findings carry no price
+    released: int = 0                 # pvs whose claim is gone and whose blocks are not
 
     def summary(self) -> str:
         head = (
             f"{self.cluster}: {len(self.findings)} volume finding(s) over {self.claims} "
             f"claim(s), {self.unmounted_gib} GiB nothing mounts"
         )
+        if self.released:
+            head += f", {self.released} released pv(s)"
         if self.gib_month <= 0:
             head += " — unpriced: no pool card to read a $/GiB-month off"
         return head
@@ -101,12 +108,14 @@ def reclaim(
     claims: list[Claim],
     records: list[CostRecord],
     *,
+    placements: Placements | None = None,
     tuning: FinOpsTuning | None = None,
     now: datetime | None = None,
 ) -> VolumeReport:
     """Every claim no pod mounts, rolled up per namespace when the namespace is empty too."""
     tune = tuning or FinOpsTuning()
-    rate = _gib_month(mapping, records)
+    rates = _Rates(mapping, records)
+    placed = placements or Placements(cluster=mapping.cluster)
     region = ", ".join(mapping.pools) or "unmapped"
     mounted = {(pod.namespace, claim) for pod in [*pods, *pending] for claim in pod.claims}
     alive = {pod.namespace for pod in [*pods, *pending]}
@@ -128,27 +137,76 @@ def reclaim(
             continue
         if namespace in alive:
             findings.extend(
-                _finding(UNMOUNTED, claim.ref, region, [claim], rate, now)
+                _finding(UNMOUNTED, claim.ref, region, [claim], rates, placed, now)
                 for claim in old
                 if claim.gib >= min_gib
             )
             continue
         if sum((claim.gib for claim in old), Decimal(0)) >= min_gib:
-            findings.append(_finding(ABANDONED, namespace, region, old, rate, now))
+            findings.append(_finding(ABANDONED, namespace, region, old, rates, placed, now))
+    findings.extend(_released(placed, rates, region, min_gib, min_age, now))
     report = VolumeReport(
         cluster=mapping.cluster,
         findings=tuple(
             sorted(
-                (f for f in findings if f.monthly >= floor or rate <= 0),
+                (f for f in findings if f.monthly >= floor or rates.mean <= 0),
                 key=lambda f: (-f.monthly, -f.gib, f.ref),
             )
         ),
         claims=len(claims),
         unmounted_gib=_round(unmounted_gib),
-        gib_month=rate,
+        gib_month=rates.mean,
+        released=len(placed.released),
     )
     log.debug("%s", report.summary())
     return report
+
+
+def _released(
+    placed: Placements,
+    rates: _Rates,
+    region: str,
+    min_gib: Decimal,
+    min_age: Decimal,
+    now: datetime | None,
+) -> list[VolumeFinding]:
+    """Volumes whose claim is already gone — the shape no pvc sweep can find.
+
+    `reclaimPolicy: Retain` is why they are still here: deleting the pvc released the
+    volume and kept the data. There is nothing left pointing at them in the cluster, and
+    from the hypervisor they are datastore space no vm holds, so this finding is the only
+    place they are ever named.
+    """
+    out: list[VolumeFinding] = []
+    for volume in placed.released:
+        if volume.gib < min_gib:
+            continue
+        age = volume.age_days(now)
+        if age is not None and age < min_age:
+            continue
+        pool = placed.by_claim.get(volume.claim)
+        rate = rates.of(pool.pool if pool is not None else "")
+        monthly = _money(volume.gib * rate)
+        where = f" on {pool.datastore}" if pool is not None and pool.datastore else ""
+        was = f" of the deleted claim {volume.claim}" if volume.claim else ""
+        policy = f" ({volume.reclaim or 'Retain'})"
+        out.append(
+            VolumeFinding(
+                kind=RELEASED,
+                ref=volume.name,
+                region=region,
+                summary=(
+                    f"{volume.name} is Released{where}: {_round(volume.gib)} GiB{was} that "
+                    f"the reclaim policy{policy} kept. no claim, no pod and no vm holds it, "
+                    f"so nothing else in either half of clont can see it — "
+                    f"{_priced(volume.gib, rate, region)}. the data is still on the array: "
+                    "delete the pv when it is not the restore you are keeping"
+                ),
+                monthly=monthly,
+                gib=_round(volume.gib),
+            )
+        )
+    return out
 
 
 def _finding(
@@ -156,16 +214,23 @@ def _finding(
     ref: str,
     region: str,
     claims: list[Claim],
-    rate: Decimal,
+    rates: _Rates,
+    placed: Placements,
     now: datetime | None,
 ) -> VolumeFinding:
     gib = sum((claim.gib for claim in claims), Decimal(0))
+    # each claim at the rate of the pool whose datastore actually holds it, so a namespace
+    # spanning two arrays is not priced at one of their rates
+    monthly = sum(
+        (claim.gib * rates.of(placed.pool_of(claim)) for claim in claims), Decimal(0)
+    )
+    rate = monthly / gib if gib > 0 else Decimal(0)
     return VolumeFinding(
         kind=kind,
         ref=ref,
         region=region,
         summary=_summary(kind, ref, claims, gib, rate, region, now),
-        monthly=_money(gib * rate),
+        monthly=_money(monthly),
         gib=_round(gib),
     )
 
@@ -181,18 +246,12 @@ def _summary(
 ) -> str:
     age = _age_phrase(claims, now)
     size = f"{_round(gib)} GiB"
-    priced = (
-        # the rate itself is printed finer than cents: 0.292 shown as 0.29 against a
-        # 500 GiB claim reads as an arithmetic error
-        f"at {_rate(rate)}/GiB-month off {region}'s card that is "
-        f"{_money(gib * rate)}/month"
-        if rate > 0
-        else "the pool publishes no $/GiB-month, so this capacity is unpriced"
-    )
+    priced = _priced(gib, rate, region)
     tail = (
         "deleting it deletes the data — a statefulset scaled to zero looks exactly like "
         "this and wants its volumes back. the hypervisor can only see these blocks as "
-        "unaccounted datastore space"
+        "unaccounted datastore space, so the site's gap hands them here rather than "
+        "offering the same GiB back twice"
     )
     if kind == ABANDONED:
         names = ", ".join(claim.name for claim in claims)
@@ -210,6 +269,17 @@ def _summary(
     )
 
 
+def _priced(gib: Decimal, rate: Decimal, region: str) -> str:
+    """What the capacity costs, or why it has no price."""
+    if rate <= 0:
+        return "the pool publishes no $/GiB-month, so this capacity is unpriced"
+    # the rate itself is printed finer than cents: 0.292 shown as 0.29 against a 500 GiB
+    # claim reads as an arithmetic error
+    return (
+        f"at {_rate(rate)}/GiB-month off {region}'s card that is {_money(gib * rate)}/month"
+    )
+
+
 def _age_phrase(claims: list[Claim], now: datetime | None) -> str:
     ages = [claim.age_days(now) for claim in claims]
     known = [age for age in ages if age is not None]
@@ -224,23 +294,33 @@ def _old_enough(claim: Claim, min_age: Decimal, now: datetime | None) -> bool:
     return age is None or age >= min_age
 
 
-def _gib_month(mapping: ClusterMapping, records: list[CostRecord]) -> Decimal:
-    """The mean $/GiB-month of the pools this cluster sits on, 0 when none publishes one.
+class _Rates:
+    """The $/GiB-month a claim is priced at: its own pool's when known, the mean otherwise.
 
-    A mean because a claim belongs to a cluster, not to a node: which datastore holds it is
-    the next piece of the plan (the pvc -> datastore link), and until then a cluster
-    spanning two cards is priced between them rather than at one of their rates.
+    The pool comes from the datastore the volume actually sits on (`datastores.py`), which
+    is the whole point of the pvc -> datastore link: a cluster whose nodes span two cards
+    held its volumes on *one* of the two arrays, and the mean was never the right rate for
+    either. The mean stays as the fallback, for a volume that names no datastore and for a
+    claim read without its pv.
     """
-    prices = Prices(records)
-    cards = {}
-    for match in mapping.matched:
-        card = prices.card(match.target)
-        if card is not None and card.storage_gib_month > 0:
-            # keyed per pool, not per node: ten nodes on one card is still one rate
-            cards[(match.target.alias, match.target.pool)] = card.storage_gib_month
-    if not cards:
-        return Decimal(0)
-    return sum(cards.values(), Decimal(0)) / Decimal(len(cards))
+
+    def __init__(self, mapping: ClusterMapping, records: list[CostRecord]) -> None:
+        prices = Prices(records)
+        self._by_pool: dict[str, Decimal] = {}
+        for match in mapping.matched:
+            card = prices.card(match.target)
+            if card is not None and card.storage_gib_month > 0:
+                # keyed per pool, not per node: ten nodes on one card is still one rate
+                self._by_pool[match.target.pool] = card.storage_gib_month
+        self.mean = (
+            sum(self._by_pool.values(), Decimal(0)) / Decimal(len(self._by_pool))
+            if self._by_pool
+            else Decimal(0)
+        )
+
+    def of(self, pool: str) -> Decimal:
+        """The rate for one pool key, falling back to the cluster's mean."""
+        return self._by_pool.get(pool) or self.mean
 
 
 def _by_namespace(claims: list[Claim]) -> dict[str, list[Claim]]:
