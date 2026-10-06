@@ -234,6 +234,10 @@ class FinOpsConfig(_Model):
     required_tags: list[str] = Field(default_factory=list)            # tag keys every resource must carry
     # showback groups spend by required_tags; WARN when this much of it carries no value
     showback_unattributed_pct: float = 20.0
+    # the k8s twin of the line above: WARN when this much of a cluster's priced iron no pod
+    # requested. higher than the tag threshold on purpose — a cluster with no headroom is
+    # one node failure away from pending pods, so half empty is not yet a finding
+    k8s_unrequested_pct: float = 50.0
     # data transfer is normally 5-15% of an aws bill; WARN once network spend passes this
     transfer_spend_pct: float = 15.0
 
@@ -387,6 +391,7 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #     Environment: [dev, staging, test, qa]
 #   required_tags: [Owner, Environment]   # tag keys every cost-bearing resource must carry
 #   showback_unattributed_pct: 20  # WARN when this share of spend carries no required tag
+#   k8s_unrequested_pct: 50        # WARN when this share of a cluster's iron no pod requested
 #   transfer_spend_pct: 15         # WARN when data transfer takes this share of spend
 
 # Monitoring metric-anomaly detection + Tier-1 default rules (thresholds + forecast).

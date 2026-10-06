@@ -23,7 +23,7 @@ from clont.finops.k8s.mapping import (
     targets_from_instances,
     targets_from_site,
 )
-from clont.finops.k8s.source import KubernetesSource
+from clont.finops.k8s.source import ClusterRead, KubernetesSource
 from clont.providers.k8s.config import KubernetesCluster
 from clont.providers.k8s.nodes import Node
 from clont.providers.onprem.inventory import Pool, SiteInventory, Vm
@@ -216,7 +216,7 @@ class _Site:
 
 def _source(provider, nodes, **over) -> KubernetesSource:
     config = KubernetesCluster(priced_by="dc1", **over)
-    return KubernetesSource("lab", config, provider, reader=lambda: nodes)
+    return KubernetesSource("lab", config, provider, reader=lambda: ClusterRead(nodes=nodes))
 
 
 def test_the_source_caches_one_read_per_cycle():
@@ -224,7 +224,7 @@ def test_the_source_caches_one_read_per_cycle():
 
     def reader():
         reads.append(1)
-        return [node("kube-1", system_uuid=BIOS)]
+        return ClusterRead(nodes=[node("kube-1", system_uuid=BIOS)])
 
     provider = _Site(site(vm("kube-1", "vim.VirtualMachine:vm-1")))
     source = KubernetesSource("lab", KubernetesCluster(priced_by="dc1"), provider, reader=reader)

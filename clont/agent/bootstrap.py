@@ -207,9 +207,9 @@ def build_agent(config: Config) -> Agent:
         raise RuntimeError("no configured on-prem site could be reached")
     providers.extend(onprem)
 
-    # nodes are placed on the iron above, so this runs last and only reports for now;
-    # the namespace split is the collector that will consume these sources
-    _k8s_sources(config, providers)
+    # nodes are placed on the iron above, so this runs last: the namespace split divides
+    # what those providers collect, and it needs them up first
+    k8s_sources = _k8s_sources(config, providers)
 
     uplink = (
         ApiUplink(config.api.url, config.api.api_key, timeout=config.api.timeout_seconds)
@@ -249,6 +249,8 @@ def build_agent(config: Config) -> Agent:
             allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
         ),
         showback_unattributed_pct=config.finops.showback_unattributed_pct,
+        k8s_unrequested_pct=config.finops.k8s_unrequested_pct,
+        k8s_sources=k8s_sources,
         transfer_spend_pct=config.finops.transfer_spend_pct,
         anomaly_sigma=config.monitoring.anomaly_sigma,
         anomaly_min_points=config.monitoring.anomaly_min_points,

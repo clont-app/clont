@@ -24,6 +24,7 @@ from clont.events.detectors import (
     DataTransferDetector,
     HealthDetector,
     MetricAnomalyDetector,
+    NamespaceShowbackDetector,
     RecommendationDetector,
     ShowbackDetector,
     SpendDigestDetector,
@@ -33,6 +34,7 @@ from clont.events.detectors import (
 )
 from clont.events.models import Event
 from clont.finops.base import FinOpsTuning
+from clont.finops.k8s.source import KubernetesSource
 from clont.monitoring.base import MetricsPolicy
 from clont.providers.base import Provider
 
@@ -86,6 +88,8 @@ class Agent:
         forecast_alpha: float = 0.5,
         finops_tuning: FinOpsTuning | None = None,
         showback_unattributed_pct: float = 20.0,
+        k8s_unrequested_pct: float = 50.0,
+        k8s_sources: list[KubernetesSource] | None = None,
         transfer_spend_pct: float = 15.0,
         anomaly_sigma: float = 3.0,
         anomaly_min_points: int = 6,
@@ -126,6 +130,12 @@ class Agent:
             ShowbackDetector(self._finops_tuning.required_tags, showback_unattributed_pct),
             DataTransferDetector(transfer_spend_pct, spend_min_dollars),
         ]
+        self._k8s_sources = k8s_sources or []
+        # same keys as the tag showback: a namespace label `team` answers the question an
+        # aws `team` tag answers, and the operator reads one table
+        self._k8s_detector = NamespaceShowbackDetector(
+            k8s_unrequested_pct, self._finops_tuning.required_tags
+        )
         self._monitoring_detectors = [HealthDetector()]
         self._monitoring_metric_detectors = [
             MetricAnomalyDetector(anomaly_sigma, anomaly_min_points),
@@ -170,7 +180,23 @@ class Agent:
         for provider in self._providers:
             self._finops_collect(provider, period, batch, force)
             self._monitoring_collect(provider, period, batch, force)
+        self._k8s_showback(batch)
         return batch
+
+    def _k8s_showback(self, batch: Batch) -> None:
+        """Split this cycle's spend by namespace, per cluster.
+
+        Last on purpose: it divides `batch.costs`, so every pricing provider has to have
+        collected first. It adds no cost record of its own — a namespace table that
+        contributed spend would double-count the vms it is made of.
+        """
+        reports = []
+        for source in self._k8s_sources:
+            try:
+                reports.append(source.namespaces(batch.costs))
+            except Exception as exc:  # noqa: BLE001 - one cluster must not kill the cycle
+                self._record_error(batch, f"kubernetes {source.name} namespaces", exc)
+        batch.events.extend(self._k8s_detector.detect(reports))
 
     @staticmethod
     def _record_error(batch: Batch, what: str, exc: Exception) -> None:

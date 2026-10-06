@@ -1,18 +1,24 @@
-"""The cluster wire: one read, `list_node`, and nothing else.
+"""The cluster wire: three list calls, and nothing else.
 
 The `kubernetes` client is an optional dependency (`pip install clont[k8s]`) — an aws-only
 install has no business carrying it — so it is imported when a session opens and not at
 module import. Same shape as `vsphere.py`.
 
-**Only `list` on `nodes`.** That is the whole api surface of this file, which is what lets
-clont run under a ClusterRole with `get,list` on `nodes` and nothing else. The claim is a
-test, not a sentence in a readme: no other api object is reachable from here.
+**Only `list`, only on `nodes`, `pods` and `namespaces`.** That is the whole api surface of
+this file, which is what lets clont run under a ClusterRole with `get,list` on those three
+and nothing else. No write verb, no secrets, no exec, no logs.
+
+Namespaces are the weakest of the three: they are read for their *labels*, so a showback
+table can group by `team` the way the aws one groups by a cost-allocation tag. A role
+without them still prices every namespace — `labels()` answers empty and the table groups
+by name — so the read is optional on purpose and a 403 there is not a failed pass.
 
 Two things that are easy to get wrong and are decided here:
 
-* **nodes are paged.** `list_node` answers 500 at a time on a big cluster and hands back a
-  `continue` token; a reader that ignores it silently prices a slice of the fleet. The loop
-  stops at `MAX_PAGES` rather than trusting the server to terminate it.
+* **every list is paged.** `list_node` answers 500 at a time on a big cluster and hands
+  back a `continue` token; a reader that ignores it silently prices a slice of the fleet.
+  Pods are where this actually bites — a 200-node cluster has thousands. The loop stops at
+  `MAX_PAGES` rather than trusting the server to terminate it.
 * **the raw json is read, not the generated models** (`_preload_content=False`). The typed
   client *validates* a node on deserialize and raises when a required field is missing —
   `architecture`, `bootID`, `machineID`, none of which clont reads — so one unusual node
@@ -23,11 +29,13 @@ Two things that are easy to get wrong and are decided here:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.providers.k8s.nodes import Node, build_nodes
+from clont.providers.k8s.pods import Pod, build_pods
 
 log = get_logger("clont.providers.k8s")
 
@@ -97,12 +105,49 @@ class KubernetesNodes:
 
     def nodes(self) -> list[Node]:
         """Every node in the cluster, paged, as plain `Node`s."""
+        return build_nodes(self._list("nodes", lambda: self._api.list_node))
+
+    def pods(self) -> tuple[list[Pod], int]:
+        """Every live scheduled pod with its requests, plus how many sit on no node."""
+        return build_pods(
+            self._list("pods", lambda: self._api.list_pod_for_all_namespaces)
+        )
+
+    def labels(self) -> dict[str, dict[str, str]]:
+        """Namespace -> its labels, or empty when the role cannot list namespaces.
+
+        A missing read is not a failure: the table groups by namespace name and simply has
+        no `team` column. Dying here would cost the whole split for a grouping nobody may
+        have asked for.
+        """
+        try:
+            items = self._list("namespaces", lambda: self._api.list_namespace)
+        except Exception as exc:  # noqa: BLE001 - optional read, see the module docstring
+            log.info("%s: namespace labels unavailable: %s", self.endpoint, exc)
+            return {}
+        out: dict[str, dict[str, str]] = {}
+        for item in items:
+            meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            name = str((meta or {}).get("name") or "").strip()
+            raw = (meta or {}).get("labels")
+            if name:
+                out[name] = (
+                    {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+                )
+        return out
+
+    def _list(self, what: str, call: Callable[[], Any]) -> list[dict]:
+        """One paged list, as the api's own json.
+
+        `call` hands back the api method instead of being it — the api is None until
+        `connect()`, and binding the method at the call site would raise before the check.
+        """
         if self._api is None:
             raise ConfigError("kubernetes session is not connected")
         items: list[dict] = []
         token: str | None = None
         for _ in range(MAX_PAGES):
-            page = self._api.list_node(
+            page = call()(
                 limit=PAGE_SIZE,
                 _continue=token,
                 _request_timeout=self._timeout,
@@ -117,8 +162,8 @@ class KubernetesNodes:
             if not token:
                 break
         else:
-            log.warning("%s: stopped paging nodes after %d pages", self.endpoint, MAX_PAGES)
-        return build_nodes(items)
+            log.warning("%s: stopped paging %s after %d pages", self.endpoint, what, MAX_PAGES)
+        return items
 
 
 def _import_kubernetes() -> tuple[Any, Any, type[Exception]]:
