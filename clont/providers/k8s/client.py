@@ -1,14 +1,15 @@
-"""The cluster wire: three list calls, and nothing else.
+"""The cluster wire: four list calls, and nothing else.
 
 The `kubernetes` client is an optional dependency (`pip install clont[k8s]`) — an aws-only
 install has no business carrying it — so it is imported when a session opens and not at
 module import. Same shape as `vsphere.py`.
 
-**Only `list`, only on `nodes`, `pods` and `namespaces`.** That is the whole api surface of
-this file, which is what lets clont run under a ClusterRole with `get,list` on those three
-and nothing else. No write verb, no secrets, no exec, no logs.
+**Only `list`, only on `nodes`, `pods`, `namespaces` and `pods.metrics.k8s.io`.** That is
+the whole api surface of this file, which is what lets clont run under a ClusterRole with
+`get,list` on those four and nothing else. No write verb, no secrets, no exec, no logs.
 
-Namespaces are the weakest of the three: they are read for their *labels*, so a showback
+The last two are optional, and a cluster that refuses them is still fully priced — only
+the sizing advice goes quiet. Namespaces are read for their *labels*, so a showback
 table can group by `team` the way the aws one groups by a cost-allocation tag. A role
 without them still prices every namespace — `labels()` answers empty and the table groups
 by name — so the read is optional on purpose and a 403 there is not a failed pass.
@@ -36,12 +37,16 @@ from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.providers.k8s.nodes import Node, build_nodes
 from clont.providers.k8s.pods import Pod, build_pods
+from clont.providers.k8s.usage import PodUsage, build_usage
 
 log = get_logger("clont.providers.k8s")
 
 PAGE_SIZE = 500
 MAX_PAGES = 50  # 25k nodes; past that something is wrong with the token, not the cluster
 DEFAULT_TIMEOUT = 30
+
+METRICS_GROUP = "metrics.k8s.io"
+METRICS_VERSION = "v1beta1"
 
 
 class KubernetesNodes:
@@ -64,6 +69,7 @@ class KubernetesNodes:
         self._in_cluster = in_cluster
         self._timeout = timeout_seconds
         self._api: Any = None
+        self._custom: Any = None
         self._client: Any = None
         # the apiserver this session talks to, filled on connect — for the log line
         self.endpoint: str | None = None
@@ -91,6 +97,7 @@ class KubernetesNodes:
             raise ConfigError(f"cannot load kubernetes config from {where}: {exc}") from None
         self._client = k8s_client.ApiClient()
         self._api = k8s_client.CoreV1Api(self._client)
+        self._custom = k8s_client.CustomObjectsApi(self._client)
         self.endpoint = self._client.configuration.host
         log.debug("connected to %s", self.endpoint)
 
@@ -102,6 +109,7 @@ class KubernetesNodes:
         finally:
             self._client = None
             self._api = None
+            self._custom = None
 
     def nodes(self) -> list[Node]:
         """Every node in the cluster, paged, as plain `Node`s."""
@@ -112,6 +120,36 @@ class KubernetesNodes:
         return build_pods(
             self._list("pods", lambda: self._api.list_pod_for_all_namespaces)
         )
+
+    def usage(self) -> list[PodUsage]:
+        """metrics-server's per-pod readings, or empty when there is nothing to read.
+
+        Optional the same way `labels()` is: a cluster without metrics-server answers 404
+        and a role without `metrics.k8s.io` answers 403, and neither is a failed pass — it
+        means the sizing half has no evidence and will say so instead of advising.
+
+        **Not paged.** metrics-server serves this list out of memory and implements no
+        `continue` token, so a token loop would be a second identical read of the whole
+        cluster. The 500-item limit the other reads pass would silently truncate it.
+        """
+        if self._custom is None:
+            raise ConfigError("kubernetes session is not connected")
+        try:
+            page = self._custom.list_cluster_custom_object(
+                METRICS_GROUP,
+                METRICS_VERSION,
+                "pods",
+                _request_timeout=self._timeout,
+                _preload_content=False,
+            )
+            try:
+                raw = json.loads(page.data)
+            finally:
+                page.release_conn()
+        except Exception as exc:  # noqa: BLE001 - optional read, see the docstring
+            log.info("%s: pod metrics unavailable: %s", self.endpoint, exc)
+            return []
+        return build_usage(raw.get("items") or [])
 
     def labels(self) -> dict[str, dict[str, str]]:
         """Namespace -> its labels, or empty when the role cannot list namespaces.

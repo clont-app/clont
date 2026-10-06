@@ -184,11 +184,14 @@ class Agent:
         return batch
 
     def _k8s_showback(self, batch: Batch) -> None:
-        """Split this cycle's spend by namespace, per cluster.
+        """Split this cycle's spend by namespace, per cluster, and size the workloads on it.
 
-        Last on purpose: it divides `batch.costs`, so every pricing provider has to have
-        collected first. It adds no cost record of its own — a namespace table that
-        contributed spend would double-count the vms it is made of.
+        Last on purpose: both halves divide `batch.costs`, so every pricing provider has to
+        have collected first. Neither adds a cost record of its own — a namespace table
+        that contributed spend would double-count the vms it is made of.
+
+        The two are isolated from each other: a cluster with no metrics source still gets
+        its namespace table, and a failed sizing pass must not cost the operator the split.
         """
         reports = []
         for source in self._k8s_sources:
@@ -196,6 +199,14 @@ class Agent:
                 reports.append(source.namespaces(batch.costs))
             except Exception as exc:  # noqa: BLE001 - one cluster must not kill the cycle
                 self._record_error(batch, f"kubernetes {source.name} namespaces", exc)
+            try:
+                recs = _dedupe(source.recommendations(batch.costs), batch.recommendations)
+            except Exception as exc:  # noqa: BLE001
+                self._record_error(batch, f"kubernetes {source.name} workloads", exc)
+                continue
+            batch.recommendations.extend(recs)
+            for detector in self._finops_detectors:
+                batch.events.extend(detector.detect(recs))
         batch.events.extend(self._k8s_detector.detect(reports))
 
     @staticmethod

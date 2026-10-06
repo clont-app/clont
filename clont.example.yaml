@@ -86,7 +86,8 @@ aws:
 # clont places each node on the iron it already costed instead of guessing a node
 # price. A node it cannot place is reported unmapped, never priced at zero; the
 # startup log says how many of each cluster's nodes are mapped and why the rest are
-# not. Access is the kubeconfig's or the pod's: get/list on nodes is enough.
+# not. Access is the kubeconfig's or the pod's: get/list on nodes, pods, namespaces and
+# pods.metrics.k8s.io is the whole of it.
 # kubernetes:
 #   lab:
 #     priced_by: dc1               # the site whose vms these nodes run on
@@ -95,6 +96,14 @@ aws:
 #     # in_cluster: true           # instead of a kubeconfig: the pod's service account
 #     match_by_name: true          # last-resort match, node name == vm name. false =
 #                                  # an unidentifiable node is reported, not guessed
+#     usage: metrics-server        # where the p95 behind sizing advice comes from:
+#                                  # metrics-server | prometheus | off. off still prices
+#                                  # the cluster, it just advises on nothing
+#     usage_min_samples: 24        # metrics-server keeps no history, so this many passes
+#                                  # must accumulate before a workload is advised about
+#     # prometheus_url: http://prometheus.monitoring:9090  # required by usage: prometheus
+#     # prometheus_window_days: 14 # the window prometheus computes the p95 over
+#     # prometheus_step_minutes: 5 # subquery step; widen it on a big cluster
 
 # FinOps. Spend events: a daily spend digest (info) every cycle, a spend spike
 # (warn) when a service's latest-day spend jumps over its baseline, a month-end

@@ -96,7 +96,38 @@ def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
     return providers
 
 
-def _k8s_sources(config: Config, providers: list[Provider]) -> list[KubernetesSource]:
+def _tuning(config: Config) -> FinOpsTuning:
+    """The one `FinOpsTuning` the cycle runs on.
+
+    Built here rather than inline in the `Agent(...)` call because the k8s sources need the
+    same knobs — `rightsize-workload` is the `rightsize-vm` arithmetic, so a second copy of
+    the thresholds is a second answer waiting to happen.
+    """
+    return FinOpsTuning(
+        idle_cpu_pct=config.finops.idle_cpu_pct,
+        idle_lookback_days=config.finops.idle_lookback_days,
+        idle_rds_max_connections=config.finops.idle_rds_max_connections,
+        snapshot_max_age_days=config.finops.snapshot_max_age_days,
+        onprem_min_savings_usd=config.finops.onprem_min_savings_usd,
+        onprem_unaccounted_min_gib=config.finops.onprem_unaccounted_min_gib,
+        onprem_unaccounted_min_pct=config.finops.onprem_unaccounted_min_pct,
+        onprem_thin_overcommit_ratio=config.finops.onprem_thin_overcommit_ratio,
+        onprem_idle_ram_pct=config.finops.onprem_idle_ram_pct,
+        onprem_rightsize_target_pct=config.finops.onprem_rightsize_target_pct,
+        s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
+        s3_cold_min_gb=config.finops.s3_cold_min_gb,
+        ri_sp_min_utilization=config.finops.ri_sp_min_utilization,
+        ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
+        nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
+        required_tags=tuple(config.finops.required_tags),
+        allow_cost_explorer=config.finops.allow_cost_explorer,
+        allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
+    )
+
+
+def _k8s_sources(
+    config: Config, providers: list[Provider], tuning: FinOpsTuning
+) -> list[KubernetesSource]:
     """One source per cluster whose pricing provider came up, each one mapped at startup.
 
     The mapping is logged here because "how many of my nodes can clont price" is what an
@@ -112,7 +143,7 @@ def _k8s_sources(config: Config, providers: list[Provider]) -> list[KubernetesSo
             # the alias is configured — the validator checked that — so it just did not come up
             log.warning("kubernetes %s: %s is not available, nothing prices it", name, cluster.priced_by)
             continue
-        source = KubernetesSource(name, cluster, provider)
+        source = KubernetesSource(name, cluster, provider, tuning=tuning)
         try:
             log.info("kubernetes %s", source.mapping().summary())
         except Exception as exc:  # noqa: BLE001 - isolate one bad cluster
@@ -209,7 +240,8 @@ def build_agent(config: Config) -> Agent:
 
     # nodes are placed on the iron above, so this runs last: the namespace split divides
     # what those providers collect, and it needs them up first
-    k8s_sources = _k8s_sources(config, providers)
+    finops_tuning = _tuning(config)
+    k8s_sources = _k8s_sources(config, providers, finops_tuning)
 
     uplink = (
         ApiUplink(config.api.url, config.api.api_key, timeout=config.api.timeout_seconds)
@@ -228,26 +260,7 @@ def build_agent(config: Config) -> Agent:
         budgets=config.finops.budgets,
         budget_warn_pct=config.finops.budget_warn_pct,
         forecast_alpha=config.finops.forecast_alpha,
-        finops_tuning=FinOpsTuning(
-            idle_cpu_pct=config.finops.idle_cpu_pct,
-            idle_lookback_days=config.finops.idle_lookback_days,
-            idle_rds_max_connections=config.finops.idle_rds_max_connections,
-            snapshot_max_age_days=config.finops.snapshot_max_age_days,
-            onprem_min_savings_usd=config.finops.onprem_min_savings_usd,
-            onprem_unaccounted_min_gib=config.finops.onprem_unaccounted_min_gib,
-            onprem_unaccounted_min_pct=config.finops.onprem_unaccounted_min_pct,
-            onprem_thin_overcommit_ratio=config.finops.onprem_thin_overcommit_ratio,
-            onprem_idle_ram_pct=config.finops.onprem_idle_ram_pct,
-            onprem_rightsize_target_pct=config.finops.onprem_rightsize_target_pct,
-            s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
-            s3_cold_min_gb=config.finops.s3_cold_min_gb,
-            ri_sp_min_utilization=config.finops.ri_sp_min_utilization,
-            ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
-            nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
-            required_tags=tuple(config.finops.required_tags),
-            allow_cost_explorer=config.finops.allow_cost_explorer,
-            allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
-        ),
+        finops_tuning=finops_tuning,
         showback_unattributed_pct=config.finops.showback_unattributed_pct,
         k8s_unrequested_pct=config.finops.k8s_unrequested_pct,
         k8s_sources=k8s_sources,

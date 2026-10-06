@@ -35,6 +35,9 @@ Decisions worth keeping:
   means resource-level CUR, not a price guess here.
 * **a namespace that only runs on unpriced nodes still appears**, at `0.00`, with its
   requests — an absent row would read as a namespace that costs nothing.
+
+Reading the records is `prices.py`, shared with `workloads.py`: both halves divide the same
+numbers and neither is allowed its own idea of what a node costs.
 """
 
 from __future__ import annotations
@@ -44,7 +47,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from clont.finops.k8s.mapping import ClusterMapping, Priced
+from clont.finops.k8s.mapping import ClusterMapping
+from clont.finops.k8s.prices import Prices
 from clont.finops.models import CostRecord
 from clont.finops.showback import UNATTRIBUTED, ShowbackLine
 from clont.providers.k8s.pods import Pod
@@ -52,9 +56,6 @@ from clont.providers.k8s.pods import Pod
 KUBELET = "(kubelet)"
 UNREQUESTED = "(unrequested)"
 NODE_STORAGE = "(node-storage)"
-
-# only used when no pool line is in the batch to read the real card off
-FALLBACK_WEIGHTS = {"cpu": Decimal("0.5"), "ram": Decimal("0.5")}
 
 _CENT = Decimal("0.01")
 _TENTH = Decimal("0.1")
@@ -154,7 +155,7 @@ def split(
     pending_pods: int = 0,
 ) -> NamespaceShowback:
     """Divide the cost of this cluster's nodes between the namespaces that requested it."""
-    prices = _Prices(records)
+    prices = Prices(records)
     ns_labels = labels or {}
     by_node = _pods_by_node(pods)
 
@@ -249,73 +250,6 @@ def split(
         pending_pods=pending_pods,
         overrequested_nodes=tuple(overrequested),
     )
-
-
-@dataclass(frozen=True, slots=True)
-class _Cost:
-    amount: Decimal
-    currency: str
-    start: date
-    end: date
-
-
-class _Prices:
-    """What the provider already said each priced thing costs, and how it was weighted.
-
-    A record is matched on any id that identifies the *resource*, because that is
-    provider-specific: on prem it is the `moref` dimension, in a cloud it is whatever the
-    resource line is keyed on. The alias is part of the key — two sites can hold the same
-    vm name.
-    """
-
-    def __init__(self, records: list[CostRecord]) -> None:
-        self._by_key: dict[tuple[str, str], list[CostRecord]] = defaultdict(list)
-        self._weights: dict[tuple[str, str], dict[str, Decimal]] = {}
-        for record in records:
-            alias = record.alias or ""
-            dims = record.dimensions or {}
-            for key in _record_keys(record):
-                self._by_key[(alias, key)].append(record)
-            if dims.get("weights") and dims.get("cluster"):
-                self._weights[(alias, dims["cluster"])] = _parse_weights(dims["weights"])
-
-    def of(self, target: Priced) -> _Cost | None:
-        """One priced thing's cost for this window, or None when nothing carries it."""
-        hits = self._by_key.get((target.alias, target.uid)) or self._by_key.get(
-            (target.alias, target.name)
-        )
-        if not hits:
-            return None
-        amount = sum((hit.cost.amount for hit in hits), Decimal(0))
-        return _Cost(
-            amount=amount,
-            currency=hits[0].cost.currency,
-            start=min(hit.period.start for hit in hits),
-            end=max(hit.period.end for hit in hits),
-        )
-
-    def weights(self, target: Priced) -> dict[str, Decimal]:
-        return self._weights.get((target.alias, target.pool)) or FALLBACK_WEIGHTS
-
-
-def _record_keys(record: CostRecord) -> set[str]:
-    dims = record.dimensions or {}
-    keys = {dims.get("moref", ""), dims.get("instance_id", "")}
-    if record.resource is not None:
-        keys.add(record.resource.resource_id)
-    return {key for key in keys if key}
-
-
-def _parse_weights(text: str) -> dict[str, Decimal]:
-    """`"cpu=0.5,ram=0.3,storage=0.2"` back into numbers; an unreadable pair is skipped."""
-    out: dict[str, Decimal] = {}
-    for pair in text.split(","):
-        key, _, value = pair.partition("=")
-        try:
-            out[key.strip()] = Decimal(value.strip())
-        except Exception:  # noqa: BLE001 - a dimension is free text, not a contract
-            continue
-    return out or dict(FALLBACK_WEIGHTS)
 
 
 def _parts(amount: Decimal, weights: dict[str, Decimal]) -> tuple[Decimal, Decimal]:

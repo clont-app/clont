@@ -21,6 +21,20 @@ Three things decided here:
 * **an unscheduled pod is dropped too** (`spec.nodeName` empty): it reserved nothing on
   anything yet. It is counted in `pending` so the report can say so, because "nothing is
   schedulable" and "nothing is requested" are very different clusters.
+
+And one thing the sizing half needs: **which workload a pod belongs to**, because a request
+lives in a pod template and advice has to name the thing an operator edits. The owner chain
+is read off the pod itself, never with a second api call:
+
+* a pod owned by a **ReplicaSet** is a Deployment's pod, and the rs name is the deployment
+  name plus `-<pod-template-hash>` — which the pod carries as a *label*. So the suffix is
+  removed by matching that label, never by guessing at a hash-shaped tail. An argo Rollout
+  lands here too and gets its own name right, which is the half an operator reads.
+* **the strip is what licenses the "Deployment" claim**: with no hash label to match, the
+  workload stays the ReplicaSet it says it is rather than a name we made up.
+* a pod with no owner — a static pod, a bare pod — is its own workload, kind `Pod`. A Job
+  stays a Job: rolling it up to its CronJob needs a second read, and the job name already
+  carries the cronjob's.
 """
 
 from __future__ import annotations
@@ -34,7 +48,26 @@ from clont.providers.k8s.nodes import BYTES_PER_GIB, quantity
 # a pod in one of these is history; it holds nothing on the node any more
 TERMINATED = ("Succeeded", "Failed")
 
+# the deployment controller stamps it on every pod of a replicaset
+TEMPLATE_HASH = "pod-template-hash"
+REPLICA_SET = "ReplicaSet"
+DEPLOYMENT = "Deployment"
+BARE_POD = "Pod"
+
 _ALWAYS = "Always"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkloadRef:
+    """The thing an operator edits: a namespace, a kind and a name."""
+
+    namespace: str
+    kind: str
+    name: str
+
+    @property
+    def ref(self) -> str:
+        return f"{self.namespace}/{self.kind.lower()}/{self.name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +81,20 @@ class Pod:
     ram_gib: Decimal = Decimal(0)
     phase: str = ""
     owner: str = ""  # ownerReferences[0].kind — a daemonset's share reads differently
+    owner_name: str = ""
+    template_hash: str = ""  # the `pod-template-hash` label, how a rs name is shortened
+
+    @property
+    def workload(self) -> WorkloadRef:
+        """Which pod template this pod came out of — see the module docstring."""
+        kind, name = self.owner, self.owner_name
+        if not name:
+            return WorkloadRef(self.namespace, BARE_POD, self.name)
+        if kind == REPLICA_SET:
+            short = _strip_hash(name, self.template_hash)
+            if short != name:
+                return WorkloadRef(self.namespace, DEPLOYMENT, short)
+        return WorkloadRef(self.namespace, kind or BARE_POD, name)
 
 
 def build_pods(items: Iterable[dict]) -> tuple[list[Pod], int]:
@@ -79,6 +126,7 @@ def _pod(item: dict) -> Pod | None:
     if not node:
         return None
     vcpu, ram = _requests(spec)
+    kind, owner = _owner(meta.get("ownerReferences"))
     return Pod(
         namespace=str(meta.get("namespace") or "").strip(),
         name=str(meta.get("name") or "").strip(),
@@ -86,7 +134,9 @@ def _pod(item: dict) -> Pod | None:
         vcpu=vcpu,
         ram_gib=ram,
         phase=str(_sub(item, "status").get("phase") or "").strip(),
-        owner=_owner(meta.get("ownerReferences")),
+        owner=kind,
+        owner_name=owner,
+        template_hash=str(_sub(meta, "labels").get(TEMPLATE_HASH) or "").strip(),
     )
 
 
@@ -126,13 +176,23 @@ def _total(parts: list[tuple[Decimal, Decimal]]) -> tuple[Decimal, Decimal]:
     )
 
 
-def _owner(refs: object) -> str:
+def _owner(refs: object) -> tuple[str, str]:
+    """The first owner's kind and name — `controller: true` is not required.
+
+    A pod has at most one controller owner in practice, and a reader that insisted on the
+    flag would call a hand-written owner reference an unowned pod.
+    """
     if not isinstance(refs, list):
-        return ""
+        return "", ""
     for ref in refs:
         if isinstance(ref, dict) and ref.get("kind"):
-            return str(ref["kind"]).strip()
-    return ""
+            return str(ref["kind"]).strip(), str(ref.get("name") or "").strip()
+    return "", ""
+
+
+def _strip_hash(name: str, template_hash: str) -> str:
+    suffix = f"-{template_hash}"
+    return name[: -len(suffix)] if template_hash and name.endswith(suffix) else name
 
 
 def _list(value: object) -> list[dict]:
