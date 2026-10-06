@@ -35,6 +35,9 @@ from decimal import Decimal, InvalidOperation
 
 BYTES_PER_GIB = Decimal(1024**3)
 
+# the two effects that actually keep a pod off a node
+HARD_EFFECTS = ("NoSchedule", "NoExecute")
+
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # binary first: "Mi" would otherwise match the decimal "M" and come out 1024x small
 _BINARY = {"Ki": 10, "Mi": 20, "Gi": 30, "Ti": 40, "Pi": 50, "Ei": 60}
@@ -62,9 +65,22 @@ class Node:
     zone: str | None = None
     region: str | None = None
     unschedulable: bool = False
+    # keys of the taints that keep ordinary pods off. a control-plane node is not
+    # `unschedulable`, it is tainted — and counting its iron as capacity a pod could have
+    # used is how a shrink arithmetic ends up advising someone to delete a master
+    hard_taints: tuple[str, ...] = ()
     # None when the node reports no Ready condition at all, which is not the same as False
     ready: bool | None = None
     kubelet: str | None = None
+
+    @property
+    def takes_pods(self) -> bool:
+        """Whether the scheduler can still place an ordinary pod here.
+
+        A node that cannot is neither free capacity nor a node the cluster could drop: what
+        runs on it is there because it tolerates it.
+        """
+        return not self.unschedulable and not self.hard_taints and self.ready is not False
 
     @property
     def provider(self) -> tuple[str, str]:
@@ -123,6 +139,7 @@ def _node(item: dict) -> Node:
         zone=_label(labels, _ZONE_LABELS),
         region=_label(labels, _REGION_LABELS),
         unschedulable=bool(spec.get("unschedulable")),
+        hard_taints=_hard_taints(spec.get("taints")),
         ready=_ready(status.get("conditions")),
         kubelet=_text(info.get("kubeletVersion")) or None,
     )
@@ -191,6 +208,24 @@ def _decimal(text: str) -> Decimal:
         return Decimal(text.strip() or "0")
     except InvalidOperation:
         return Decimal(0)
+
+
+def _hard_taints(taints: object) -> tuple[str, ...]:
+    """Taint keys with a `NoSchedule`/`NoExecute` effect, deduped in the order read.
+
+    `PreferNoSchedule` is left out: it is a hint, pods land there anyway, and treating it
+    as a wall would hide real capacity.
+    """
+    if not isinstance(taints, list):
+        return ()
+    out: list[str] = []
+    for taint in taints:
+        if not isinstance(taint, dict) or _text(taint.get("effect")) not in HARD_EFFECTS:
+            continue
+        key = _text(taint.get("key"))
+        if key and key not in out:
+            out.append(key)
+    return tuple(out)
 
 
 def _ready(conditions: object) -> bool | None:

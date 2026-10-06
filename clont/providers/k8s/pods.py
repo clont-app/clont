@@ -19,8 +19,15 @@ Three things decided here:
 * **a terminated pod is dropped.** `Succeeded`/`Failed` hold no capacity on the node — a
   finished cronjob from last tuesday would otherwise keep billing its namespace forever.
 * **an unscheduled pod is dropped too** (`spec.nodeName` empty): it reserved nothing on
-  anything yet. It is counted in `pending` so the report can say so, because "nothing is
-  schedulable" and "nothing is requested" are very different clusters.
+  anything yet. It comes back in `pending` so the report can say so, because "nothing is
+  schedulable" and "nothing is requested" are very different clusters. It is kept as a
+  *row*, not a count: a pending pod is evidence its namespace is alive, and it still names
+  the claims it is waiting for — both things the volume findings need.
+
+And the volumes a pod holds, because a claim nothing mounts is the only way an abandoned
+one can be told from a live one. A generic ephemeral volume is a claim too, named
+`<pod>-<volume>` by the controller — reading it off the pod is what keeps it out of the
+unmounted list.
 
 And one thing the sizing half needs: **which workload a pod belongs to**, because a request
 lives in a pod template and advice has to name the thing an operator edits. The owner chain
@@ -83,6 +90,7 @@ class Pod:
     owner: str = ""  # ownerReferences[0].kind — a daemonset's share reads differently
     owner_name: str = ""
     template_hash: str = ""  # the `pod-template-hash` label, how a rs name is shortened
+    claims: tuple[str, ...] = ()  # pvc names it mounts, in this namespace
 
     @property
     def workload(self) -> WorkloadRef:
@@ -97,34 +105,29 @@ class Pod:
         return WorkloadRef(self.namespace, kind or BARE_POD, name)
 
 
-def build_pods(items: Iterable[dict]) -> tuple[list[Pod], int]:
-    """`list_pod_for_all_namespaces().items` as clont sees it, plus the pending count.
+def build_pods(items: Iterable[dict]) -> tuple[list[Pod], list[Pod]]:
+    """`list_pod_for_all_namespaces().items` as clont sees it: the scheduled, and the waiting.
 
-    The count is the pods that asked for capacity nobody gave them — they are not in the
-    list because they sit on no node, and they are not silently gone either.
+    The second list is the pods that asked for capacity nobody gave them — on no node, so
+    priced nowhere, and not silently gone either.
     """
     pods: list[Pod] = []
-    pending = 0
+    pending: list[Pod] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         if str(_sub(item, "status").get("phase") or "").strip() in TERMINATED:
             continue  # history, neither priced nor pending
         pod = _pod(item)
-        if pod is None:
-            pending += 1
-            continue
-        pods.append(pod)
+        (pods if pod.node else pending).append(pod)
     return pods, pending
 
 
-def _pod(item: dict) -> Pod | None:
-    """One live pod, or None when it sits on no node — i.e. it is waiting, not running."""
+def _pod(item: dict) -> Pod:
+    """One live pod. An empty `node` means it sits on nothing: waiting, not running."""
     meta = _sub(item, "metadata")
     spec = _sub(item, "spec")
     node = str(spec.get("nodeName") or "").strip()
-    if not node:
-        return None
     vcpu, ram = _requests(spec)
     kind, owner = _owner(meta.get("ownerReferences"))
     return Pod(
@@ -137,7 +140,23 @@ def _pod(item: dict) -> Pod | None:
         owner=kind,
         owner_name=owner,
         template_hash=str(_sub(meta, "labels").get(TEMPLATE_HASH) or "").strip(),
+        claims=_claims(spec.get("volumes"), str(meta.get("name") or "").strip()),
     )
+
+
+def _claims(volumes: object, pod_name: str) -> tuple[str, ...]:
+    """The pvcs this pod mounts, deduped. Ephemeral volumes are claims under another name."""
+    out: list[str] = []
+    for volume in _list(volumes):
+        name = str(_sub(volume, "persistentVolumeClaim").get("claimName") or "").strip()
+        if not name and "ephemeral" in volume:
+            # the controller names it <pod>-<volume> and owns it, so it is mounted by
+            # definition — it just does not say so in the pvc reference
+            suffix = str(volume.get("name") or "").strip()
+            name = f"{pod_name}-{suffix}" if pod_name and suffix else ""
+        if name and name not in out:
+            out.append(name)
+    return tuple(out)
 
 
 def _requests(spec: dict) -> tuple[Decimal, Decimal]:

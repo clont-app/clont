@@ -34,8 +34,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from math import ceil
 
+from clont.core.stats import DEFAULT_QUANTILE, percentile
 from clont.providers.onprem.inventory import Vm
 
 # a vm's share of its own configured capacity, in hundredths of a percent (1234 = 12.34%)
@@ -44,7 +44,6 @@ RAM_PCT = "mem.usage.average"
 COUNTERS = (CPU_PCT, RAM_PCT)
 
 HUNDREDTHS = Decimal(10000)
-DEFAULT_QUANTILE = Decimal("0.95")
 # 2-hour rollups, so 24 samples is two days of history
 MIN_SAMPLES = 24
 
@@ -104,19 +103,6 @@ def usage_rows(
             samples=count,
         )
     return rows
-
-
-def percentile(values: list[Decimal], quantile: Decimal = DEFAULT_QUANTILE) -> Decimal:
-    """Nearest-rank percentile: the smallest sample at or above the quantile's rank.
-
-    No interpolation on purpose — it is defined on 3 samples as well as on 3000, and the
-    answer is always a number the counter actually reported.
-    """
-    if not values:
-        return Decimal(0)
-    ordered = sorted(values)
-    rank = max(1, min(len(ordered), ceil(float(quantile) * len(ordered))))
-    return ordered[rank - 1]
 
 
 def _series(raw: object) -> list[Decimal]:

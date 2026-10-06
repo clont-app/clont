@@ -42,6 +42,12 @@ class FinOpsTuning:
     # ram, and "switch it off" is wrong advice for it
     onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
     onprem_rightsize_target_pct: float = 70.0  # headroom left over the p95 when shrinking
+    # kubernetes: the findings only a cluster view makes visible. the savings floor and the
+    # headroom target are the on-prem ones on purpose — a node is a vm in another spelling
+    k8s_pool_unrequested_pct: float = 25.0   # pool capacity no pod asked for before it is a finding
+    k8s_overcommit_ratio: float = 1.25       # hypervisor vcpu overcommit that makes it a double one
+    k8s_claim_min_gib: float = 10.0          # a pvc smaller than this is noise
+    k8s_claim_min_age_days: float = 7.0      # younger than this is a deploy in progress
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
     required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
     allow_cost_explorer: bool = False      # off = the billed ce:GetCostAndUsage is never called

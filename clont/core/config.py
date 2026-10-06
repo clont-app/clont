@@ -221,6 +221,15 @@ class FinOpsConfig(_Model):
     # and anything over 100 advised a size *under* the measured peak
     onprem_rightsize_target_pct: float = Field(default=70.0, gt=0, le=100)
 
+    # Kubernetes: what a cluster holds and never asked for. The savings floor and the
+    # rightsize headroom above are shared on purpose — a node is a vm in another spelling.
+    # `pool_` in the name because `k8s_unrequested_pct` below is a different number: that
+    # one is a WARN threshold on the whole cluster, this is the floor a pool finding needs
+    k8s_pool_unrequested_pct: float = Field(default=25.0, ge=0, le=100)
+    k8s_overcommit_ratio: float = 1.25     # hypervisor vcpu overcommit that makes it a double one
+    k8s_claim_min_gib: float = 10.0        # a pvc smaller than this is noise
+    k8s_claim_min_age_days: float = 7.0    # younger than this is a deploy in progress
+
     # S3 storage hygiene: lifecycle rules, noncurrent versions, abandoned uploads
     s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned
     s3_cold_min_gb: float = 100.0          # ignore standard-class buckets smaller than this
@@ -392,6 +401,10 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   required_tags: [Owner, Environment]   # tag keys every cost-bearing resource must carry
 #   showback_unattributed_pct: 20  # WARN when this share of spend carries no required tag
 #   k8s_unrequested_pct: 50        # WARN when this share of a cluster's iron no pod requested
+#   k8s_pool_unrequested_pct: 25   # ...and the share a node-pool finding needs before it fires
+#   k8s_overcommit_ratio: 1.25     # pool vcpu overcommit that makes an empty pool a double one
+#   k8s_claim_min_gib: 10          # a pvc nothing mounts smaller than this is noise
+#   k8s_claim_min_age_days: 7      # a younger unmounted pvc is a deploy in progress
 #   transfer_spend_pct: 15         # WARN when data transfer takes this share of spend
 
 # Monitoring metric-anomaly detection + Tier-1 default rules (thresholds + forecast).

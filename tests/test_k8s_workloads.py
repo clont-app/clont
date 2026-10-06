@@ -390,6 +390,6 @@ def test_the_advice_lands_on_the_batch_and_fires_one_event():
 def test_a_failed_sizing_pass_does_not_cost_the_namespace_table():
     batch = Agent([], [], k8s_sources=[_Stub(raises=True)])._collect_batch()
     assert batch.recommendations == []
-    assert any("workloads failed" in err for err in batch.errors)
+    assert any("findings failed" in err for err in batch.errors)
     # the split still ran: its event is there
     assert any("Namespace showback" in e.title for e in batch.events)

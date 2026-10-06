@@ -2,8 +2,8 @@
 
 `pods.py` is the request column; this is the other one, and it is what turns the namespace
 table into sizing advice at all. Same split as the on-prem side (`onprem/inventory.py` vs
-`onprem/metrics.py`) and the percentile is literally the same function — `percentile()`
-there is nearest-rank over plain numbers and never knew anything about vcenter.
+`onprem/metrics.py`) and the percentile is literally the same function — `core/stats.py`
+is nearest-rank over plain numbers and knows nothing about either provider.
 
 **Two sources, and they are not equally good:**
 
@@ -41,9 +41,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from clont.core.stats import DEFAULT_QUANTILE, percentile
 from clont.providers.k8s.nodes import BYTES_PER_GIB, quantity
 from clont.providers.k8s.pods import Pod, WorkloadRef
-from clont.providers.onprem.metrics import DEFAULT_QUANTILE, percentile
 
 METRICS_SERVER = "metrics-server"
 PROMETHEUS = "prometheus"

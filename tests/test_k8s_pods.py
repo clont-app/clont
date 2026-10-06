@@ -35,7 +35,7 @@ def test_containers_add_up_and_quantities_are_parsed():
     pods, pending = build_pods(
         [pod("web", spec={"containers": [container("500m", "256Mi"), container("1", "1Gi")]})]
     )
-    assert pending == 0
+    assert pending == []
     assert pods[0].vcpu == Decimal("1.5")
     assert pods[0].ram_gib == Decimal("1.25")
 
@@ -97,7 +97,7 @@ def test_a_terminated_pod_holds_nothing_and_is_dropped():
         ]
     )
     assert pods == []
-    assert pending == 0  # they are history, not waiting
+    assert pending == []  # they are history, not waiting
 
 
 def test_an_unscheduled_pod_is_counted_not_priced():
@@ -105,7 +105,8 @@ def test_an_unscheduled_pod_is_counted_not_priced():
     item["spec"]["nodeName"] = ""
     pods, pending = build_pods([item])
     assert pods == []
-    assert pending == 1
+    assert [p.name for p in pending] == ["web"]
+    assert pending[0].vcpu == Decimal(1)  # it asked, nobody gave
 
 
 def test_a_pod_with_no_requests_at_all_still_appears():
@@ -126,4 +127,4 @@ def test_the_owner_kind_rides_along():
 def test_junk_items_are_skipped_not_fatal():
     pods, pending = build_pods([None, "nope", pod("web")])  # type: ignore[list-item]
     assert len(pods) == 1
-    assert pending == 0
+    assert pending == []

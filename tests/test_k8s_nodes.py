@@ -136,3 +136,27 @@ def test_quantities_come_back_in_cores_and_bytes():
 def test_short_name_drops_the_dns_suffix():
     # kubelet registers either spelling depending on how the host resolves itself
     assert Node(name="web-01.dc1.local", uid="u").short_name == "web-01"
+
+
+def test_a_control_plane_taint_means_the_node_takes_no_pods():
+    item = node_json()
+    item["spec"]["taints"] = [
+        {"key": "node-role.kubernetes.io/control-plane", "effect": "NoSchedule"},
+        {"key": "dedicated", "value": "gpu", "effect": "NoExecute"},
+        # a hint, not a wall: pods land here anyway, so it is not counted
+        {"key": "spot", "effect": "PreferNoSchedule"},
+    ]
+    node, = build_nodes([item])
+    assert node.hard_taints == ("node-role.kubernetes.io/control-plane", "dedicated")
+    assert node.takes_pods is False
+
+
+def test_an_untainted_ready_node_takes_pods_and_a_cordoned_one_does_not():
+    node, = build_nodes([node_json()])
+    assert node.takes_pods is True
+    cordoned = node_json()
+    cordoned["spec"]["unschedulable"] = True
+    assert build_nodes([cordoned])[0].takes_pods is False
+    notready = node_json()
+    notready["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    assert build_nodes([notready])[0].takes_pods is False

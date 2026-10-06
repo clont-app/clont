@@ -1,18 +1,21 @@
-"""The cluster wire: four list calls, and nothing else.
+"""The cluster wire: five list calls, and nothing else.
 
 The `kubernetes` client is an optional dependency (`pip install clont[k8s]`) — an aws-only
 install has no business carrying it — so it is imported when a session opens and not at
 module import. Same shape as `vsphere.py`.
 
-**Only `list`, only on `nodes`, `pods`, `namespaces` and `pods.metrics.k8s.io`.** That is
-the whole api surface of this file, which is what lets clont run under a ClusterRole with
-`get,list` on those four and nothing else. No write verb, no secrets, no exec, no logs.
+**Only `list`, only on `nodes`, `pods`, `namespaces`, `persistentvolumeclaims` and
+`pods.metrics.k8s.io`.** That is the whole api surface of this file, which is what lets
+clont run under a ClusterRole with `get,list` on those five and nothing else. No write
+verb, no secrets, no exec, no logs.
 
-The last two are optional, and a cluster that refuses them is still fully priced — only
-the sizing advice goes quiet. Namespaces are read for their *labels*, so a showback
+The last three are optional, and a cluster that refuses them is still fully priced — only
+the extra findings go quiet. Namespaces are read for their *labels*, so a showback
 table can group by `team` the way the aws one groups by a cost-allocation tag. A role
 without them still prices every namespace — `labels()` answers empty and the table groups
-by name — so the read is optional on purpose and a 403 there is not a failed pass.
+by name — so the read is optional on purpose and a 403 there is not a failed pass. Claims
+are the same: without them the volume findings are simply absent, which is better than a
+cluster that cannot be priced because a role was tight.
 
 Two things that are easy to get wrong and are decided here:
 
@@ -38,6 +41,7 @@ from clont.core.logging import get_logger
 from clont.providers.k8s.nodes import Node, build_nodes
 from clont.providers.k8s.pods import Pod, build_pods
 from clont.providers.k8s.usage import PodUsage, build_usage
+from clont.providers.k8s.volumes import Claim, build_claims
 
 log = get_logger("clont.providers.k8s")
 
@@ -115,11 +119,27 @@ class KubernetesNodes:
         """Every node in the cluster, paged, as plain `Node`s."""
         return build_nodes(self._list("nodes", lambda: self._api.list_node))
 
-    def pods(self) -> tuple[list[Pod], int]:
-        """Every live scheduled pod with its requests, plus how many sit on no node."""
+    def pods(self) -> tuple[list[Pod], list[Pod]]:
+        """Every live pod with its requests: the scheduled ones, then the ones waiting."""
         return build_pods(
             self._list("pods", lambda: self._api.list_pod_for_all_namespaces)
         )
+
+    def claims(self) -> list[Claim]:
+        """Every pvc in the cluster, or empty when the role cannot list them.
+
+        Optional, like `labels()`: a missing read costs the volume findings and nothing
+        else, and dying here would cost the whole split for them.
+        """
+        try:
+            items = self._list(
+                "persistentvolumeclaims",
+                lambda: self._api.list_persistent_volume_claim_for_all_namespaces,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional read, see the module docstring
+            log.info("%s: persistent volume claims unavailable: %s", self.endpoint, exc)
+            return []
+        return build_claims(items)
 
     def usage(self) -> list[PodUsage]:
         """metrics-server's per-pod readings, or empty when there is nothing to read.

@@ -1,17 +1,18 @@
 """One cluster joined to the provider that prices it.
 
-`client.py` reads nodes and pods, `mapping.py` places the nodes on priced iron,
+`client.py` reads the cluster, `mapping.py` places the nodes on priced iron,
 `namespaces.py` divides that iron's cost, `workloads.py` sizes the pod templates against
-measured usage; this is the piece that knows *what to place them on* — and it is the only
-place in the k8s source that touches a provider. The rule it enforces is the plan's: a
-cluster is priced through a pool that already exists, so `priced_by` names an on-prem site
-(its vms) or an aws account (its instances), and nothing else can price a node.
+measured usage, `pools.py` asks whether the cluster needs every node vm at all and
+`volumes.py` finds the claims nothing mounts; this is the piece that knows *what to place
+them on* — and it is the only place in the k8s source that touches a provider. The rule it
+enforces is the plan's: a cluster is priced through a pool that already exists, so
+`priced_by` names an on-prem site (its vms) or an aws account (its instances), and nothing
+else can price a node.
 
 **The read is cached on the result, not the connection**, the same way `OnPremProvider`
-does it: the namespace split and the workload findings both want one node list per cycle,
-and a cluster that is read twice an hour is two api calls for one set of numbers. Nodes,
-pods, namespace labels and pod metrics share one session per refresh — four lists on one
-connection, not four connections.
+does it: all four reports want one node list per cycle, and a cluster that is read twice an
+hour is two api calls for one set of numbers. Nodes, pods, namespace labels, claims and pod
+metrics share one session per refresh — five lists on one connection, not five connections.
 
 **The usage samples are accumulated here**, because this object is the only thing that
 lives longer than a cycle. metrics-server answers with one instant reading, so the ring in
@@ -41,6 +42,8 @@ from clont.finops.k8s.mapping import (
     targets_from_site,
 )
 from clont.finops.k8s.namespaces import NamespaceShowback, split
+from clont.finops.k8s.pools import PoolFinding, PoolReport, review
+from clont.finops.k8s.volumes import VolumeFinding, VolumeReport, reclaim
 from clont.finops.k8s.workloads import WorkloadFinding, WorkloadReport, advise
 from clont.finops.models import CostRecord, Recommendation
 from clont.providers.k8s.client import KubernetesNodes
@@ -56,6 +59,7 @@ from clont.providers.k8s.usage import (
     WorkloadUsage,
     fold,
 )
+from clont.providers.k8s.volumes import Claim
 
 log = get_logger("clont.finops.k8s")
 
@@ -63,6 +67,9 @@ PASS_TTL_SECONDS = 300
 
 
 _SERVICE = "kubernetes"
+
+# the three reports all emit the same six fields, and the recommendation is built off those
+Finding = WorkloadFinding | PoolFinding | VolumeFinding
 
 # one cached pass: when it was taken, and the three things every report reads off it
 _Pass = tuple[float, "ClusterRead", "ClusterMapping", dict["WorkloadRef", "WorkloadUsage"]]
@@ -74,9 +81,14 @@ class ClusterRead:
 
     nodes: list[Node] = field(default_factory=list)
     pods: list[Pod] = field(default_factory=list)
-    pending_pods: int = 0                              # scheduled on nothing
+    pending: list[Pod] = field(default_factory=list)   # scheduled on nothing, so priced nowhere
     labels: dict[str, dict[str, str]] = field(default_factory=dict)  # namespace -> labels
     usage: list[PodUsage] = field(default_factory=list)  # per pod, as the source gives it
+    claims: list[Claim] = field(default_factory=list)
+
+    @property
+    def pending_pods(self) -> int:
+        return len(self.pending)
 
 
 class KubernetesSource:
@@ -145,20 +157,44 @@ class KubernetesSource:
             source=self.config.usage,
         )
 
+    def pools(self, records: list[CostRecord], *, refresh: bool = False) -> PoolReport:
+        """Whether the cluster still needs every node vm the pools hold for it."""
+        read, mapped, _ = self._pass(refresh=refresh)
+        return review(mapped, read.pods, records, tuning=self._tuning)
+
+    def volumes(self, records: list[CostRecord], *, refresh: bool = False) -> VolumeReport:
+        """Claims no pod mounts, and the namespaces that hold nothing else either."""
+        read, mapped, _ = self._pass(refresh=refresh)
+        return reclaim(
+            mapped,
+            read.pods,
+            read.pending,
+            read.claims,
+            records,
+            tuning=self._tuning,
+        )
+
     def recommendations(self, records: list[CostRecord]) -> list[Recommendation]:
-        """The sizing report as the same `Recommendation` every other collector emits.
+        """Every k8s finding as the same `Recommendation` every other collector emits.
 
         The alias a k8s finding carries is the **cluster**, not the site: an operator fixes
         a Deployment in a cluster, and which pool paid for it is the `region`. The cloud is
         the pricing provider's, because that is whose money this is.
+
+        Three reports, one list, and the pass behind them is cached — so the workload
+        advice, the pool arithmetic and the volume sweep all read one set of nodes and pods.
         """
-        report = self.workloads(records)
         # `targets()` has already rejected anything that is not aws or on prem, so by here
         # the provider's cloud is a real one
         cloud = self.provider.cloud
-        return [self._rec(finding, cloud) for finding in report.findings]
+        findings: list[Finding] = [
+            *self.workloads(records).findings,
+            *self.pools(records).findings,
+            *self.volumes(records).findings,
+        ]
+        return [self._rec(finding, cloud) for finding in findings]
 
-    def _rec(self, finding: WorkloadFinding, cloud: Cloud) -> Recommendation:
+    def _rec(self, finding: Finding, cloud: Cloud) -> Recommendation:
         return Recommendation(
             cloud=str(cloud),
             service=_SERVICE,
@@ -259,21 +295,28 @@ class KubernetesSource:
             nodes = session.nodes()
             pods, pending = session.pods()
             labels = session.labels()
+            claims = session.claims()
             # the metrics api is on the same connection; prometheus is not, and is read
             # outside the session because it is not the cluster's api at all
             usage = session.usage() if self.config.usage == METRICS_SERVER else []
         if self.config.usage == PROMETHEUS:
             usage = self._prometheus().pod_usage()
         log.debug(
-            "%s: %d node(s), %d pod(s), %d pending, %d usage row(s)",
+            "%s: %d node(s), %d pod(s), %d pending, %d usage row(s), %d claim(s)",
             self.name,
             len(nodes),
             len(pods),
-            pending,
+            len(pending),
             len(usage),
+            len(claims),
         )
         return ClusterRead(
-            nodes=nodes, pods=pods, pending_pods=pending, labels=labels, usage=usage
+            nodes=nodes,
+            pods=pods,
+            pending=pending,
+            labels=labels,
+            usage=usage,
+            claims=claims,
         )
 
     def _prometheus(self) -> Prometheus:

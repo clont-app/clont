@@ -15,6 +15,11 @@ Two things it decides:
   An on-prem record is a day's run-rate stamped on one day and a CUR record is a daily
   aggregate, so a monthly figure is `amount / days * 730/24`. Reading a day as a month is
   the one arithmetic error here that would be off by thirty and still look plausible.
+* **the pool's own card is read off its record's dimensions, not recomputed.** The on-prem
+  collector already publishes `rate_storage_gib_month` and `overcommit_vcpu` next to the
+  pool line, so the $/GiB a claim is priced at and the hypervisor's oversubscription both
+  come from the same place the vm prices did. A cloud pool has no such line and answers
+  None, which is the honest shape: there is nothing to read.
 """
 
 from __future__ import annotations
@@ -63,12 +68,28 @@ class NodeRates:
     currency: str
 
 
+@dataclass(frozen=True, slots=True)
+class PoolCard:
+    """What the pool line said about itself, for the questions a node cannot answer.
+
+    `overcommit_vcpu` is the hypervisor's: the vms' reserved vcpu over the hosts' cores. A
+    cluster's unrequested node capacity on top of that is the double-overcommit case.
+    """
+
+    pool: str
+    currency: str
+    storage_gib_month: Decimal = Decimal(0)   # the card's own $/GiB-month
+    overcommit_vcpu: Decimal = Decimal(0)     # 0 means the pool did not report it
+    overcommit_ram: Decimal = Decimal(0)
+
+
 class Prices:
     """The cycle's cost records, indexed by everything a node could be matched on."""
 
     def __init__(self, records: list[CostRecord]) -> None:
         self._by_key: dict[tuple[str, str], list[CostRecord]] = defaultdict(list)
         self._weights: dict[tuple[str, str], dict[str, Decimal]] = {}
+        self._cards: dict[tuple[str, str], PoolCard] = {}
         for record in records:
             alias = record.alias or ""
             dims = record.dimensions or {}
@@ -76,6 +97,14 @@ class Prices:
                 self._by_key[(alias, key)].append(record)
             if dims.get("weights") and dims.get("cluster"):
                 self._weights[(alias, dims["cluster"])] = parse_weights(dims["weights"])
+            if dims.get("cluster") and dims.get("rate_storage_gib_month"):
+                self._cards[(alias, dims["cluster"])] = PoolCard(
+                    pool=dims["cluster"],
+                    currency=record.cost.currency,
+                    storage_gib_month=_number(dims.get("rate_storage_gib_month")),
+                    overcommit_vcpu=_number(dims.get("overcommit_vcpu")),
+                    overcommit_ram=_number(dims.get("overcommit_ram")),
+                )
 
     def of(self, target: Priced) -> Cost | None:
         """One priced thing's cost for this window, or None when nothing carries it."""
@@ -94,6 +123,10 @@ class Prices:
 
     def weights(self, target: Priced) -> dict[str, Decimal]:
         return self._weights.get((target.alias, target.pool)) or FALLBACK_WEIGHTS
+
+    def card(self, target: Priced) -> PoolCard | None:
+        """The pool line behind this target, or None when the provider publishes none."""
+        return self._cards.get((target.alias, target.pool))
 
     def rates(self, target: Priced, node: Node) -> NodeRates | None:
         """Monthly $/vcpu and $/GiB for one node, or None when it is not priced at all.
@@ -121,6 +154,14 @@ def record_keys(record: CostRecord) -> set[str]:
     if record.resource is not None:
         keys.add(record.resource.resource_id)
     return {key for key in keys if key}
+
+
+def _number(value: object) -> Decimal:
+    """A dimension back into a number; a dimension is free text, so an unreadable one is 0."""
+    try:
+        return Decimal(str(value or "0"))
+    except Exception:  # noqa: BLE001 - see above
+        return Decimal(0)
 
 
 def parse_weights(text: str) -> dict[str, Decimal]:
