@@ -221,8 +221,8 @@ class FinOpsConfig(_Model):
     # and anything over 100 advised a size *under* the measured peak
     onprem_rightsize_target_pct: float = Field(default=70.0, gt=0, le=100)
 
-    # Kubernetes: what a cluster holds and never asked for. The savings floor and the
-    # rightsize headroom above are shared on purpose — a node is a vm in another spelling.
+    # Kubernetes: what a cluster holds and never asked for — the savings floor and the
+    # rightsize headroom above are shared on purpose, a node is a vm in another spelling
     # `pool_` in the name because `k8s_unrequested_pct` below is a different number: that
     # one is a WARN threshold on the whole cluster, this is the floor a pool finding needs
     k8s_pool_unrequested_pct: float = Field(default=25.0, ge=0, le=100)
