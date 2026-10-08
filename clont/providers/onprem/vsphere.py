@@ -139,7 +139,22 @@ class VsphereInventory:
         self._content = self._si.RetrieveContent()
         about = self._content.about
         self.instance_uuid = getattr(about, "instanceUuid", None) or None
+        if self.instance_uuid is None:
+            # `instanceUuid` is the vcenter's, and a host agent has no vcenter: on a
+            # standalone esxi it comes back unset. the host's own hardware uuid is the
+            # stable id there — the endpoint cannot stand in, it may be a tunnel port
+            self.instance_uuid = self._host_uuid()
         log.debug("connected to %s (%s %s)", self.endpoint, about.apiType, about.apiVersion)
+
+    def _host_uuid(self) -> str | None:
+        vim = self._require_vim()
+        try:
+            found = self.properties(vim.HostSystem, ("hardware.systemInfo.uuid",))
+        except Exception:  # noqa: BLE001 - an id is not worth failing a login over
+            log.warning("could not read a host uuid from %s", self.endpoint)
+            return None
+        uuids = sorted(str(p["hardware.systemInfo.uuid"]) for p in found.values() if p)
+        return uuids[0] if uuids else None
 
     def close(self) -> None:
         if self._si is None:
