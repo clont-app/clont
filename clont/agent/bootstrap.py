@@ -10,10 +10,17 @@ from clont.api.uplink import ApiUplink
 from clont.core.config import AWSConfig, Config, MetricsConfig
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
+from clont.finops.k8s.source import KubernetesSource
+# the module, not the package: `core.config` already imports the onprem config models, so
+# registering from the package __init__ would drag the collectors into every config load
+from clont.finops.onprem import costs as _onprem_costs  # noqa: F401 - for registration
+from clont.finops.onprem import waste as _onprem_waste  # noqa: F401 - for registration
+from clont.finops.onprem.config import OnPremSite
 from clont.monitoring.base import PER_METRIC_USD, MetricsPolicy
 from clont.providers.aws import organizations
 from clont.providers.aws.provider import AWSProvider
 from clont.providers.base import Provider
+from clont.providers.onprem.provider import OnPremProvider
 
 log = get_logger("clont.bootstrap")
 
@@ -65,6 +72,94 @@ def _authenticate(alias: str, aws: AWSConfig) -> AWSProvider | None:
         log.warning("skipping account %s: %s", alias, exc)
         return None
     return provider
+
+
+def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
+    """One provider per site that has somewhere to read from.
+
+    A site priced but not yet connected is normal — the card can be written before anyone
+    hands over a read-only account — so it is a warning and not a failure. Same isolation
+    as aws: one unreachable vcenter does not take the rest of the floor down.
+    """
+    providers: list[Provider] = []
+    for alias, site in sites.items():
+        if site.inventory is None:
+            log.warning("onprem %s: priced but no inventory block, nothing will be collected", alias)
+            continue
+        provider = OnPremProvider(alias, site)
+        try:
+            provider.authenticate()
+        except Exception as exc:  # noqa: BLE001 - isolate one bad site
+            log.warning("skipping onprem site %s: %s", alias, exc)
+            continue
+        providers.append(provider)
+    return providers
+
+
+def _tuning(config: Config) -> FinOpsTuning:
+    """The one `FinOpsTuning` the cycle runs on.
+
+    Built here rather than inline in the `Agent(...)` call because the k8s sources need the
+    same knobs — `rightsize-workload` is the `rightsize-vm` arithmetic, so a second copy of
+    the thresholds is a second answer waiting to happen.
+    """
+    return FinOpsTuning(
+        idle_cpu_pct=config.finops.idle_cpu_pct,
+        idle_lookback_days=config.finops.idle_lookback_days,
+        idle_rds_max_connections=config.finops.idle_rds_max_connections,
+        snapshot_max_age_days=config.finops.snapshot_max_age_days,
+        onprem_min_savings_usd=config.finops.onprem_min_savings_usd,
+        onprem_unaccounted_min_gib=config.finops.onprem_unaccounted_min_gib,
+        onprem_unaccounted_min_pct=config.finops.onprem_unaccounted_min_pct,
+        onprem_thin_overcommit_ratio=config.finops.onprem_thin_overcommit_ratio,
+        onprem_idle_ram_pct=config.finops.onprem_idle_ram_pct,
+        onprem_rightsize_target_pct=config.finops.onprem_rightsize_target_pct,
+        k8s_pool_unrequested_pct=config.finops.k8s_pool_unrequested_pct,
+        k8s_overcommit_ratio=config.finops.k8s_overcommit_ratio,
+        k8s_claim_min_gib=config.finops.k8s_claim_min_gib,
+        k8s_claim_min_age_days=config.finops.k8s_claim_min_age_days,
+        s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
+        s3_cold_min_gb=config.finops.s3_cold_min_gb,
+        ri_sp_min_utilization=config.finops.ri_sp_min_utilization,
+        ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
+        nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
+        required_tags=tuple(config.finops.required_tags),
+        allow_cost_explorer=config.finops.allow_cost_explorer,
+        allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
+    )
+
+
+def _k8s_sources(
+    config: Config, providers: list[Provider], tuning: FinOpsTuning
+) -> list[KubernetesSource]:
+    """One source per cluster whose pricing provider came up, each one mapped at startup.
+
+    The mapping is logged here because "how many of my nodes can clont price" is what an
+    operator has to see *before* any report exists — a cluster that maps nothing is a
+    `priced_by` pointing at the wrong site, and learning that from the first digest is a day
+    late. One unreachable cluster is isolated the way one unreachable vcenter is.
+    """
+    by_alias = {provider.alias: provider for provider in providers}
+    sources: list[KubernetesSource] = []
+    for name, cluster in config.kubernetes.items():
+        provider = by_alias.get(cluster.priced_by)
+        if provider is None:
+            # the alias is configured — the validator checked that — so it just did not come up
+            log.warning("kubernetes %s: %s is not available, nothing prices it", name, cluster.priced_by)
+            continue
+        source = KubernetesSource(name, cluster, provider, tuning=tuning)
+        try:
+            log.info("kubernetes %s", source.mapping().summary())
+        except Exception as exc:  # noqa: BLE001 - isolate one bad cluster
+            log.warning("skipping kubernetes cluster %s: %s", name, exc)
+            continue
+        # the site's storage gap counts this cluster's volumes as space no vm accounts for,
+        # so the cluster has to be able to say "those are mine" before the waste pass runs
+        attach = getattr(provider, "attach_guest", None)
+        if attach is not None:
+            attach(name, source.guest_storage)
+        sources.append(source)
+    return sources
 
 
 def _member_configs(payer: AWSProvider, aws: AWSConfig) -> list[tuple[str, AWSConfig]]:
@@ -145,6 +240,18 @@ def build_agent(config: Config) -> Agent:
     if config.aws and not providers:
         raise RuntimeError("no configured accounts could be authenticated")
 
+    # after the aws check on purpose: a live vcenter must not make a floor of dead roles
+    # look like a working fleet
+    onprem = _onprem_providers(config.onprem)
+    if not onprem and any(site.inventory is not None for site in config.onprem.values()):
+        raise RuntimeError("no configured on-prem site could be reached")
+    providers.extend(onprem)
+
+    # nodes are placed on the iron above, so this runs last: the namespace split divides
+    # what those providers collect, and it needs them up first
+    finops_tuning = _tuning(config)
+    k8s_sources = _k8s_sources(config, providers, finops_tuning)
+
     uplink = (
         ApiUplink(config.api.url, config.api.api_key, timeout=config.api.timeout_seconds)
         if config.api is not None
@@ -162,21 +269,10 @@ def build_agent(config: Config) -> Agent:
         budgets=config.finops.budgets,
         budget_warn_pct=config.finops.budget_warn_pct,
         forecast_alpha=config.finops.forecast_alpha,
-        finops_tuning=FinOpsTuning(
-            idle_cpu_pct=config.finops.idle_cpu_pct,
-            idle_lookback_days=config.finops.idle_lookback_days,
-            idle_rds_max_connections=config.finops.idle_rds_max_connections,
-            snapshot_max_age_days=config.finops.snapshot_max_age_days,
-            s3_multipart_min_age_days=config.finops.s3_multipart_min_age_days,
-            s3_cold_min_gb=config.finops.s3_cold_min_gb,
-            ri_sp_min_utilization=config.finops.ri_sp_min_utilization,
-            ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
-            nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
-            required_tags=tuple(config.finops.required_tags),
-            allow_cost_explorer=config.finops.allow_cost_explorer,
-            allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
-        ),
+        finops_tuning=finops_tuning,
         showback_unattributed_pct=config.finops.showback_unattributed_pct,
+        k8s_unrequested_pct=config.finops.k8s_unrequested_pct,
+        k8s_sources=k8s_sources,
         transfer_spend_pct=config.finops.transfer_spend_pct,
         anomaly_sigma=config.monitoring.anomaly_sigma,
         anomaly_min_points=config.monitoring.anomaly_min_points,

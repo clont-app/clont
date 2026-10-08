@@ -16,6 +16,7 @@ class Cloud(StrEnum):
     AWS = "aws"
     GCP = "gcp"
     AZURE = "azure"
+    ONPREM = "onprem"  # own iron: vsphere, proxmox, bare metal. alias = site, dimensions carry the cluster
 
 
 @dataclass(frozen=True, slots=True)

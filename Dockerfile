@@ -25,8 +25,11 @@ WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY clont ./clont
 
+# with the vsphere and k8s extras: a pip install stays aws-only and pulls neither sdk, but
+# the image is one artifact for one product, and without pyvmomi or the kubernetes client
+# the on-prem collectors cannot read anything at all
 RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install .
+ && /opt/venv/bin/pip install '.[vsphere,k8s]'
 
 # --- runtime -----------------------------------------------------------------
 FROM python:3.14-slim

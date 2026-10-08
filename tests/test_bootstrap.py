@@ -6,6 +6,7 @@ import pytest
 
 from clont.agent.bootstrap import build_agent
 from clont.core.config import AWSConfig, Config, CURConfig, MembersConfig
+from clont.providers.k8s.config import KubernetesCluster
 from clont.providers.aws import organizations
 from clont.providers.aws.organizations import OrgAccount
 
@@ -129,3 +130,41 @@ def test_a_member_role_that_cannot_be_assumed_is_skipped(monkeypatch):
     agent = build_agent(_payer_config())
 
     assert [p.alias for p in agent._providers] == ["payer"]
+
+
+def test_a_cluster_whose_provider_did_not_come_up_is_reported_not_fatal(monkeypatch, caplog):
+    # the alias is configured — the config validator checked that — so this is its account
+    # failing auth, and a cluster nobody can price must not take the rest of the run down
+    def fake_auth(self):
+        if self.alias == "prod":
+            raise RuntimeError("cannot assume role")
+        _auth_from_arn(self)
+
+    monkeypatch.setattr(_AUTH, fake_auth)
+    config = Config(
+        aws={
+            "prod": AWSConfig(role_arn="arn:aws:iam::111111111111:role/prod"),
+            "dev": AWSConfig(role_arn="arn:aws:iam::222222222222:role/dev"),
+        },
+        kubernetes={"lab": KubernetesCluster(priced_by="prod")},
+    )
+    with caplog.at_level("WARNING"):
+        agent = build_agent(config)
+    assert [p.alias for p in agent._providers] == ["dev"]
+    assert "nothing prices it" in caplog.text
+
+
+def test_an_unreachable_cluster_is_isolated(monkeypatch, caplog):
+    monkeypatch.setattr(_AUTH, _auth_from_arn)
+    monkeypatch.setattr(
+        "clont.finops.k8s.source.KubernetesSource._read_cluster",
+        lambda self: (_ for _ in ()).throw(RuntimeError("connection refused")),
+    )
+    config = Config(
+        aws={"prod": AWSConfig(role_arn="arn:aws:iam::111111111111:role/prod")},
+        kubernetes={"lab": KubernetesCluster(priced_by="prod")},
+    )
+    with caplog.at_level("WARNING"):
+        agent = build_agent(config)
+    assert [p.alias for p in agent._providers] == ["prod"]
+    assert "skipping kubernetes cluster lab" in caplog.text

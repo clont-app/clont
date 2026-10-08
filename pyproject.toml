@@ -24,6 +24,14 @@ dependencies = [
     "pydantic-settings[yaml]>=2.2",
 ]
 
+[project.optional-dependencies]
+# only the vcenter wire needs it, and an aws-only install should not carry a
+# hypervisor sdk. clont.providers.onprem.inventory stays importable without it
+vsphere = ["pyvmomi>=8.0"]
+# only the node read needs it. clont.finops.k8s.mapping stays importable without it, so the
+# match rules are testable with no cluster and no sdk
+k8s = ["kubernetes>=29"]
+
 [project.scripts]
 clont = "clont.cli.app:app"
 

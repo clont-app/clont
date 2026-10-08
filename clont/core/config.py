@@ -14,7 +14,7 @@ import os
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -24,6 +24,8 @@ from pydantic_settings import (
 
 from clont.core.logging import LEVEL_NAMES, get_logger
 from clont.events.models import EventSeverity
+from clont.finops.onprem.config import OnPremSite
+from clont.providers.k8s.config import KubernetesCluster
 
 log = get_logger("clont.config")
 
@@ -208,6 +210,26 @@ class FinOpsConfig(_Model):
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # EBS snapshots older than this are "old"
 
+    # On-prem waste: one inventory pass against the operator's own rate card
+    onprem_min_savings_usd: float = 1.0        # per finding per month, below it is noise
+    onprem_unaccounted_min_gib: float = 100.0  # datastore space no vm claims
+    onprem_unaccounted_min_pct: float = 10.0   # ...and as a share of used space, both must pass
+    onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
+    # measured kinds. cpu reuses idle_cpu_pct above; a vm needs both to be idle
+    onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
+    # the p95 is divided by it, so 0 took the whole waste pass down with a DivisionByZero
+    # and anything over 100 advised a size *under* the measured peak
+    onprem_rightsize_target_pct: float = Field(default=70.0, gt=0, le=100)
+
+    # Kubernetes: what a cluster holds and never asked for — the savings floor and the
+    # rightsize headroom above are shared on purpose, a node is a vm in another spelling
+    # `pool_` in the name because `k8s_unrequested_pct` below is a different number: that
+    # one is a WARN threshold on the whole cluster, this is the floor a pool finding needs
+    k8s_pool_unrequested_pct: float = Field(default=25.0, ge=0, le=100)
+    k8s_overcommit_ratio: float = 1.25     # hypervisor vcpu overcommit that makes it a double one
+    k8s_claim_min_gib: float = 10.0        # a pvc smaller than this is noise
+    k8s_claim_min_age_days: float = 7.0    # younger than this is a deploy in progress
+
     # S3 storage hygiene: lifecycle rules, noncurrent versions, abandoned uploads
     s3_multipart_min_age_days: int = 7     # incomplete uploads older than this are abandoned
     s3_cold_min_gb: float = 100.0          # ignore standard-class buckets smaller than this
@@ -221,6 +243,10 @@ class FinOpsConfig(_Model):
     required_tags: list[str] = Field(default_factory=list)            # tag keys every resource must carry
     # showback groups spend by required_tags; WARN when this much of it carries no value
     showback_unattributed_pct: float = 20.0
+    # the k8s twin of the line above: WARN when this much of a cluster's priced iron no pod
+    # requested. higher than the tag threshold on purpose — a cluster with no headroom is
+    # one node failure away from pending pods, so half empty is not yet a finding
+    k8s_unrequested_pct: float = 50.0
     # data transfer is normally 5-15% of an aws bill; WARN once network spend passes this
     transfer_spend_pct: float = 15.0
 
@@ -273,6 +299,9 @@ class Config(BaseSettings):
     lookback_days: int = 1               # window for cost/metric queries
     log_level: str = "info"              # daemon's own operational verbosity
     aws: dict[str, AWSConfig] = Field(default_factory=dict)   # alias -> account
+    onprem: dict[str, OnPremSite] = Field(default_factory=dict)  # alias -> site (own iron)
+    # name -> cluster. not a provider: a cluster is a *source* priced through one of the above
+    kubernetes: dict[str, KubernetesCluster] = Field(default_factory=dict)
     finops: FinOpsConfig = Field(default_factory=FinOpsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
@@ -284,6 +313,23 @@ class Config(BaseSettings):
         if v.strip().lower() not in LEVEL_NAMES:
             raise ValueError(f"log_level must be one of {', '.join(LEVEL_NAMES)}")
         return v.strip().lower()
+
+    @model_validator(mode="after")
+    def _clusters_are_priced(self) -> Config:
+        """A cluster's `priced_by` must name a site or account that is actually configured.
+
+        This is the one cross-section rule in the file, and it is here because this is the
+        only place both halves are visible. A typo would otherwise come back at the first
+        cycle as a cluster whose nodes map to nothing — which reads like a broken match.
+        """
+        for name, cluster in self.kubernetes.items():
+            if cluster.priced_by not in self.aws and cluster.priced_by not in self.onprem:
+                known = ", ".join(sorted(set(self.aws) | set(self.onprem))) or "none configured"
+                raise ValueError(
+                    f"kubernetes.{name}.priced_by={cluster.priced_by!r} names no provider "
+                    f"({known}): a cluster is priced through a pool, never on its own"
+                )
+        return self
 
     @classmethod
     def settings_customise_sources(
@@ -354,6 +400,11 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #     Environment: [dev, staging, test, qa]
 #   required_tags: [Owner, Environment]   # tag keys every cost-bearing resource must carry
 #   showback_unattributed_pct: 20  # WARN when this share of spend carries no required tag
+#   k8s_unrequested_pct: 50        # WARN when this share of a cluster's iron no pod requested
+#   k8s_pool_unrequested_pct: 25   # ...and the share a node-pool finding needs before it fires
+#   k8s_overcommit_ratio: 1.25     # pool vcpu overcommit that makes an empty pool a double one
+#   k8s_claim_min_gib: 10          # a pvc nothing mounts smaller than this is noise
+#   k8s_claim_min_age_days: 7      # a younger unmounted pvc is a deploy in progress
 #   transfer_spend_pct: 15         # WARN when data transfer takes this share of spend
 
 # Monitoring metric-anomaly detection + Tier-1 default rules (thresholds + forecast).

@@ -24,6 +24,7 @@ from clont.events.stats import (
     periods_to_cross,
     project_seasonal,
 )
+from clont.finops.k8s.namespaces import NamespaceShowback
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.showback import UNATTRIBUTED, showback
 from clont.finops.transfer import transfer_report
@@ -178,6 +179,81 @@ class ShowbackDetector:
                         "unattributed": str(report.unattributed),
                         "unattributed_pct": str(report.unattributed_pct),
                         "values": {ln.value: str(ln.amount) for ln in report.lines},
+                    },
+                )
+            )
+        return events
+
+
+class NamespaceShowbackDetector:
+    """A cluster's namespace split -> one event per cluster.
+
+    The same shape as `ShowbackDetector` and deliberately so: the aws half groups a bill by
+    cost-allocation tag, this half groups a pool's own cost by namespace, and an operator
+    reads one table. WARN on the share of the iron **nobody requested** — that is the
+    actionable number on a cluster (capacity someone is paying for and no pod asked for),
+    the way the unattributed share is the actionable one on a bill.
+
+    A cluster whose nodes carry no cost record emits nothing at all: there is no number to
+    report, and a `$0.00` table would read as a free cluster.
+    """
+
+    _TOP_N = 5
+
+    def __init__(self, unrequested_pct: float = 50.0, keys: tuple[str, ...] = ()) -> None:
+        self._limit = Decimal(str(unrequested_pct))
+        self._keys = keys
+
+    def detect(self, reports: list[NamespaceShowback]) -> list[Event]:
+        events: list[Event] = []
+        for report in reports:
+            if not report.priced or report.total <= 0:
+                continue
+            top = report.lines[: self._TOP_N]
+            breakdown = ", ".join(f"{ln.namespace} {ln.amount} ({ln.share_pct}%)" for ln in top)
+            missing = (
+                f" — no cost record for {len(report.unpriced_nodes)} node(s): "
+                f"{', '.join(report.unpriced_nodes)}"
+                if report.unpriced_nodes
+                else ""
+            )
+            events.append(
+                Event(
+                    key=f"finops:k8s:namespaces:{report.cluster}:{report.currency}",
+                    severity=EventSeverity.WARN
+                    if report.unrequested_pct >= self._limit
+                    else EventSeverity.INFO,
+                    domain="finops",
+                    cloud=None,
+                    title=(
+                        f"[{report.cluster}] Namespace showback: "
+                        f"{report.unrequested_pct}% unrequested"
+                    ),
+                    message=(
+                        f"{report.start}..{report.end}: {report.total} {report.currency} "
+                        f"over {report.nodes_priced} priced node(s) — "
+                        f"{report.unrequested} unrequested, {report.kubelet} kubelet "
+                        f"reserved — top: {breakdown or 'none'}{missing}"
+                    ),
+                    payload={
+                        "cluster": report.cluster,
+                        "start": report.start.isoformat(),
+                        "end": report.end.isoformat(),
+                        "total": str(report.total),
+                        "currency": report.currency,
+                        "unrequested_pct": str(report.unrequested_pct),
+                        # the non-namespace lines, named once in `namespaces.py`
+                        "buckets": {name: str(amount) for name, amount in report.buckets()},
+                        "nodes_priced": str(report.nodes_priced),
+                        "unpriced_nodes": list(report.unpriced_nodes),
+                        "unmapped_nodes": list(report.unmapped_nodes),
+                        "pending_pods": str(report.pending_pods),
+                        "namespaces": {ln.namespace: str(ln.amount) for ln in report.lines},
+                        # the same money by label, so a team table needs no second pass
+                        "labels": {
+                            key: {ln.value: str(ln.amount) for ln in report.by_label(key)}
+                            for key in self._keys
+                        },
                     },
                 )
             )

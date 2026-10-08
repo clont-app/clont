@@ -205,3 +205,39 @@ def test_api_url_must_be_https(tmp_path, monkeypatch):
     insecure = "api:\n  url: http://api.example.com/ingest\n  api_key: k\n"
     with pytest.raises(Exception, match="https"):
         _load(tmp_path, monkeypatch, insecure)
+
+
+def test_the_rightsize_target_must_be_a_usable_share(tmp_path, monkeypatch):
+    # it divides the measured p95: 0 took the whole on-prem waste pass down with a
+    # DivisionByZero, and over 100 advised a size under the peak the vm actually hit
+    for bad in (0, 120):
+        with pytest.raises(Exception):
+            _load(tmp_path, monkeypatch, f"finops:\n  onprem_rightsize_target_pct: {bad}\n")
+    config = _load(tmp_path, monkeypatch, "finops:\n  onprem_rightsize_target_pct: 80\n")
+    assert config.finops.onprem_rightsize_target_pct == 80
+
+
+_K8S_TUNING_YAML = """\
+finops:
+  k8s_pool_unrequested_pct: 40
+  k8s_overcommit_ratio: 2.0
+  k8s_claim_min_gib: 50
+  k8s_claim_min_age_days: 30
+"""
+
+
+def test_the_k8s_knobs_reach_the_tuning_the_cluster_sources_run_on(tmp_path, monkeypatch):
+    agent = build_agent(_load(tmp_path, monkeypatch, _K8S_TUNING_YAML))
+    tuning = agent._finops_tuning
+    assert (tuning.k8s_pool_unrequested_pct, tuning.k8s_overcommit_ratio) == (40, 2.0)
+    assert (tuning.k8s_claim_min_gib, tuning.k8s_claim_min_age_days) == (50, 30)
+    # and the defaults are the documented ones when nobody says
+    plain = build_agent(_load(tmp_path, monkeypatch, "interval_seconds: 300\n"))._finops_tuning
+    assert (plain.k8s_pool_unrequested_pct, plain.k8s_claim_min_age_days) == (25.0, 7.0)
+
+
+def test_the_pool_floor_and_the_showback_warning_are_two_different_knobs(tmp_path, monkeypatch):
+    # they were one name in the same model once, so the later field silently won and the
+    # pool finding ran on the detector's 50
+    config = _load(tmp_path, monkeypatch, "finops:\n  k8s_unrequested_pct: 80\n").finops
+    assert (config.k8s_unrequested_pct, config.k8s_pool_unrequested_pct) == (80, 25.0)

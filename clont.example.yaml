@@ -38,6 +38,77 @@ aws:
     role_arn: arn:aws:iam::222222222222:role/clont-readonly
     regions: [us-east-1]
 
+# Own iron, key is the site alias. A datacenter sends no invoice, so clont never
+# guesses a price: you give the monthly cost of a pool, clont measures that pool's
+# capacity and divides. The pool is a *cluster* — different hardware generations
+# and licensing mean different $/vcpu-hour, and a site average hides exactly the
+# comparison the report exists for.
+# A cluster card overrides the site card line by line, so the lines that hold for
+# the whole floor are written once. A cluster this file never names is priced on
+# the site card alone.
+# hardware_amortization and hardware_capex/lifetime_months are two spellings of
+# one line: naming either on a cluster replaces the site's hardware entirely.
+# weights split the pool over cpu/ram/storage, must sum to 1.0, and are printed in
+# the report beside every number they produced.
+# The inventory block says where to read the site: a read-only hypervisor account,
+# never an agent in a guest. Set exactly one of password / password_env — the yaml
+# is the agent's own file, but an env var is what a k8s secretKeyRef fills. Spend is
+# collected only for a site that has this block; a site with only a card is priced
+# and idle, which is normal while the read-only account is still being granted.
+# onprem:
+#   dc1:
+#     inventory:
+#       kind: vsphere              # libvirt/proxmox join here later
+#       endpoint: vc1.dc1.local    # host only, no scheme
+#       username: clont-ro@vsphere.local
+#       password_env: DC1_VSPHERE_PASSWORD
+#       verify_ssl: true           # false only for a self-signed lab cert
+#       usage_window_days: 14      # trailing p95 window; 0 = no perf read, all vms billed
+#                                  # at what they reserved and no idle/rightsize advice
+#       # ca_bundle: /etc/clont/vcenter-ca.pem   # a private ca, instead of turning tls off
+#     rate_card:
+#       power_and_cooling: 3400    # or measured per chassis, later
+#       rack_and_network: 1500
+#       licenses: 2000             # vmware/rhel/windows
+#       support: 0
+#       staff: 0                   # arguable, so off by default
+#       lifetime_months: 48        # what the clusters amortize their capex over
+#     weights: {cpu: 0.5, ram: 0.3, storage: 0.2}
+#     clusters:
+#       prod-gen11:
+#         rate_card: {hardware_capex: 480000, licenses: 6000}
+#       dev-gen9:
+#         rate_card: {hardware_capex: 120000, lifetime_months: 60}
+
+# Kubernetes. Not a provider: a cluster is a *source*, priced through a pool that
+# already exists. priced_by names a site under `onprem:` (its vms) or an account
+# under `aws:` (its instances), it is required, and it has to be configured above —
+# clont places each node on the iron it already costed instead of guessing a node
+# price. A node it cannot place is reported unmapped, never priced at zero; the
+# startup log says how many of each cluster's nodes are mapped and why the rest are
+# not. Access is the kubeconfig's or the pod's: get/list on nodes, pods, namespaces,
+# persistentvolumeclaims, persistentvolumes and pods.metrics.k8s.io is the whole of it.
+# Only nodes and pods are needed to price a cluster; each of the rest costs one report
+# if the role is tight. Volumes are also what keeps the site's storage gap honest — a
+# pvc nothing mounts is datastore space no vm accounts for, and without the pv read it
+# is reported twice.
+# kubernetes:
+#   lab:
+#     priced_by: dc1               # the site whose vms these nodes run on
+#     kubeconfig: /etc/clont/kubeconfig
+#     context: lab-admin           # default: the kubeconfig's current-context
+#     # in_cluster: true           # instead of a kubeconfig: the pod's service account
+#     match_by_name: true          # last-resort match, node name == vm name. false =
+#                                  # an unidentifiable node is reported, not guessed
+#     usage: metrics-server        # where the p95 behind sizing advice comes from:
+#                                  # metrics-server | prometheus | off. off still prices
+#                                  # the cluster, it just advises on nothing
+#     usage_min_samples: 24        # metrics-server keeps no history, so this many passes
+#                                  # must accumulate before a workload is advised about
+#     # prometheus_url: http://prometheus.monitoring:9090  # required by usage: prometheus
+#     # prometheus_window_days: 14 # the window prometheus computes the p95 over
+#     # prometheus_step_minutes: 5 # subquery step; widen it on a big cluster
+
 # FinOps. Spend events: a daily spend digest (info) every cycle, a spend spike
 # (warn) when a service's latest-day spend jumps over its baseline, a month-end
 # forecast (info), and budget alerts (warn/critical). The idle/snapshot
@@ -77,6 +148,18 @@ finops:
   idle_lookback_days: 14         # trailing window the idle averages span
   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
+
+  # On-prem waste: stopped vms and templates holding disk, hosts in a cluster
+  # carrying no load, datastore space no vm accounts for. Priced off the rate
+  # card under `onprem:`, so the savings are in the operator's own money.
+  onprem_min_savings_usd: 1          # per finding per month, below it is noise
+  onprem_unaccounted_min_gib: 100    # datastore space no vm claims
+  onprem_unaccounted_min_pct: 10     # ...and as a share of used space, both must pass
+  onprem_thin_overcommit_ratio: 1.5  # thin promises over capacity before it is a risk
+  # idle and rightsizing need the perf pass (inventory.usage_window_days above zero).
+  # cpu reuses idle_cpu_pct; a vm has to be quiet on both to count as idle
+  onprem_idle_ram_pct: 20            # p95 ram below which a running vm is idle
+  onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking, 0 < x <= 100
 
   # S3 storage hygiene. The cold-data check needs allow_cloudwatch_metrics too
   # (one metric per bucket); lifecycle, versions and uploads are free.
