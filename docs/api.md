@@ -49,6 +49,12 @@ every record says which `cloud` and account `alias` it came from, so one batch
 covers every configured account without splitting it up. money is sent as strings
 (`Decimal`, so precision survives the trip) and timestamps are iso-8601.
 
+`cloud` is `aws` or `onprem`; for own iron the `alias` is the site and the
+cluster rides in `dimensions`. a kubernetes cluster adds no cost records of its
+own — it divides the ones the pricing provider already sent, so it shows up as
+recommendations and events only. that's also why it runs last in a cycle: a
+namespace table that contributed spend would double-count the vms it's made of.
+
 the server replies with events to dispatch:
 
 ```

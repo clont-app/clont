@@ -161,6 +161,15 @@ finops:
   onprem_idle_ram_pct: 20            # p95 ram below which a running vm is idle
   onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking, 0 < x <= 100
 
+  # Kubernetes: what a cluster holds and never asked for. Priced through the pool
+  # under `onprem:`/`aws:` that already pays for the nodes — the rightsize headroom
+  # is onprem_rightsize_target_pct above, a node is a vm in another spelling.
+  k8s_unrequested_pct: 50        # WARN when this share of a cluster's iron no pod requested
+  k8s_pool_unrequested_pct: 25   # ...and the share a node-pool finding needs before it fires
+  k8s_overcommit_ratio: 1.25     # pool vcpu overcommit that makes an empty pool a double one
+  k8s_claim_min_gib: 10          # a pvc nothing mounts smaller than this is noise
+  k8s_claim_min_age_days: 7      # a younger unmounted pvc is a deploy in progress
+
   # S3 storage hygiene. The cold-data check needs allow_cloudwatch_metrics too
   # (one metric per bucket); lifecycle, versions and uploads are free.
   s3_multipart_min_age_days: 7   # incomplete uploads older than this are abandoned

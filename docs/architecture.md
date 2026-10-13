@@ -3,8 +3,9 @@
 ## what clont is
 
 a long-running, **read-only** monitoring + finops **agent**. it assumes a
-read-only role in your cloud accounts, runs a `collect → detect → dispatch` loop,
-and delivers decisions to chat (slack / discord / telegram) — not dashboards.
+read-only role in your cloud accounts, reads your own hypervisors and kubernetes
+clusters the same way, runs a `collect → detect → dispatch` loop, and delivers
+decisions to chat (slack / discord / telegram) — not dashboards.
 
 it is **not** a metrics store, a rules engine or an apm. it's a thing that
 notices something and tells you, and it gets smarter as you opt into higher tiers.
@@ -22,6 +23,10 @@ notices something and tells you, and it gets smarter as you opt into higher tier
 - **secrets stay on the agent.** channel tokens and cloud credentials never leave
   the box, paid tiers included.
 - **finops and monitoring together.** one agent, one pipeline, both jobs.
+- **never guess a price.** a cloud has an invoice, so clont reads it; a
+  datacenter doesn't, so the operator writes a rate card and clont divides it by
+  the capacity it measured. the first `if model == ...: price = ...` would be a
+  bug.
 
 ## the pipeline (same shape at every tier)
 
@@ -40,9 +45,21 @@ where that lives today:
 - `clont/core/registry.py` — collectors register themselves by
   `(domain, cloud, service)` and the loop finds them. no hard-coded imports, so a
   new collector is one decorated class (`public_ipv4` was exactly that).
-- `clont/providers/` — read-only cloud auth (aws: refreshable assume-role,
-  multi-account, per-region clients) and the response parsing helpers collectors
-  share.
+- `clont/providers/` — read-only auth and the parsing helpers collectors share.
+  `aws/` is refreshable assume-role, multi-account, per-region clients;
+  `onprem/` is one vcenter pass (the wire in `vsphere.py`, the arithmetic in
+  `inventory.py`, perf counters in `metrics.py`) kept free of vsphere types so
+  proxmox / libvirt can fill the same dicts later; `k8s/` is nodes, pods, pvcs
+  and a usage source (metrics-server or prometheus).
+- `clont/finops/onprem/` — the rate card (`rates.py`, `config.py`), the cost
+  records (`costs.py`) and the waste pass (`waste.py`). **a pool is a cluster**:
+  hardware generations and licensing differ per cluster, and a site average hides
+  the comparison the report exists for.
+- `clont/finops/k8s/` — a cluster is a **source**, not a provider. `priced_by`
+  points at a pool that is already priced, and the chain is
+  `pool card → node vm cost record → node → namespace requests`. nothing is
+  redistributed and no node price is invented: a node that can't be placed comes
+  back `unmapped`, never zero.
 - `clont/events/detectors.py` — collector output becomes `Event`s; the account
   alias goes into the event **key** and **title**.
 - `clont/channels/` — delivery, with a per-channel severity gate and repeat
@@ -62,3 +79,11 @@ a second rule falls out of it, learned the hard way on the public ipv4 collector
 what everything costs; only the clear, deterministic waste becomes a
 recommendation. mixing the two turns the savings number into noise and teaches
 people to ignore the agent.
+
+and a third, from the on-prem and k8s work: **spend is what was reserved,
+advice is what was measured.** a cost record bills the vm or the pod request the
+operator actually pays for, so the site total matches the invoice; the p95 rides
+along as dimensions, and only ever produces advice. an absent measurement means
+no advice — never zero usage. every finding also says whether it is exact (a
+cluster's own rate card) or `approximate` (a mean rate, or capacity handed back
+that the invoice only follows once a node goes away).

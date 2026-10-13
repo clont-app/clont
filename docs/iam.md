@@ -1,4 +1,7 @@
-# read-only iam setup
+# read-only access setup
+
+most of this page is aws iam. own iron (vmware) and kubernetes are at the
+bottom — one built-in role and one `get`/`list` rbac rule, nothing custom.
 
 clont only ever **reads** from your aws accounts. for each account you watch,
 make one iam role that clont assumes, with a read-only permissions policy and a
@@ -356,3 +359,73 @@ your clont runtime role/user arn.
 `AWSProvider.preflight()` probes the read-only calls above and hands back the
 ones that came home `AccessDenied`, so you can find a missing permission without
 running a whole cycle. (cli wiring for it is still pending.)
+
+## own iron: a vsphere read-only account
+
+no custom role. make an account (`clont-ro@vsphere.local`, or an ad user), give
+it the built-in **Read-Only** role at the **vcenter root**, propagating to
+children. that's it — the whole pass is `CreateContainerView` /
+`RetrieveProperties` / `DestroyView` plus the perf query, which is exactly what
+Read-Only allows. a standalone esxi host works the same way.
+
+what it reads: compute resources (clusters and standalone hosts), hosts,
+datastores, vms, folders and datacenters — one property call per type, so 500 vms
+is one request. with `usage_window_days` above zero it also asks the performance
+manager for cpu and memory counters over that window.
+
+```yaml
+onprem:
+  dc1:
+    inventory:
+      kind: vsphere
+      endpoint: vc1.dc1.local        # host only, no scheme
+      username: clont-ro@vsphere.local
+      password_env: DC1_VSPHERE_PASSWORD
+      verify_ssl: true
+      usage_window_days: 14
+```
+
+three things worth knowing:
+
+- **the password is not a clont secret store.** either it's in the yaml (the
+  agent's own file, mode 600) or `password_env` names the variable it arrives in
+  — a k8s `secretKeyRef`, systemd's `EnvironmentFile`. exactly one of the two, so
+  a stale inline password can't shadow the env one.
+- **nothing is installed in a guest.** all of it comes from the hypervisor.
+- **Read-Only cannot browse a datastore, and that's on purpose.** so clont can
+  prove *how much* space nothing accounts for, but never list the files. don't
+  widen the role for it — a kubernetes cluster on that iron can name its own
+  volumes, which is the honest way to close the gap.
+- the sdk is an extra: `pip install clont[vsphere]` (pyvmomi). an aws-only
+  install doesn't pull it.
+
+## kubernetes: get / list, nothing else
+
+clont uses the kubeconfig you point it at, or the pod's own service account
+(`in_cluster: true`). it never creates credentials. the whole requirement:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clont-readonly
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods, namespaces, persistentvolumeclaims, persistentvolumes]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods]
+    verbs: [get, list]
+```
+
+bind it to clont's service account with a `ClusterRoleBinding`. only **nodes and
+pods** are needed to price a cluster; each of the rest buys one more report:
+
+| resource | what you lose without it |
+|---|---|
+| namespaces | the abandoned-namespace finding |
+| pvcs / pvs | unmounted claims and released volumes — and the site's storage gap gets counted twice |
+| `pods.metrics.k8s.io` | all sizing advice (or use `usage: prometheus` instead) |
+
+with `usage: prometheus` clont queries `prometheus_url` directly over http
+instead, and needs no metrics rbac at all.

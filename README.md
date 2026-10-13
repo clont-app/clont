@@ -3,10 +3,10 @@
 a long-running, **read-only** agent that watches your cloud for broken things and
 wasted money.
 
-clont sits next to your aws accounts, looks around every few minutes, and pings
-you on slack / discord / telegram when something is wrong or costing you more
-than it should. every call it makes is a `describe` / `get` / `list` — it never
-changes anything in your cloud.
+clont sits next to your aws accounts, your own vmware iron and your kubernetes
+clusters, looks around every few minutes, and pings you on slack / discord /
+telegram when something is wrong or costing you more than it should. every call
+it makes is a `describe` / `get` / `list` — it never changes anything.
 
 for the bigger picture (free local tier vs paid hosted one, how the pieces fit)
 see [docs/architecture.md](docs/architecture.md).
@@ -56,6 +56,10 @@ you get a daily spend digest (`info`) plus a spike alert (`warn`) when a service
 jumps past its baseline by more than you allow. the baseline is the median of
 previous **same-weekday** spend, so quiet weekends and busy mondays don't look
 like spikes.
+
+your own iron has no invoice to read, so its spend comes from a rate card you
+write — see [own iron](#own-iron-vmware-for-now) below. same records, same
+digest, spike, forecast and budgets.
 
 ### budgets and forecast
 
@@ -132,6 +136,9 @@ the same event pipeline:
   gateway endpoint pays per gigabyte for traffic the endpoint carries for
   nothing. the classic transfer finding, and two free describes to catch.
 
+- **own iron and kubernetes** — another 8 kinds of waste on your own hardware and
+  7 that only a cluster can see. both have their own sections below.
+
 thresholds, the non-prod tag convention and the required-tag list are all
 configurable under `finops.*`.
 
@@ -172,13 +179,114 @@ into a single alert.
 
 the extra iam you need is one action: `ec2:DescribeNetworkInterfaces`.
 
+## own iron (vmware, for now)
+
+a datacenter sends you no invoice, so there is nothing to read. clont doesn't
+guess a price either: **you write down what a pool costs per month, clont
+measures that pool's capacity and divides.** out comes a $/vcpu-hour,
+$/gb-month and $/gib-month in your own money, and from there the same cost
+records aws produces.
+
+**a pool is a cluster**, not a site. a gen9 box and a gen11 box don't cost the
+same per core, and a site average hides exactly the comparison you built the
+report for. so the card has two levels: the site card holds what's true for the
+whole floor, a cluster card overrides it **line by line**, and a cluster you
+never mention is priced on the site card alone.
+
+the lines are `hardware_capex` + `lifetime_months` (or a monthly
+`hardware_amortization`), `power_and_cooling`, `rack_and_network`, `licenses`,
+`support` and `staff` — staff is off by default because it's arguable.
+`weights` split the pool over cpu / ram / storage, must add up to 1.0, and get
+printed next to every number they produced.
+
+**how it reads the site.** one pass over vcenter (or a standalone esxi host)
+under the built-in **Read-Only** role — clusters, hosts, vms and datastores, a
+few property reads, no agent inside a guest. with `usage_window_days` above zero
+it also reads perf counters and keeps a **p95 per vm**, which is the only reason
+idle and rightsize advice is possible. a vm it couldn't measure is simply not
+advised about: an absent measurement is not zero usage.
+
+**what the money looks like.** a daily cost record per vm — so showback, the
+digest, spikes, forecast and budgets all work with no changes — plus a
+`headroom` line for the slice of the cluster nobody is using. you pay for the
+whole cluster whether it's full or not, and without that line the site total
+would come out under the real bill. a vm is billed what it **reserved** and for
+the disk it **occupies**, never the thin promise.
+
+| finding | what it is |
+|---|---|
+| `stopped-vm` | powered off, still holding its disk blocks |
+| `template-disk` | same, for a golden image nobody is going to boot |
+| `idle-vm` | powered on, ran at nothing all window — on cpu **and** ram |
+| `rightsize-vm` | busy enough to keep, more vcpu / ram than its p95 ever needed |
+| `zombie-host` | powered on, in the cluster, carrying no load |
+| `powered-off-host` | still in the capex and still licensed, so still billed |
+| `unaccounted-storage` | datastore space no vm claims — isos, orphaned vmdks, dead folders |
+| `unmounted-datastore` | an array no host mounts, so none of it can be used |
+| `orphan-vm` | vcenter lists it on no host, usually a failed migration |
+| `thin-overcommit` | a risk, not a saving: reports $0 and what the promises add up to |
+
+two things that keep the numbers honest. **per-cluster findings are priced on
+your own card, so they're exact** (`approximate=False`, which no aws finding
+gets) — site-wide leftovers have no cluster, so they get the site's mean
+$/gib-month and say they're approximate. and **what a vm hands back is divided
+by the pool's oversubscription**: at an ordinary 4:1 ratio, switching off a
+4-vcpu vm frees one physical core, not four. without that, 1250 test vms advised
+$142k/month of savings on a cluster that costs $108k.
+
+## kubernetes
+
+a cluster is **not a provider here, it's a source**. `priced_by` names a site
+under `onprem:` or an account under `aws:`, and it's required: clont's k8s number
+is the continuation of a pool it already priced.
+
+```
+pool card → the node vm's cost record → the node → the namespace's requests
+```
+
+so nothing is invented. a node clont can't place on priced iron is reported
+**unmapped**, never priced at zero, and the startup log says how many nodes of
+each cluster were mapped and why the rest weren't.
+
+**namespace showback** splits a node's cost four ways, and the four add back up:
+each namespace gets its requests' share of the node's **capacity**, `(kubelet)`
+is the reservation nobody can schedule into, `(unrequested)` is schedulable iron
+no pod asked for, `(node-storage)` is the vm's disk. the cpu/ram split comes off
+your own card, not a 50/50 guess. `warn` when more than
+`k8s_unrequested_pct` of a cluster's priced iron no pod requested.
+
+access is whatever the kubeconfig or the pod's service account already has:
+`get`/`list` on nodes, pods, namespaces, pvcs, pvs and `pods.metrics.k8s.io`.
+only nodes and pods are needed to price the cluster.
+
+| finding | what it is |
+|---|---|
+| `oversized-node-pool` | the pods still fit after dropping whole node vms — worth those vms |
+| `double-overcommit` | nothing can be dropped, but the hypervisor oversubscribes *and* the nodes are half empty. $0, a risk line |
+| `rightsize-workload` | requests above the busiest replica's p95, per node pool |
+| `underrequested-workload` | ram working set over the request — $0, the pod first in line to be killed |
+| `unmounted-pvc` | a bound claim no pod references |
+| `abandoned-namespace` | no pod at all, live or pending, still holding claims |
+| `released-pv` | the claim is gone and `reclaimPolicy: Retain` kept the volume |
+
+two notes worth having. a `rightsize-workload` offers back **capacity, not
+cash** — shrinking a request moves money into `(unrequested)`, the invoice only
+moves when the cluster can drop a node, so the finding says it's approximate.
+and pvcs are what keeps the hypervisor side honest: from vcenter those blocks
+look like `unaccounted-storage`, so whatever a cluster owns up to is netted off
+the site's gap instead of being counted twice.
+
 ## platform
 
 - **many accounts** — as many as you like, keyed by an alias you choose. one
   account failing gets skipped, not fatal. on an org, point clont at the payer
   and set `members.role_name`: it lists the linked accounts itself and splits the
   payer's spend per account, so each one gets its own digest, spike and budget.
-- **read-only by construction** — every call is a `Describe*` / `Get*`. see
+- **sites and clusters are aliases too** — `onprem.<site>` and
+  `kubernetes.<cluster>` are keyed the same way as accounts, and the alias flows
+  into every event key, so nothing collides.
+- **read-only by construction** — every call is a `Describe*` / `Get*` (on
+  vmware the built-in Read-Only role, on k8s `get`/`list`). see
   [docs/iam.md](docs/iam.md), which also lists the two billed grants
   (`ce:GetCostAndUsage`, `cloudwatch:GetMetricData`) that are left out of the
   policy on purpose, and what each costs if you want them. out of the box clont
@@ -322,6 +430,8 @@ one env var clont reads is `CLONT_CONFIG`, and it just points at the file.
   `debug` / `info` / `warning` / `error` / `critical`. not the same as
   `channels.log.min_severity`, which decides which *events* get logged.
 - `aws` (map, default `{}`) — accounts to watch, keyed by alias.
+- `onprem` (map, default `{}`) — your own sites, keyed by alias.
+- `kubernetes` (map, default `{}`) — clusters to read, keyed by alias.
 - `channels` (object, default log only) — where events go.
 
 **`aws.<alias>`** — one entry per account. the alias (`prod`, `staging`, whatever)
@@ -335,7 +445,11 @@ another account by adding another key.
   source: `bucket`, `report_name`, `prefix`, `region` (default `us-east-1`),
   `refresh_minutes` (default `60`) and `include_linked` (default `false` — keep
   only this account's rows out of a payer report; `true` reports every linked
-  account under its own alias). legacy cur (gzip csv) only;
+  account under its own alias). three more decide what a day's spend *means*:
+  `amortize` (default `true` — spread ri / savings-plan fees over their term, so
+  an all-upfront commitment isn't a one-day spike), `include_credits` (default
+  `true`; `false` gives gross spend, before credits and refunds) and
+  `include_tax` (default `true`). legacy cur (gzip csv) only;
   setup is in [docs/iam.md](docs/iam.md). without it, and without
   `finops.allow_cost_explorer`, there's no spend data.
 - `members` (map, default `null`) — payer only: discover the org's accounts with
@@ -345,6 +459,46 @@ another account by adding another key.
 
 if one account's role can't be assumed at startup, clont warns and keeps going
 with the rest. it only gives up if *no* account authenticates.
+
+**`onprem.<site>`** — one entry per site of your own iron.
+
+- `rate_card` (map) — what the site costs a month:
+  `hardware_capex` + `lifetime_months` (or `hardware_amortization` directly),
+  `power_and_cooling`, `rack_and_network`, `licenses`, `support`, `staff`. every
+  line is optional, only the merge of site + cluster has to price something — and
+  it's checked at startup, not at the first collection.
+- `weights` (map, default `{cpu: 0.5, ram: 0.3, storage: 0.2}`) — how the pool
+  cost splits. must sum to 1.0.
+- `clusters` (map, default `{}`) — per-cluster `rate_card` / `weights` that
+  override the site's, line by line. optional: clont finds the clusters itself,
+  this only prices the ones that differ. two datacenters behind one vcenter can
+  each hold a `prod` cluster, so `DC0/prod` is accepted as a key.
+- `inventory` (map, default `null`) — where to read the site:
+  `kind` (`vsphere`), `endpoint` (host, no scheme), `username`, exactly one of
+  `password` / `password_env`, `port` (default `443`), `verify_ssl` (default
+  `true`), `ca_bundle` (a private ca, instead of turning tls off) and
+  `usage_window_days` (default `14`, max `30` — `0` reads no perf counters, and
+  then every vm is billed what it reserved with no idle / rightsize advice).
+  leaving `inventory` out is fine: the site is priced and idle, which is the
+  normal state while the read-only account is still being granted.
+
+**`kubernetes.<cluster>`** — one entry per cluster.
+
+- `priced_by` (str, **required**) — the alias under `onprem:` or `aws:` whose
+  pool pays for these nodes. it has to be configured, or startup fails.
+- `kubeconfig` (str, default `null` = the usual search) and `context` (default
+  the kubeconfig's current one), or `in_cluster` (bool, default `false`) for the
+  pod's own service account. not both.
+- `match_by_name` (bool, default `true`) — last-resort match, node name == vm
+  name. `false` means an unidentifiable node is reported, not guessed.
+- `usage` (enum, default `metrics-server`) — `metrics-server`, `prometheus` or
+  `off`. it only buys sizing advice; the cluster is fully priced either way.
+- `usage_min_samples` (int, default `24`) — metrics-server keeps no history, so
+  this many passes have to pile up before a workload is advised about.
+- `prometheus_url` (**required** for `usage: prometheus`),
+  `prometheus_window_days` (default `14`) and `prometheus_step_minutes`
+  (default `5` — widen it on a big cluster rather than shortening the window).
+- `timeout_seconds` (int, default `30`).
 
 **`finops`**
 
@@ -400,6 +554,34 @@ with the rest. it only gives up if *no* account authenticates.
   `required_tags` and warns when this much of it carries no value for a key.
 - `transfer_spend_pct` (float, default `15`) — warn when data transfer takes this
   share of an account's spend. 5-15% is normal, past that it's a finding.
+
+own iron:
+
+- `onprem_min_savings_usd` (float, default `1`) — per finding per month, below it
+  is noise.
+- `onprem_unaccounted_min_gib` (float, default `100`) and
+  `onprem_unaccounted_min_pct` (float, default `10`) — datastore space no vm
+  claims. both have to pass, so a big busy site doesn't flag on rounding.
+- `onprem_thin_overcommit_ratio` (float, default `1.5`) — thin promises over
+  capacity before it's a risk line.
+- `onprem_idle_ram_pct` (float, default `20`) — p95 ram below which a running vm
+  is idle. cpu reuses `idle_cpu_pct`, and a vm has to be quiet on both.
+- `onprem_rightsize_target_pct` (float, default `70`) — headroom left over the
+  p95 when shrinking. a vm already near that target yields nothing and emits no
+  finding.
+
+kubernetes:
+
+- `k8s_unrequested_pct` (float, default `50`) — `warn` when this share of a
+  cluster's priced iron no pod requested. higher than the tag threshold on
+  purpose: a cluster with no headroom is one node failure from pending pods.
+- `k8s_pool_unrequested_pct` (float, default `25`) — the floor a node-pool
+  finding needs before it fires. a different number from the one above.
+- `k8s_overcommit_ratio` (float, default `1.25`) — hypervisor vcpu overcommit
+  that turns a half-empty pool into a `double-overcommit`.
+- `k8s_claim_min_gib` (float, default `10`) — a pvc smaller than this is noise.
+- `k8s_claim_min_age_days` (float, default `7`) — a younger unmounted pvc is a
+  deploy in progress.
 
 **`monitoring`**
 
@@ -461,6 +643,11 @@ public ipv4 has its own key (`public_ipv4_hourly`, the in-use sku). it's the sam
 $0.005/hr as an idle elastic ip today, but they're separate skus and aws can move
 one without the other — if your price table predates the in-use sku, clont falls
 back to the idle rate instead of the generic default.
+
+**own iron and kubernetes never touch that table.** their numbers come from the
+rate card you wrote, divided by the capacity clont measured — your money, not a
+list price. that's why a per-cluster on-prem finding is exact where an aws one is
+an estimate.
 
 regenerate at release time, prices drift:
 
