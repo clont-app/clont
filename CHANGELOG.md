@@ -1,5 +1,17 @@
 # changelog
 
+## 0.3.1
+
+### compute optimizer
+
+- an access denial is no longer reported as "not enrolled" — `AccessDenied*` logs a
+  WARNING naming the missing grant, `OptInRequiredException` stays INFO
+- lambda and rds recommendations need a grant on the underlying service:
+  `lambda:ListProvisionedConcurrencyConfigs`, `rds:DescribeDBClusters`, both added to
+  the read-only policy in `docs/iam.md`
+- preflight probes the lambda and rds recommendation calls, so a missing grant shows
+  up before a run instead of silently returning nothing
+
 ## 0.3.0
 
 ### vsphere / on-prem
