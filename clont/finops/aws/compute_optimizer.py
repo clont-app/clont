@@ -59,10 +59,29 @@ _ARM64_PREFERENCE = {"cpuVendorArchitectures": ["AWS_ARM64"]}
 # graviton families spell the g after the generation digit: m7g, c7gn, x2gd,
 # im4gn. `g5`/`g4dn` (nvidia) put it first and must not match.
 _GRAVITON_FAMILY = re.compile(r"^[a-z]+\d+[a-z]*g[a-z]*$")
-# Errors that just mean "Compute Optimizer isn't enabled for this account" —
-# expected, not a failure, so logged once per cycle at info (the collector is
-# rebuilt each cycle, resetting the flag) instead of a per-region warning.
-_NOT_AVAILABLE = {"OptInRequiredException", "AccessDeniedException", "AccessDenied"}
+# "Compute Optimizer isn't enabled for this account" — expected, not a failure,
+# so logged once per cycle at info (the collector is rebuilt each cycle,
+# resetting the flag) instead of a per-region warning.
+_NOT_ENROLLED = {"OptInRequiredException"}
+# a denial is not the same thing, and lumping the two together is how a missing
+# grant stayed invisible forever: enrolling the account never fixes it
+_DENIED = {"AccessDeniedException", "AccessDenied"}
+# grants CO needs on *your* side to answer, beyond the compute-optimizer action
+# itself — undocumented in the console and the usual cause of a denial here
+_EXTRA_GRANTS = {
+    "lambda": "lambda:ListProvisionedConcurrencyConfigs",
+    "rds": "rds:DescribeDBClusters",
+}
+# our short service name -> the co action, so a denial can name what to grant
+_ACTIONS = {
+    "ec2": "GetEC2InstanceRecommendations",
+    "ebs": "GetEBSVolumeRecommendations",
+    "asg": "GetAutoScalingGroupRecommendations",
+    "lambda": "GetLambdaFunctionRecommendations",
+    "ecs": "GetECSServiceRecommendations",
+    "rds": "GetRDSDatabaseRecommendations",
+    "idle": "GetIdleRecommendations",
+}
 
 # CO resourceType -> (our service name, rec kind). The pairs match what the
 # CloudWatch fallbacks emit so a batch carrying both sources dedupes cleanly —
@@ -289,20 +308,36 @@ class ComputeOptimizerCollector:
     def _pages(self, fn: Callable, service: str, params: dict | None = None) -> Iterator[dict]:
         """Yield every page of a CO call, absorbing "not enabled" once.
 
-        A type the account hasn't opted into (or lacks permission for) is logged
-        once and yields nothing; any other error propagates to `for_each_region`
-        (or the per-source guard), which isolates it.
+        A type the account hasn't opted into is logged once at info and yields
+        nothing. A *denial* is logged at warning and names the grant to add —
+        it looks the same from here but no amount of enrolling will fix it; any
+        other error propagates to `for_each_region` (or the per-source guard),
+        which isolates it.
         """
         token: str | None = None
         while True:
             try:
                 resp = fn(**(params or {}), **({"nextToken": token} if token else {}))
             except ClientError as exc:
-                if exc.response.get("Error", {}).get("Code") in _NOT_AVAILABLE:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in _NOT_ENROLLED:
                     if service not in self._warned_unavailable:
                         log.info(
                             "compute optimizer (%s) not enabled for %s: %s",
                             service, self._provider.alias, exc,
+                        )
+                        self._warned_unavailable.add(service)
+                    return
+                if code in _DENIED:
+                    if service not in self._warned_unavailable:
+                        extra = _EXTRA_GRANTS.get(service)
+                        log.warning(
+                            "compute optimizer (%s) denied for %s — add %s to the role%s: %s",
+                            service,
+                            self._provider.alias,
+                            f"compute-optimizer:{_ACTIONS.get(service, '?')}",
+                            f" and {extra}" if extra else "",
+                            exc,
                         )
                         self._warned_unavailable.add(service)
                     return

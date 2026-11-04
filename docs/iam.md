@@ -58,6 +58,8 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
         "compute-optimizer:GetRDSDatabaseRecommendations",
         "compute-optimizer:GetIdleRecommendations",
         "compute-optimizer:GetEnrollmentStatus",
+        "lambda:ListProvisionedConcurrencyConfigs",
+        "rds:DescribeDBClusters",
         "ec2:DescribeVolumes",
         "ec2:DescribeAddresses",
         "ec2:DescribeNetworkInterfaces",
@@ -161,7 +163,13 @@ two things worth remembering:
   `compute-optimizer:GetLambdaFunctionRecommendations`,
   `compute-optimizer:GetECSServiceRecommendations`,
   `compute-optimizer:GetRDSDatabaseRecommendations` (each resource type is opted
-  into separately; one that isn't enrolled is skipped without hurting the others)
+  into separately; one that isn't enrolled is skipped without hurting the others).
+  **two of them need a grant on the underlying service as well**, which compute
+  optimizer's own docs don't mention: lambda recs want
+  `lambda:ListProvisionedConcurrencyConfigs` and rds recs want
+  `rds:DescribeDBClusters`. without them those two calls are denied — the others
+  keep working, so the symptom is just no lambda/rds rightsizing advice, ever.
+  `preflight()` probes both
 - **idle recommendations** (idle ec2, asgs, ebs, ecs services, rds and nat
   gateways with their monthly saving) — `compute-optimizer:GetIdleRecommendations`
   plus `compute-optimizer:GetEnrollmentStatus` for the startup probe that tells

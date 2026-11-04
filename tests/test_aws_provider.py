@@ -80,6 +80,8 @@ def test_preflight_never_touches_cost_explorer(aws_creds):
     provider.client = recording  # type: ignore[method-assign]
     provider._probe_savings_plans = lambda: None  # moto has no savingsplans
     provider._probe_compute_optimizer = lambda: None  # nor compute-optimizer
+    provider._probe_co_lambda = lambda: None
+    provider._probe_co_rds = lambda: None
     provider.preflight()
 
     assert "ce" not in calls
@@ -98,7 +100,59 @@ def test_preflight_probes_the_cur_when_configured(aws_creds):
     provider.authenticate()
     provider._probe_savings_plans = lambda: None  # moto has no savingsplans
     provider._probe_compute_optimizer = lambda: None  # nor compute-optimizer
+    provider._probe_co_lambda = lambda: None
+    provider._probe_co_rds = lambda: None
 
     # nothing delivered yet: readable bucket, no manifest -> not a missing grant
     assert "s3:GetObject" not in provider.preflight()
     assert provider.cur is config.cur
+
+
+@mock_aws
+def test_preflight_reports_the_hidden_compute_optimizer_grants(aws_creds):
+    from botocore.exceptions import ClientError
+
+    provider = AWSProvider("prod", AWSConfig(role_arn=ROLE_ARN))
+    provider.authenticate()
+    provider._probe_savings_plans = lambda: None
+    provider._probe_compute_optimizer = lambda: None
+
+    denied = ClientError({"Error": {"Code": "AccessDeniedException"}}, "GetRecs")
+
+    class _CO:
+        def get_lambda_function_recommendations(self, **kw):
+            raise denied
+
+        def get_rds_database_recommendations(self, **kw):
+            return {"rdsDBRecommendations": []}
+
+    real = provider.client
+    provider.client = lambda s, r=None: _CO() if s == "compute-optimizer" else real(s, r)
+
+    missing = provider.preflight()
+    assert any("lambda:ListProvisionedConcurrencyConfigs" in m for m in missing)
+    assert not any("rds:DescribeDBClusters" in m for m in missing)
+
+
+@mock_aws
+def test_preflight_ignores_a_type_not_opted_into(aws_creds):
+    from botocore.exceptions import ClientError
+
+    provider = AWSProvider("prod", AWSConfig(role_arn=ROLE_ARN))
+    provider.authenticate()
+    provider._probe_savings_plans = lambda: None
+    provider._probe_compute_optimizer = lambda: None
+
+    # not enrolled is the customer's switch, not a missing grant
+    opt_in = ClientError({"Error": {"Code": "OptInRequiredException"}}, "GetRecs")
+
+    class _CO:
+        def __getattr__(self, _name):
+            def _raise(**kw):
+                raise opt_in
+            return _raise
+
+    real = provider.client
+    provider.client = lambda s, r=None: _CO() if s == "compute-optimizer" else real(s, r)
+
+    assert provider.preflight() == []

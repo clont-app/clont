@@ -234,6 +234,55 @@ def test_transient_error_on_one_source_keeps_the_others():
     assert [r.resource.resource_id for r in recs] == ["i-over"]
 
 
+def test_a_denial_warns_and_names_the_missing_grant(caplog):
+    # co's lambda recs also need lambda:ListProvisionedConcurrencyConfigs, so a
+    # denial here is a role problem — it must not read as "not enrolled", which
+    # enrolling the account would never fix
+    denied = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+        "GetLambdaFunctionRecommendations",
+    )
+
+    class _CO(_FakeCO):
+        def get_lambda_function_recommendations(self, **kw):
+            raise denied
+
+    with caplog.at_level("INFO"):
+        recs = ComputeOptimizerCollector(_FakeProvider(_CO())).recommendations(None)
+
+    assert recs == []
+    denials = [r for r in caplog.records if "denied" in r.message]
+    assert len(denials) == 1
+    assert denials[0].levelname == "WARNING"
+    text = denials[0].getMessage()
+    assert "lambda:ListProvisionedConcurrencyConfigs" in text
+    assert "compute-optimizer:GetLambdaFunctionRecommendations" in text
+
+
+def test_a_denial_on_one_type_keeps_the_others():
+    denied = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+        "GetRDSDatabaseRecommendations",
+    )
+
+    class _CO(_FakeCO):
+        def get_rds_database_recommendations(self, **kw):
+            raise denied
+
+    ec2 = {
+        "instanceRecommendations": [
+            {
+                "instanceArn": "arn:aws:ec2:us-east-1:111:instance/i-over",
+                "currentInstanceType": "m5.4xlarge",
+                "finding": "Overprovisioned",
+                "recommendationOptions": [_opt("m5.xlarge", rank=1, value=100.0, pct=50.0)],
+            }
+        ]
+    }
+    recs = ComputeOptimizerCollector(_FakeProvider(_CO(ec2=ec2))).recommendations(None)
+    assert [r.resource.resource_id for r in recs] == ["i-over"]
+
+
 def _graviton_co(arm_recs: list[dict], x86_recs: list[dict] | None = None):
     """CO that answers differently depending on the arm64 preference, like the real one."""
 

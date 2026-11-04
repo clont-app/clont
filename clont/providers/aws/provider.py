@@ -31,6 +31,16 @@ log = get_logger("clont.providers.aws")
 # IAM denies surface under different error codes depending on the service.
 _DENIED_CODES = {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation"}
 
+# co denies these two unless the role also holds the named grant on the
+# underlying service, so the preflight row carries it — that is what to add
+_CO_LAMBDA_ACTION = (
+    "compute-optimizer:GetLambdaFunctionRecommendations"
+    " (+ lambda:ListProvisionedConcurrencyConfigs)"
+)
+_CO_RDS_ACTION = (
+    "compute-optimizer:GetRDSDatabaseRecommendations (+ rds:DescribeDBClusters)"
+)
+
 
 def _build_session(config: AWSConfig) -> boto3.Session:
     """Build a boto3 Session with auto-refreshing assume-role credentials.
@@ -128,6 +138,10 @@ class AWSProvider:
             # newest grant, so the one an existing role is most likely missing
             ("savingsplans:DescribeSavingsPlans", self._probe_savings_plans),
             ("compute-optimizer:GetEnrollmentStatus", self._probe_compute_optimizer),
+            # these two deny unless the role also holds a grant on the *underlying*
+            # service, which the co docs don't mention — see the probes below
+            (_CO_LAMBDA_ACTION, self._probe_co_lambda),
+            (_CO_RDS_ACTION, self._probe_co_rds),
         ]
         if self._config.cur is not None:
             probes.append(("s3:GetObject", self._probe_cur))
@@ -174,6 +188,33 @@ class AWSProvider:
                 self.alias,
                 status or "not enrolled",
             )
+
+    def _probe_co_lambda(self) -> None:
+        """CO's lambda recs need `lambda:ListProvisionedConcurrencyConfigs` too.
+
+        Without it the call is denied, and the collector only logs it — so the
+        advice never arrives and nothing says why. Free, like every probe here.
+        """
+        self._probe_co_recommendations("get_lambda_function_recommendations")
+
+    def _probe_co_rds(self) -> None:
+        """Same for rds recs: CO also wants `rds:DescribeDBClusters`."""
+        self._probe_co_recommendations("get_rds_database_recommendations")
+
+    def _probe_co_recommendations(self, method: str) -> None:
+        """Call one CO recommendations api, ignoring "not opted into this type".
+
+        Only a denial is a permission problem; an unenrolled resource type is
+        the customer's switch to flip and is already reported by the enrollment
+        probe, so it must not read as a missing grant.
+        """
+        co = self.client("compute-optimizer", "us-east-1")
+        try:
+            getattr(co, method)(maxResults=1)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "OptInRequiredException":
+                return
+            raise
 
     def _probe_describe_regions(self) -> None:
         self.client("ec2", "us-east-1").describe_regions()
