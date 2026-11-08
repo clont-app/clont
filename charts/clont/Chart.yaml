@@ -1,0 +1,19 @@
+apiVersion: v2
+name: clont
+description: Read-only multi-cloud monitoring & FinOps agent
+type: application
+# chart version tracks the agent release; appVersion is the image tag
+version: 0.3.1
+appVersion: "0.3.1"
+home: https://github.com/clont-app/clont
+sources:
+  - https://github.com/clont-app/clont
+keywords:
+  - finops
+  - monitoring
+  - aws
+  - vmware
+  - cost
+maintainers:
+  - name: clont-app
+    url: https://github.com/clont-app

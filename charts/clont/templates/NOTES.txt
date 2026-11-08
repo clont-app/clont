@@ -1,0 +1,20 @@
+clont {{ .Chart.AppVersion }} is installed as {{ include "clont.fullname" . }}.
+
+config in use: {{ if .Values.existingSecret }}secret/{{ .Values.existingSecret }}{{ else if .Values.existingConfigMap }}configmap/{{ .Values.existingConfigMap }}{{ else }}configmap/{{ include "clont.fullname" . }} (from values){{ end }}
+
+follow it:
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "clont.fullname" . }}
+
+validate the config:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+one-shot scan, printed:
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "clont.fullname" . }} -- clont run --summary - --format text
+{{ if and (not .Values.config.aws) (not .Values.existingSecret) (not .Values.existingConfigMap) }}
+no aws account is configured, so the agent will loop with nothing to read.
+set `config.aws` (see clont.example.yaml) or point at your own config with
+`existingSecret` / `existingConfigMap`.
+{{- end }}
+{{- if .Values.serviceAccount.create }}{{ if not .Values.serviceAccount.annotations }}
+on eks the pod needs irsa: serviceAccount.annotations."eks\.amazonaws\.com/role-arn".
+{{- end }}{{- end }}

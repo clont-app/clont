@@ -1,0 +1,47 @@
+{{/* helm test: validate the mounted config. pure parsing, no api call, no cost */}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "clont.fullname" . }}-config-check
+  labels:
+    {{- include "clont.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "clont.serviceAccountName" . }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: config-check
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      args: ["config", "check"]
+      env:
+        - name: CLONT_CONFIG
+          value: /etc/clont/{{ .Values.configKey }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      volumeMounts:
+        - name: config
+          mountPath: /etc/clont
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: config
+    {{- if .Values.existingSecret }}
+      secret:
+        secretName: {{ .Values.existingSecret }}
+        defaultMode: 0400
+    {{- else }}
+      configMap:
+        name: {{ .Values.existingConfigMap | default (include "clont.fullname" .) }}
+    {{- end }}
+    - name: tmp
+      emptyDir: {}

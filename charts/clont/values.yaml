@@ -1,0 +1,92 @@
+image:
+  repository: ghcr.io/clont-app/clont
+  tag: ""                       # empty = the chart's appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# clont.yaml itself, rendered into a ConfigMap and mounted at /etc/clont
+# every key is the one documented in clont.example.yaml — nothing is renamed here
+# anything secret (slack/discord webhook, telegram token, api.api_key, a vsphere
+# password) does NOT belong in here: see `existingSecret` below
+config:
+  interval_seconds: 300
+  lookback_days: 1
+  log_level: info
+  channels:
+    log:
+      repeat_hours: 3
+      min_severity: info
+
+# instead of the block above, mount a config you manage yourself. exactly one of
+# these, and the object has to carry the file under `configKey`
+existingConfigMap: ""
+existingSecret: ""              # use this one when the config holds secrets
+configKey: clont.yaml
+
+serviceAccount:
+  create: true
+  name: ""
+  # on eks this is where irsa goes:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::111111111111:role/clont
+  annotations: {}
+
+# read-only ClusterRole for a `kubernetes:` source with in_cluster: true
+# off is fine when clont only watches aws / vmware
+rbac:
+  create: true
+
+# extra env, e.g. the vsphere password behind inventory.password_env
+env: []
+  # - name: DC1_VSPHERE_PASSWORD
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: clont-vsphere
+  #       key: password
+envFrom: []
+
+args: ["run"]                   # `clont run` is the daemon
+
+# measured, not guessed: one cycle over two accounts sits well under this
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# tini forwards SIGTERM and the loop exits at once, so a long grace is pointless
+terminationGracePeriodSeconds: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+extraVolumes: []
+  # - name: vcenter-ca
+  #   secret:
+  #     secretName: clont-vcenter-ca
+# keep these out of /etc/clont — that path is the config mount
+extraVolumeMounts: []
+  # - name: vcenter-ca
+  #   mountPath: /etc/clont-certs
+  #   readOnly: true

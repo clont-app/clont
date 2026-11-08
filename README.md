@@ -622,6 +622,17 @@ kubernetes:
 
 `min_severity` takes `info`, `warn` or `critical`.
 
+## running it on kubernetes
+
+```sh
+helm install clont ./charts/clont -n clont --create-namespace -f my-values.yaml
+helm test clont -n clont       # validates the mounted config, makes no api call
+```
+
+a single-replica deployment, the config as a configmap (or a secret when it holds
+webhooks or an api key), and a read-only clusterrole when clont also prices the
+cluster it runs in. details in [charts/clont/README.md](charts/clont/README.md).
+
 ## where the dollar figures come from
 
 everything comes out of `clont/finops/aws/prices.json` — public on-demand list
