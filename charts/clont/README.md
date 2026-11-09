@@ -4,17 +4,17 @@ runs the agent as a single-replica Deployment: config from a ConfigMap (or a
 Secret you manage), an optional read-only ClusterRole for `kubernetes:` sources,
 and nothing listening on a port.
 
-```sh
-helm install clont oci://ghcr.io/clont-app/charts/clont --version 0.3.1 \
-  -n clont --create-namespace -f my-values.yaml
-```
-
-from a checkout:
+not published to a registry yet, so install it from a checkout:
 
 ```sh
+git clone https://github.com/clont-app/clont && cd clont
 helm install clont ./charts/clont -n clont --create-namespace -f my-values.yaml
 helm test clont -n clont          # validates the mounted config, no api calls
 ```
+
+new to this? the step-by-step guides are
+[docs/setup-cloud.md](../../docs/setup-cloud.md) and
+[docs/setup-onprem.md](../../docs/setup-onprem.md).
 
 ## quick start
 
@@ -33,8 +33,7 @@ else; the role's policy is in [docs/iam.md](../../docs/iam.md). `rbac.create` is
 off, nothing reads the cluster.
 
 ```sh
-helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
-  --create-namespace -f values-cloud.yaml
+helm install clont ./charts/clont -n clont --create-namespace -f values-cloud.yaml
 ```
 
 ### on-prem (no aws at all)
@@ -49,7 +48,7 @@ the same as on aws. needs the vcenter password as a secret and
 ```sh
 kubectl create ns clont
 kubectl -n clont create secret generic clont-vsphere --from-literal=password='...'
-helm install clont oci://ghcr.io/clont-app/charts/clont -n clont -f values-onprem.yaml
+helm install clont ./charts/clont -n clont -f values-onprem.yaml
 ```
 
 ### both

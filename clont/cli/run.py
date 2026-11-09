@@ -92,7 +92,8 @@ def run(
         batch, _delivered = agent.run_cycle(force=True)
         report = summarize(
             batch,
-            accounts=list(settings.aws),
+            # onprem sites count too, else an iron-only scan reports "no accounts"
+            accounts=[*settings.aws, *settings.onprem],
             duration_seconds=time.monotonic() - started,
             generated_at=generated_at,
         )

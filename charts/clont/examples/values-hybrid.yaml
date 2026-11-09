@@ -1,7 +1,7 @@
 # quick start: aws and on-prem together, one release
 #
-#   helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
-#     --create-namespace -f values-hybrid.yaml
+#   helm install clont ./charts/clont -n clont --create-namespace \
+#     -f values-hybrid.yaml                 # from a checkout, see docs/setup-onprem.md
 #
 # `aws:`, `onprem:` and `kubernetes:` are independent maps — one agent collects
 # all of them in the same cycle and every event carries its alias, so no second

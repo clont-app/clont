@@ -1,139 +1,239 @@
 # quick start: aws
 
-zero to a running agent on one or more aws accounts. everything here is
-read-only; the grants are in [iam.md](iam.md) and the keys in
-[../clont.example.yaml](../clont.example.yaml).
+follow this top to bottom and you end up with an agent that watches your aws
+accounts and messages you when something breaks or costs too much. about 30
+minutes, most of it waiting for aws.
 
-## 1. a read-only role per account
+**nothing here changes your infrastructure.** every call clont makes is a
+`describe` / `get` / `list`.
 
-one role per account, assumed by clont. attach the policy from
-[iam.md](iam.md#the-permissions-policy) and a trust policy that lets clont's own
-identity assume it ([iam.md](iam.md#trust-policy)):
+## before you start
 
-- on eks — the irsa role on clont's service account
-- anywhere else — the user/role whose keys the agent runs with
+- an aws account, and permission to create an iam role in it (or someone who can
+  do step 2 for you)
+- somewhere to run a small container later: a linux box with docker, or a
+  kubernetes cluster. step 1 only needs python 3.11+ on your laptop.
+- a slack / discord / telegram webhook if you want pings, step 6
 
-on an organization you only make one role *shape* and let clont find the
-members: point it at the payer and set `members.role_name`
-([iam.md](iam.md#several-accounts-the-payer-fan-out)).
+## words used below
 
-## 2. the cost and usage report
+| word | means |
+|---|---|
+| cur | cost and usage report — a csv of your daily spend that aws writes to s3 for you, for free. clont reads your spend from there. |
+| role | the identity clont assumes in each account to look around. read-only. |
+| trust policy | the part of the role that says *who* may assume it. forget it and clont sees 0 accounts. |
+| irsa | on eks, a way to give a pod an iam role so you don't handle access keys. |
+| alias | the short name you give an account in the config (`prod`, `dev`). it shows up in every message. |
 
-spend comes from the cur your account already writes to s3 — free, where cost
-explorer bills $0.01 a request. create it once (legacy csv/gzip, not parquet) and
-note four things: bucket, report name, prefix, bucket region.
-[iam.md](iam.md#spend-the-cost-and-usage-report) has the exact settings and the
-s3 read grant.
+## 1. install it on your laptop first
 
-without a cur, health checks still work and **spend, spikes, forecast, budgets
-and showback have no data**. `finops.allow_cost_explorer: true` is the paid
-fallback.
-
-if you want tag showback and tag hygiene, activate those tag keys as **cost
-allocation tags** in billing. otherwise the cur has no column for them and every
-line reads as unattributed.
-
-## 3. write the config
-
-`clont.yaml` is the whole configuration — no env var overrides anything. minimal
-working file:
-
-```yaml
-interval_seconds: 300
-aws:
-  prod:
-    role_arn: arn:aws:iam::111111111111:role/clont-readonly
-    regions: [us-east-1, eu-west-1]
-    cur:
-      bucket: my-billing-bucket
-      report_name: clont-cur
-      prefix: reports
-      region: us-east-1
-channels:
-  log:
-    min_severity: info
-```
-
-add an account by adding another key under `aws:`. the alias (`prod`) is what
-shows up in every event, so two accounts never collide.
-
-## 4. prove the access before deploying anything
+you will run it on a server later. installing locally first means you can check
+your aws access before any deploy.
 
 ```sh
-pip install clont
+python3 -m venv ~/clont-venv
+~/clont-venv/bin/pip install clont
+~/clont-venv/bin/clont --version
+```
+
+the rest of this page writes `clont` — use `~/clont-venv/bin/clont`, or activate
+the venv (`source ~/clont-venv/bin/activate`).
+
+## 2. make a read-only role in each account
+
+one role per aws account you want watched. in the console, iam → roles → create
+role:
+
+1. trusted entity — the identity clont will run as. on eks that's the irsa role
+   of its service account; on a vm, the user whose access keys it uses. the exact
+   json is in [iam.md](iam.md#trust-policy).
+2. permissions — paste the policy from
+   [iam.md](iam.md#the-permissions-policy). it is `describe`/`list` only.
+3. name it `clont-readonly` and copy the role arn
+   (`arn:aws:iam::111111111111:role/clont-readonly`) — you need it in step 4.
+
+have an aws organization? make the role once per member account with the **same
+name**, point clont at the payer and let it find the rest:
+[iam.md](iam.md#several-accounts-the-payer-fan-out).
+
+## 3. turn on the cost and usage report
+
+billing → data exports → create a legacy cur export (**csv + gzip**, not
+parquet). write down four things, you need them in step 4:
+
+- the s3 bucket name
+- the report name
+- the prefix / path you gave it
+- the bucket's region
+
+also allow clont's role to read that bucket —
+[iam.md](iam.md#spend-the-cost-and-usage-report) has the grant.
+
+two things to know:
+
+- aws takes **up to 24 hours** to write the first report. health checks work
+  immediately; spend, spikes, forecast and budgets stay empty until the file
+  exists.
+- for per-team showback you also have to activate your tag keys as **cost
+  allocation tags** in the billing console. until you do, the cur has no column
+  for them and every dollar reads as unattributed.
+
+## 4. write clont.yaml
+
+one file, and it is the whole configuration — there are no env vars that
+override it. save this as `clont.yaml` and replace the five marked values:
+
+```yaml
+interval_seconds: 300          # how often it looks around
+aws:
+  prod:                        # <- your alias, anything short
+    role_arn: arn:aws:iam::111111111111:role/clont-readonly   # <- step 2
+    regions: [us-east-1, eu-west-1]                           # <- yours
+    cur:
+      bucket: my-billing-bucket     # <- step 3
+      report_name: clont-cur        # <- step 3
+      prefix: reports               # <- step 3
+      region: us-east-1             # <- step 3, the bucket's region
+channels:
+  log:
+    min_severity: info         # print everything to stdout for now
+```
+
+a second account is another key under `aws:` with its own alias and role arn.
+every key there is is listed in
+[../clont.example.yaml](../clont.example.yaml).
+
+## 5. check it works, before deploying anything
+
+```sh
+export AWS_PROFILE=...     # whatever gets you into aws from your laptop
 CLONT_CONFIG=./clont.yaml clont run --once --summary -
 ```
 
-the summary is the point: accounts scanned, how much was collected, events by
-severity, estimated savings, top services by spend, and **every collector that
-failed**. so "nothing found" is distinguishable from "the role couldn't read".
-`--summary` forces a full refresh, caches ignored.
+one cycle, a summary to the screen, then it exits. you should see something like:
 
-a `.txt` path gives the shareable report instead, `.json` one for scripts.
+```
+clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.1)
+accounts:   prod
+duration:   38.2s
 
-## 5. run it for real
+collected:
+  metrics=0 costs=412 recommendations=7 health=96
 
-helm, from [values-cloud.yaml](../charts/clont/examples/values-cloud.yaml):
-
-```sh
-helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
-  --create-namespace -f values-cloud.yaml
-helm test clont -n clont        # validates the mounted config, no api calls
+events:     5
+  by severity: info=4, warn=1
+  ...
+estimated monthly savings:
+  128.40 USD
 ```
 
-irsa goes in `serviceAccount.annotations`; off eks, `envFrom` a secret with
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. `rbac.create: false` — nothing
-reads the cluster. details in [../charts/clont/README.md](../charts/clont/README.md).
+read it in this order:
 
-docker, anywhere else:
+1. **`accounts:`** — your alias is there. `none` means the config never loaded.
+2. **is there an `errors:` block at the bottom?** that is the one that matters.
+   it names each collector that failed and why — a missing grant shows up here,
+   not as an empty report.
+3. **`costs=`** — a number above 0 means the cur was found and read. `costs=0` on
+   a fresh export is normal for the first day (see step 3).
+4. `health=` and `recommendations=` — what it checked and what it wants to tell
+   you.
 
-```sh
-docker run -d --name clont -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
-  ghcr.io/clont-app/clont:0.3.1
-```
+no errors and your alias listed? access is good. if not, jump to [when it looks
+wrong](#when-it-looks-wrong).
 
-## 6. notifications
+`--summary report.txt` instead of `-` writes the shareable report (dollar figure
+first), `--summary out.json` the machine-readable one.
 
-the log channel is always on. add the ones you want, each with its own floor and
-repeat throttle:
+## 6. add notifications
+
+the `log` channel just prints. add the channels you want — each has its own
+severity floor, so slack can stay quiet while the log keeps everything:
 
 ```yaml
 channels:
   slack:
     webhook_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
     min_severity: warn
-    repeat_hours: 24        # omit = notify once per condition
-  telegram:
+    repeat_hours: 24        # re-notify a still-broken thing once a day
+  telegram:                 # optional, same idea
     bot_token: "123456:ABC-DEF"
     chat_id: "-1001234567890"
     min_severity: critical
 ```
 
-**a config with a webhook in it is a secret.** on k8s put it in a Secret and set
-`existingSecret`, not in `values.yaml`.
+a slack webhook comes from a slack app → incoming webhooks → add to a channel.
+for telegram, talk to `@BotFather` for the token and add the bot to the chat.
 
-## 7. what to tune first
+re-run step 5 after editing — a message should land in the channel.
 
-- `finops.budgets` — monthly ceilings per account, or per service by its cur
-  name. `account: "*"` covers every account. without a budget there are no
-  budget alerts, only the forecast.
-- `finops.spend_spike_pct` (50) and `spend_min_dollars` (1) — how loud spike
-  detection is. the baseline is the same-weekday median, so mondays aren't
-  spikes.
-- `finops.required_tags` / `nonprod_tags` — empty by default, which disables tag
-  hygiene, showback and the off-hours advice. fill them when the tags exist.
-- `monitoring.metrics.enabled` and `finops.allow_cloudwatch_metrics` — **the two
-  that cost money.** off by default, which leaves anomaly detection, thresholds
-  and the disk-full forecast inert. idle detection comes from compute optimizer
-  for free; turn cloudwatch on only for an account that isn't enrolled.
+**a config with a webhook in it is a secret.** on kubernetes put the whole yaml
+in a Secret (step 7), not in `values.yaml`, and keep the local copy `chmod 600`.
+
+## 7. run it for real
+
+pick one.
+
+**docker, on any linux box** — simplest:
+
+```sh
+docker run -d --name clont --restart unless-stopped \
+  -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
+  -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
+  ghcr.io/clont-app/clont:0.3.1
+docker logs -f clont
+```
+
+**kubernetes, with helm** — the chart is not published to a registry yet, so
+install it from a checkout:
+
+```sh
+git clone https://github.com/clont-app/clont && cd clont
+cp charts/clont/examples/values-cloud.yaml my-values.yaml
+# edit my-values.yaml: aliases, role arns, cur, regions
+helm install clont ./charts/clont -n clont --create-namespace -f my-values.yaml
+helm test clont -n clont        # checks the config the pod mounted, no api calls
+kubectl -n clont logs deploy/clont -f
+```
+
+on eks, give the pod an identity instead of keys:
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::111111111111:role/clont
+rbac: {create: false}     # aws-only, nothing reads the cluster
+```
+
+off eks, `envFrom` a secret holding `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`. every chart value is listed in
+[../charts/clont/README.md](../charts/clont/README.md).
+
+that's it — it now runs a cycle every `interval_seconds` and notifies you.
+
+## 8. what to tune once it runs
+
+no rush, the defaults work. in rough order of value:
+
+- **`finops.budgets`** — monthly ceilings per account or per service. no budget,
+  no budget alerts (you still get the month-end forecast).
+- **`finops.spend_spike_pct`** (50) and **`spend_min_dollars`** (1) — how loud
+  spike alerts are. the baseline is the same weekday a week ago, so mondays
+  aren't spikes.
+- **`finops.required_tags` / `nonprod_tags`** — empty by default, which switches
+  off tag hygiene and showback. fill them once your tags are real.
+- **`monitoring.metrics.enabled`** and **`finops.allow_cloudwatch_metrics`** —
+  **the two settings that cost money** (cloudwatch api calls). off by default,
+  which is why you see no cpu anomalies or disk-full warnings. idle detection
+  already works for free through compute optimizer.
 
 ## when it looks wrong
 
 | what you see | usually |
 |---|---|
-| 0 accounts scanned | the trust policy — clont's identity can't assume the role |
-| spend empty, health fine | no `cur:` block, or the prefix/report name doesn't match the s3 layout |
-| spend a day or two behind | normal, aws rewrites the report a few times a day (`refresh_minutes`) |
+| `accounts: none` | the config wasn't loaded — check `CLONT_CONFIG` points at the file |
+| 0 accounts scanned, or an assume-role error | the trust policy: the identity clont runs as isn't allowed to assume the role |
+| `costs=0`, health fine | no `cur:` block, the first export hasn't landed yet (24h), or the prefix/report name doesn't match s3 |
+| spend a day or two behind | normal — aws rewrites the report a few times a day |
 | every cost line unattributed | the tag keys were never activated as cost allocation tags |
-| no anomaly or disk-full events | `monitoring.metrics.enabled` is false, which is the default |
-| pod restarting at startup | a config error — it's fatal on purpose, the log says which key |
+| no anomaly or disk-full events | `monitoring.metrics.enabled` is false, the default |
+| pod restarting right after start | a config error, fatal on purpose — the log names the key |

@@ -1,7 +1,7 @@
 # quick start: aws only
 #
-#   helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
-#     --create-namespace -f values-cloud.yaml
+#   helm install clont ./charts/clont -n clont --create-namespace \
+#     -f values-cloud.yaml                  # from a checkout, see docs/setup-cloud.md
 #
 # credentials: on eks the irsa annotation below is all it needs — the pod's
 # identity assumes each account's clont-readonly role. outside eks drop the
