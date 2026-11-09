@@ -9,6 +9,7 @@ from clont.finops.aws import (  # noqa: F401 - imported for registration
     cur,
     expiry,
     idle,
+    idle_agent,
     idle_elb,
     idle_nat,
     idle_rds,

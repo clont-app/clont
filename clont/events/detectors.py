@@ -11,7 +11,7 @@ import calendar
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from clont.core.config import BudgetRule
 from clont.core.models import Cloud, CloudResource
@@ -24,6 +24,8 @@ from clont.events.stats import (
     periods_to_cross,
     project_seasonal,
 )
+from clont.finops.agentspend import UNATTRIBUTED as AGENT_UNATTRIBUTED
+from clont.finops.agentspend import AgentReport, agent_report
 from clont.finops.k8s.namespaces import NamespaceShowback
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.showback import UNATTRIBUTED, showback
@@ -392,6 +394,145 @@ class DataTransferDetector:
                 )
             )
         return events
+
+
+class AgentSpendDetector:
+    """Agent spend -> one envelope event per agent and account, plus a cache finding.
+
+    Cloud-agnostic like the transfer report: it reads the `agent` dimension and the
+    agent tags. The headline is the floor share — the part of the bill that runs
+    whether the agent is called or not. The cache finding is the resent-context
+    gap read off the bill: input-side token money with almost none of it served
+    from cache. Every number is a bill line, nothing is priced here.
+    """
+
+    def __init__(
+        self,
+        tag_keys: tuple[str, ...] = (),
+        floor_pct: float = 40.0,
+        min_dollars: float = 1.0,
+        cache_min_share_pct: float = 10.0,
+    ) -> None:
+        self._keys = tag_keys
+        self._limit = Decimal(str(floor_pct))
+        self._min = Decimal(str(min_dollars))
+        self._cache_min = Decimal(str(cache_min_share_pct))
+
+    def detect(self, records: list[CostRecord]) -> list[Event]:
+        if not self._keys:
+            return []
+        cloud = _cloud_of(records)
+        events: list[Event] = []
+        for report in agent_report(records, self._keys):
+            if report.total <= 0 or report.total < self._min:
+                continue
+            events.append(self._envelope(report, cloud))
+            cache = self._cache(report, cloud)
+            if cache is not None:
+                events.append(cache)
+        return events
+
+    def _envelope(self, report: AgentReport, cloud: Cloud) -> Event:
+        alias = report.alias or "-"
+        cur = report.currency
+        unattributed = report.agent == AGENT_UNATTRIBUTED
+        over = report.floor_pct >= self._limit
+        by_bucket = {ln.bucket: ln.amount for ln in report.lines}
+        groups = [
+            ("tokens", report.tokens),
+            ("floor", report.floor),
+            ("plumbing", report.plumbing),
+            ("index", by_bucket.get("index", Decimal(0))),
+        ]
+        envelope = sorted((g for g in groups if g[1]), key=lambda g: (-g[1], g[0]))
+        breakdown = ", ".join(
+            f"{name} {amount} ({_share(amount, report.total)}%)" for name, amount in envelope
+        )
+        run_rate = (
+            f", floor runs ~{report.monthly_floor_run_rate} {cur}/mo"
+            if report.floor > 0
+            else ""
+        )
+        if unattributed:
+            title = f"[{alias}] Unattributed agent spend: {report.total} {cur}"
+            # no tag, no guess: say what would attribute it
+            hint = (
+                f" — no {'/'.join(self._keys)} tag; invoke through an application "
+                "inference profile per agent, or tag the floors"
+            )
+        else:
+            title = (
+                f"[{alias}] Agent {report.agent}: {report.total} {cur} "
+                f"({report.floor_pct}% fixed floor)"
+            )
+            hint = ""
+        return Event(
+            key=f"finops:agent:{alias}:{report.agent}:{cur}",
+            severity=EventSeverity.WARN if over else EventSeverity.INFO,
+            domain="finops",
+            cloud=cloud,
+            title=title,
+            message=(
+                f"{report.start}..{report.end}: {report.total} {cur} — "
+                f"{breakdown}{run_rate}{hint}"
+            ),
+            payload={
+                "agent": report.agent,
+                "unattributed": str(unattributed).lower(),
+                "start": report.start.isoformat(),
+                "end": report.end.isoformat(),
+                "total": str(report.total),
+                "currency": cur,
+                "tokens": str(report.tokens),
+                "floor": str(report.floor),
+                "plumbing": str(report.plumbing),
+                "floor_pct": str(report.floor_pct),
+                "monthly_floor_run_rate": str(report.monthly_floor_run_rate),
+                "cache_read_share": str(report.cache_read_share),
+                "buckets": {ln.bucket: str(ln.amount) for ln in report.lines},
+            },
+        )
+
+    def _cache(self, report: AgentReport, cloud: Cloud) -> Event | None:
+        tokens_in = next(
+            (ln.amount for ln in report.lines if ln.bucket == "tokens-in"), Decimal(0)
+        )
+        # a few cents of prompts is not a caching problem
+        if tokens_in < self._min or report.cache_read_share >= self._cache_min:
+            return None
+        alias = report.alias or "-"
+        cur = report.currency
+        who = "unattributed agent spend" if report.agent == AGENT_UNATTRIBUTED else report.agent
+        return Event(
+            key=f"finops:agent-cache:{alias}:{report.agent}:{cur}",
+            severity=EventSeverity.WARN,
+            domain="finops",
+            cloud=cloud,
+            title=(
+                f"[{alias}] Agent {who}: {tokens_in} {cur} of uncached input tokens "
+                f"({report.cache_read_share}% from cache)"
+            ),
+            message=(
+                f"{report.start}..{report.end}: {tokens_in} {cur} of input tokens, "
+                f"{report.cache_read_share}% of input-side spend served from cache "
+                f"(threshold {self._cache_min}%)"
+            ),
+            payload={
+                "agent": report.agent,
+                "start": report.start.isoformat(),
+                "end": report.end.isoformat(),
+                "currency": cur,
+                "tokens_in": str(tokens_in),
+                "cache_read_share": str(report.cache_read_share),
+                "threshold_pct": str(self._cache_min),
+            },
+        )
+
+
+def _share(part: Decimal, total: Decimal) -> Decimal:
+    if total <= 0:
+        return Decimal(0)
+    return (part / total * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
 @dataclass(frozen=True, slots=True)

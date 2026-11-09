@@ -51,6 +51,7 @@ class FinOpsTuning:
     nonprod_tags: dict[str, tuple[str, ...]] = field(default_factory=dict)  # tag key -> non-prod values
     required_tags: tuple[str, ...] = ()    # tag keys every cost-bearing resource must carry
     agent_tag_keys: tuple[str, ...] = ()   # tag keys that name an agent; empty = agent spend off
+    agent_idle_days: int = 14              # floor with no token rows this long is idle
     allow_cost_explorer: bool = False      # off = the billed ce:GetCostAndUsage is never called
     # off = the CloudWatch idle detectors stay quiet and idle advice comes from
     # Compute Optimizer instead; GetMetricData bills per metric requested

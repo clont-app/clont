@@ -125,6 +125,7 @@ def _tuning(config: Config) -> FinOpsTuning:
         nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
         required_tags=tuple(config.finops.required_tags),
         agent_tag_keys=tuple(config.finops.agent_tag_keys),
+        agent_idle_days=config.finops.agent_idle_days,
         allow_cost_explorer=config.finops.allow_cost_explorer,
         allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
     )
@@ -275,6 +276,9 @@ def build_agent(config: Config) -> Agent:
         k8s_unrequested_pct=config.finops.k8s_unrequested_pct,
         k8s_sources=k8s_sources,
         transfer_spend_pct=config.finops.transfer_spend_pct,
+        agent_floor_pct=config.finops.agent_floor_pct,
+        agent_min_dollars=config.finops.agent_min_dollars,
+        agent_cache_min_share_pct=config.finops.agent_cache_min_share_pct,
         anomaly_sigma=config.monitoring.anomaly_sigma,
         anomaly_min_points=config.monitoring.anomaly_min_points,
         free_storage_min_pct=config.monitoring.free_storage_min_pct,
