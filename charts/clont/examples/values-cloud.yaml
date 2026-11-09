@@ -1,0 +1,55 @@
+# quick start: aws only
+#
+#   helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
+#     --create-namespace -f values-cloud.yaml
+#
+# credentials: on eks the irsa annotation below is all it needs — the pod's
+# identity assumes each account's clont-readonly role. outside eks drop the
+# annotation and `envFrom` a secret with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
+# the policy for the role is in docs/iam.md.
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::111111111111:role/clont
+
+# nothing reads the cluster here, so the clusterrole buys nothing
+rbac:
+  create: false
+
+config:
+  interval_seconds: 300
+  lookback_days: 1
+  log_level: info
+
+  aws:
+    prod:
+      role_arn: arn:aws:iam::111111111111:role/clont-readonly
+      regions: [us-east-1, eu-west-1]
+      # spend comes from the cost and usage report your account already writes
+      # to s3 — free. without this block there is no spend data at all
+      cur:
+        bucket: my-billing-bucket
+        report_name: clont-cur
+        prefix: reports
+        region: us-east-1
+    staging:
+      role_arn: arn:aws:iam::222222222222:role/clont-readonly
+      regions: [us-east-1]
+
+  finops:
+    budgets:
+      - account: prod
+        monthly_limit: 5000
+    required_tags: [Owner, Environment]
+    nonprod_tags:
+      Environment: [dev, staging, test, qa]
+
+  channels:
+    log:
+      repeat_hours: 3
+      min_severity: info
+    # a webhook is a secret: put the whole config in a Secret and set
+    # existingSecret instead of keeping this line in values.yaml
+    # slack:
+    #   webhook_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+    #   min_severity: warn

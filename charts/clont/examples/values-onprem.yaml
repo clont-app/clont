@@ -1,0 +1,66 @@
+# quick start: on-prem only, no aws anywhere
+#
+#   kubectl create ns clont
+#   kubectl -n clont create secret generic clont-vsphere --from-literal=password='...'
+#   helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
+#     -f values-onprem.yaml
+#
+# there is no invoice to read, so you give the monthly cost of a pool and clont
+# divides it by the capacity it measures in vcenter. same records as aws after
+# that: digest, spikes, month-end forecast, budgets, waste findings.
+
+# clont also prices the cluster it runs in -> it needs the read-only clusterrole
+rbac:
+  create: true
+
+# inventory.password_env names this var; the password never goes in the config
+env:
+  - name: DC1_VSPHERE_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: clont-vsphere
+        key: password
+
+config:
+  interval_seconds: 300
+  lookback_days: 1
+  log_level: info
+
+  onprem:
+    dc1:
+      inventory:
+        kind: vsphere
+        endpoint: vc1.dc1.local        # host only, no scheme
+        username: clont-ro@vsphere.local
+        password_env: DC1_VSPHERE_PASSWORD
+        verify_ssl: true
+        usage_window_days: 14          # 0 = no perf read, no idle/rightsize advice
+      # monthly cost of the pool, your money
+      rate_card:
+        power_and_cooling: 3400
+        rack_and_network: 1500
+        licenses: 2000
+        hardware_capex: 480000
+        lifetime_months: 48
+      weights: {cpu: 0.5, ram: 0.3, storage: 0.2}
+      # a cluster card overrides the site card line by line
+      clusters:
+        dev-gen9:
+          rate_card: {hardware_capex: 120000, lifetime_months: 60}
+
+  kubernetes:
+    lab:
+      priced_by: dc1                   # required: the site whose vms these nodes are
+      in_cluster: true                 # the pod's service account, no kubeconfig
+      match_by_name: true
+      usage: metrics-server
+
+  finops:
+    budgets:
+      - account: dc1
+        monthly_limit: 15000
+
+  channels:
+    log:
+      repeat_hours: 3
+      min_severity: info

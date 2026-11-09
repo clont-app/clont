@@ -1,0 +1,95 @@
+# quick start: aws and on-prem together, one release
+#
+#   helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
+#     --create-namespace -f values-hybrid.yaml
+#
+# `aws:`, `onprem:` and `kubernetes:` are independent maps — one agent collects
+# all of them in the same cycle and every event carries its alias, so no second
+# install is needed. each cluster's `priced_by` names the pool that pays for its
+# nodes: a site under `onprem:` for the lab, an account under `aws:` for eks.
+#
+# run two releases only when one pod cannot reach both (vcenter unreachable from
+# the cloud cluster) or the two sides belong to different teams. then it is the
+# same chart twice, different namespace, one config each.
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::111111111111:role/clont
+
+rbac:
+  create: true
+
+env:
+  - name: DC1_VSPHERE_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: clont-vsphere
+        key: password
+
+config:
+  interval_seconds: 300
+  lookback_days: 1
+  log_level: info
+
+  aws:
+    prod:
+      role_arn: arn:aws:iam::111111111111:role/clont-readonly
+      regions: [us-east-1]
+      cur:
+        bucket: my-billing-bucket
+        report_name: clont-cur
+        prefix: reports
+        region: us-east-1
+
+  onprem:
+    dc1:
+      inventory:
+        kind: vsphere
+        endpoint: vc1.dc1.local
+        username: clont-ro@vsphere.local
+        password_env: DC1_VSPHERE_PASSWORD
+        usage_window_days: 14
+      rate_card:
+        power_and_cooling: 3400
+        rack_and_network: 1500
+        licenses: 2000
+        hardware_capex: 480000
+        lifetime_months: 48
+      weights: {cpu: 0.5, ram: 0.3, storage: 0.2}
+
+  kubernetes:
+    # the cluster clont runs in, on dc1 iron
+    lab:
+      priced_by: dc1
+      in_cluster: true
+      match_by_name: true
+      usage: metrics-server
+    # an eks cluster priced through the account that pays for its nodes
+    eks-prod:
+      priced_by: prod
+      kubeconfig: /etc/clont-kubeconfig/config
+      context: eks-prod
+      usage: metrics-server
+
+  finops:
+    budgets:
+      - account: prod
+        monthly_limit: 5000
+      - account: dc1
+        monthly_limit: 15000
+
+  channels:
+    log:
+      repeat_hours: 3
+      min_severity: info
+
+# the second cluster's kubeconfig — keep it out of /etc/clont, that path is the
+# config mount
+extraVolumes:
+  - name: kubeconfig
+    secret:
+      secretName: clont-kubeconfig
+extraVolumeMounts:
+  - name: kubeconfig
+    mountPath: /etc/clont-kubeconfig
+    readOnly: true

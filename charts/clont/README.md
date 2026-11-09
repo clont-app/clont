@@ -16,6 +16,51 @@ helm install clont ./charts/clont -n clont --create-namespace -f my-values.yaml
 helm test clont -n clont          # validates the mounted config, no api calls
 ```
 
+## quick start
+
+three ready values files in [examples/](examples/) — copy one, change the
+aliases, the account ids and the rate card, install.
+
+### cloud (aws)
+
+[`values-cloud.yaml`](examples/values-cloud.yaml) — two accounts, spend from the
+cost and usage report, budgets and tag hygiene. identity is irsa on eks
+(`serviceAccount.annotations`), or `envFrom` a secret with access keys anywhere
+else; the role's policy is in [docs/iam.md](../../docs/iam.md). `rbac.create` is
+off, nothing reads the cluster.
+
+```sh
+helm install clont oci://ghcr.io/clont-app/charts/clont -n clont \
+  --create-namespace -f values-cloud.yaml
+```
+
+### on-prem (no aws at all)
+
+[`values-onprem.yaml`](examples/values-onprem.yaml) — a vsphere site plus the
+cluster clont runs in. there is no invoice to read, so you write the monthly cost
+of the pool (`rate_card`) and clont divides it by the capacity it measures in
+vcenter; everything downstream — digest, spikes, forecast, budgets, waste — is
+the same as on aws. needs the vcenter password as a secret and
+`rbac.create: true` for the in-cluster read.
+
+```sh
+kubectl create ns clont
+kubectl -n clont create secret generic clont-vsphere --from-literal=password='...'
+helm install clont oci://ghcr.io/clont-app/charts/clont -n clont -f values-onprem.yaml
+```
+
+### both
+
+[`values-hybrid.yaml`](examples/values-hybrid.yaml) — **one release.** `aws:`,
+`onprem:` and `kubernetes:` are independent maps, one cycle collects all of them
+and every event carries its alias. each cluster's `priced_by` names the pool that
+pays for its nodes: a site under `onprem:` for the lab, an account under `aws:`
+for eks, so a mixed estate reports in one digest with one set of budgets.
+
+a second release is only for when one pod cannot reach both sides (vcenter not
+routable from the cloud cluster) or the two belong to different teams — same
+chart, another namespace, one config each.
+
 ## config
 
 the agent's whole configuration is `clont.yaml` — the keys are documented in

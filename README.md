@@ -633,6 +633,14 @@ a single-replica deployment, the config as a configmap (or a secret when it hold
 webhooks or an api key), and a read-only clusterrole when clont also prices the
 cluster it runs in. details in [charts/clont/README.md](charts/clont/README.md).
 
+quick starts, copy one and change the aliases:
+
+- [cloud](charts/clont/examples/values-cloud.yaml) — aws accounts, cur spend, irsa.
+- [on-prem](charts/clont/examples/values-onprem.yaml) — a vsphere site and a rate
+  card, no aws anywhere.
+- [both](charts/clont/examples/values-hybrid.yaml) — one release covers a mixed
+  estate; `priced_by` puts each cluster on the pool that pays for its nodes.
+
 ## where the dollar figures come from
 
 everything comes out of `clont/finops/aws/prices.json` — public on-demand list
