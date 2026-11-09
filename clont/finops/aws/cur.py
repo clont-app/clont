@@ -49,6 +49,8 @@ from botocore.exceptions import ClientError
 from clont.core.logging import get_logger
 from clont.core.models import Cloud, Money, Period
 from clont.core.registry import register
+from clont.finops.aws.ai_usage_types import DIMENSION as _AGENT
+from clont.finops.aws.ai_usage_types import agent_bucket
 from clont.finops.aws.dynamodb import capacity_mode_recommendations, throughput_kind
 from clont.finops.aws.usage_types import DIMENSION as _TRANSFER
 from clont.finops.aws.usage_types import transfer_bucket
@@ -127,8 +129,9 @@ _MAX_TAG_COMBOS = 5000
 _OTHER = "(other)"
 
 # day, usage account ("" when the report is not split by account), service,
-# data-transfer bucket ("" for everything that isn't transfer), tags
-_Group = tuple[date, str, str, str, tuple[tuple[str, str], ...]]
+# data-transfer bucket ("" for everything that isn't transfer), tags, agent
+# spend bucket ("" when it isn't agent spend or the feature is off)
+_Group = tuple[date, str, str, str, tuple[tuple[str, str], ...], str]
 
 
 @dataclass
@@ -161,13 +164,14 @@ class _Spend:
         transfer: str,
         tags: tuple[tuple[str, str], ...],
         amount: Decimal,
+        agent: str = "",
     ) -> None:
         if tags and tags not in self.combos:
             if len(self.combos) >= _MAX_TAG_COMBOS:
                 tags = tuple((k, _OTHER) for k, _ in tags)
             else:
                 self.combos.add(tags)
-        self.totals[(day, account, service, transfer, tags)] += amount
+        self.totals[(day, account, service, transfer, tags, agent)] += amount
 
 
 @dataclass(frozen=True)
@@ -207,17 +211,21 @@ class CURCostCollector:
         self._tuning = tuning or FinOpsTuning()
         # the showback keys. splitting costs nothing downstream: every line is
         # still counted once, so service totals are unchanged
-        self._tags = tuple(self._tuning.required_tags)
+        # agent keys ride the same split, so the report can attribute by them
+        self._agent_tags = tuple(self._tuning.agent_tag_keys)
+        self._tags = tuple(dict.fromkeys((*self._tuning.required_tags, *self._agent_tags)))
 
     def collect(self, period: Period) -> list[CostRecord]:
         config = getattr(self._provider, "cur", None)
         if config is None:
             return []
 
-        spend = _spend(self._provider, config, period, self._tags)
+        spend = _spend(self._provider, config, period, self._tags, self._agent_tags)
         names = _linked_names(self._provider, config, spend)
         records: list[CostRecord] = []
-        for (day, account, service, transfer, tags), amount in sorted(spend.totals.items()):
+        for (day, account, service, transfer, tags, agent), amount in sorted(
+            spend.totals.items()
+        ):
             if not period.start <= day <= period.end:
                 continue
             dimensions = {}
@@ -225,6 +233,8 @@ class CURCostCollector:
                 dimensions["account_id"] = account
             if transfer:
                 dimensions[_TRANSFER] = transfer
+            if agent:
+                dimensions[_AGENT] = agent
             records.append(
                 CostRecord(
                     cloud=str(Cloud.AWS),
@@ -243,7 +253,7 @@ class CURCostCollector:
         config = getattr(self._provider, "cur", None)
         if config is None:
             return []
-        spend = _spend(self._provider, config, period, self._tags)
+        spend = _spend(self._provider, config, period, self._tags, self._agent_tags)
         if spend.ddb_capped:
             log.warning(
                 "CUR carries more than %d dynamodb usage rows — skipping the "
@@ -288,7 +298,13 @@ def _linked_names(provider: Provider, config, spend: _Spend) -> dict[str, str]:
     }
 
 
-def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = ()) -> _Spend:
+def _spend(
+    provider: Provider,
+    config,
+    period: Period,
+    tags: tuple[str, ...] = (),
+    agent_tags: tuple[str, ...] = (),
+) -> _Spend:
     folders = _billing_periods(period)
     charges = _Charges.of(config)
     key = "|".join(
@@ -302,6 +318,8 @@ def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = (
             str(charges),
             *folders,
             *tags,
+            # the agent split is a different aggregation too
+            *(f"agent:{k}" for k in agent_tags),
         ]
     )
     hit = _cache.get(key)
@@ -332,6 +350,7 @@ def _spend(provider: Provider, config, period: Period, tags: tuple[str, ...] = (
                 tags,
                 split=config.include_linked,
                 charges=charges,
+                agent_tags=agent_tags,
             )
 
     absent = [k for k in tags if k not in spend.seen_tags]
@@ -407,6 +426,7 @@ def _read_into(
     *,
     split: bool = False,
     charges: _Charges = _Charges(),
+    agent_tags: tuple[str, ...] = (),
 ) -> None:
     """Stream one gzipped csv part, folding its rows into `spend`.
 
@@ -436,14 +456,23 @@ def _read_into(
             _ddb_into(row, product, owner if split else "", amount, spend)
             if not amount:
                 continue
+            usage_type = _pick(row, _USAGE_TYPE)
+            # a credit with an ec2 usage type is not data transfer
+            transfer = "" if charge else transfer_bucket(usage_type, product)
+            row_tags = _row_tags(row, columns)
+            agent = ""
+            # transfer wins: a row is counted in one bucket only
+            if agent_tags and not charge and not transfer:
+                tagged = any(v for k, v in row_tags if k in agent_tags)
+                agent = agent_bucket(product, usage_type, tagged)
             spend.add(
                 day,
                 owner if split else "",
                 charge or product,
-                # a credit with an ec2 usage type is not data transfer
-                "" if charge else transfer_bucket(_pick(row, _USAGE_TYPE), product),
-                _row_tags(row, columns),
+                transfer,
+                row_tags,
                 amount,
+                agent,
             )
             currency = _pick(row, _CURRENCY)
             if currency and currency != spend.currency:

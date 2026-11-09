@@ -572,6 +572,103 @@ def test_a_report_with_no_usage_type_column_has_no_transfer_dimension():
     assert {r.dimensions for r in records} == {None}
 
 
+# --- agent spend: one more group dimension ----------------------------------
+
+
+_AGENT_COLUMNS = [*_USAGE_COLUMNS, "resourceTags/user:agent"]
+
+
+def _agent_objects() -> dict[str, bytes]:
+    rows = [
+        _row("2024-01-01", "3.00", "Amazon Bedrock")
+        | {"lineItem/UsageType": "USE1-Claude3.5Sonnet-input-tokens", "resourceTags/user:agent": "rag"},
+        _row("2024-01-01", "1.50", "Amazon Bedrock")
+        | {"lineItem/UsageType": "USE1-Claude3.5Sonnet-output-tokens", "resourceTags/user:agent": "rag"},
+        # on-demand invokes with no inference profile carry no tag, still agent spend
+        _row("2024-01-01", "0.25", "Amazon Bedrock")
+        | {"lineItem/UsageType": "USE1-Claude3.5Sonnet-cache-read-input-token-count"},
+        _row("2024-01-01", "5.76", "Amazon OpenSearch Service")
+        | {"lineItem/UsageType": "USE1-OCU-Hours", "resourceTags/user:agent": "rag"},
+        # someone else's lambda: shared service, no agent tag
+        _row("2024-01-01", "2.00", "AWS Lambda")
+        | {"lineItem/UsageType": "USE1-Lambda-GB-Second"},
+        _row("2024-01-01", "0.40", "AWS Lambda")
+        | {"lineItem/UsageType": "USE1-Lambda-GB-Second", "resourceTags/user:agent": "rag"},
+        # nat bytes stay transfer, never agent
+        _row("2024-01-01", "1.00", "Amazon Elastic Compute Cloud")
+        | {"lineItem/UsageType": "USE1-NatGateway-Bytes", "resourceTags/user:agent": "rag"},
+    ]
+    return _tagged_objects(_AGENT_COLUMNS, rows)
+
+
+def _agent_tuning(*keys: str) -> FinOpsTuning:
+    return FinOpsTuning(agent_tag_keys=keys)
+
+
+def _by(records) -> dict[tuple[str, str, str], Decimal]:
+    out: dict[tuple[str, str, str], Decimal] = {}
+    for r in records:
+        dims = r.dimensions or {}
+        key = (r.service, dims.get("agent", ""), (r.tags or {}).get("agent", ""))
+        out[key] = out.get(key, Decimal(0)) + r.cost.amount
+    return out
+
+
+def test_agent_rows_carry_their_bucket_as_a_dimension():
+    records = _collect(_FakeProvider(_FakeS3(_agent_objects())), tuning=_agent_tuning("agent"))
+
+    assert _by(records) == {
+        ("Amazon Bedrock", "tokens-in", "rag"): Decimal("3.00"),
+        ("Amazon Bedrock", "tokens-out", "rag"): Decimal("1.50"),
+        ("Amazon Bedrock", "cache-read", ""): Decimal("0.25"),
+        ("Amazon OpenSearch Service", "floor", "rag"): Decimal("5.76"),
+        ("AWS Lambda", "", ""): Decimal("2.00"),
+        ("AWS Lambda", "plumbing", "rag"): Decimal("0.40"),
+        ("Amazon Elastic Compute Cloud", "", "rag"): Decimal("1.00"),
+    }
+    nat = next(r for r in records if r.service == "Amazon Elastic Compute Cloud")
+    assert nat.dimensions == {"transfer": "nat"}
+
+
+def test_the_agent_split_leaves_every_total_unchanged():
+    off = _collect(_FakeProvider(_FakeS3(_agent_objects())))
+    cur.clear_cache()
+    on = _collect(_FakeProvider(_FakeS3(_agent_objects())), tuning=_agent_tuning("agent"))
+
+    def per_service(records):
+        out: dict[str, Decimal] = {}
+        for r in records:
+            out[r.service] = out.get(r.service, Decimal(0)) + r.cost.amount
+        return out
+
+    assert per_service(on) == per_service(off)
+    assert sum(r.cost.amount for r in on) == Decimal("13.91")
+
+
+def test_no_agent_tag_keys_means_no_agent_dimension():
+    records = _collect(_FakeProvider(_FakeS3(_agent_objects())))
+
+    assert not any("agent" in (r.dimensions or {}) for r in records)
+    assert {r.tags for r in records} == {None}
+    # same records the report gave before the feature existed
+    assert [(r.service, r.cost.amount, r.dimensions) for r in records] == [
+        ("AWS Lambda", Decimal("2.40"), None),
+        ("Amazon Bedrock", Decimal("4.75"), None),
+        ("Amazon Elastic Compute Cloud", Decimal("1.00"), {"transfer": "nat"}),
+        ("Amazon OpenSearch Service", Decimal("5.76"), None),
+    ]
+
+
+def test_changing_the_agent_keys_bypasses_the_cache():
+    provider = _FakeProvider(_FakeS3(_agent_objects()))
+
+    first = _collect(provider)
+    second = _collect(provider, tuning=_agent_tuning("agent"))
+
+    assert not any("agent" in (r.dimensions or {}) for r in first)
+    assert any("agent" in (r.dimensions or {}) for r in second)
+
+
 # --- amortization: commitments must not land on one day ---------------------
 
 

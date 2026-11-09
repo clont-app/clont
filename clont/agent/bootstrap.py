@@ -124,6 +124,7 @@ def _tuning(config: Config) -> FinOpsTuning:
         ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
         nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
         required_tags=tuple(config.finops.required_tags),
+        agent_tag_keys=tuple(config.finops.agent_tag_keys),
         allow_cost_explorer=config.finops.allow_cost_explorer,
         allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
     )
