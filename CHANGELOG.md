@@ -1,5 +1,24 @@
 # changelog
 
+## 0.3.2
+
+### helm chart
+
+- `charts/clont` — deployment, configmap, serviceaccount, optional rbac for the
+  in-cluster kubernetes source, and a `helm test` hook that validates the config
+- three example values files: `values-cloud.yaml`, `values-onprem.yaml`,
+  `values-hybrid.yaml` (aws and your own iron in one release)
+
+### docs
+
+- `docs/setup-cloud.md` and `docs/setup-onprem.md` — step-by-step setup from an
+  empty account to a running deployment, written for a first-time install
+
+### fixes
+
+- `clont run --once --summary` counted accounts from `aws` only, so an on-prem-only
+  scan reported "no accounts"; sites are counted too now
+
 ## 0.3.1
 
 ### compute optimizer
