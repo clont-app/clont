@@ -407,6 +407,16 @@ broke; if nothing was configured it says that instead.
 
 ## configuration
 
+setting it up from scratch, step by step:
+
+- **[docs/setup-cloud.md](docs/setup-cloud.md)** — aws: the role, the cost and
+  usage report, the first scan, helm or docker.
+- **[docs/setup-onprem.md](docs/setup-onprem.md)** — own iron: the vcenter
+  read-only account, the rate card, kubernetes as a source. also covers running
+  both estates in one release.
+
+the reference below is the same keys, one by one.
+
 one yaml file — see `clont.example.yaml` for the full thing. point `$CLONT_CONFIG`
 at it, or drop a `clont.yaml` in the working directory; `clont run --config <path>`
 beats both.
@@ -633,13 +643,17 @@ a single-replica deployment, the config as a configmap (or a secret when it hold
 webhooks or an api key), and a read-only clusterrole when clont also prices the
 cluster it runs in. details in [charts/clont/README.md](charts/clont/README.md).
 
-quick starts, copy one and change the aliases:
+quick starts — the guide walks the whole setup, the values file is what you copy:
 
-- [cloud](charts/clont/examples/values-cloud.yaml) — aws accounts, cur spend, irsa.
-- [on-prem](charts/clont/examples/values-onprem.yaml) — a vsphere site and a rate
-  card, no aws anywhere.
-- [both](charts/clont/examples/values-hybrid.yaml) — one release covers a mixed
-  estate; `priced_by` puts each cluster on the pool that pays for its nodes.
+- cloud — [docs/setup-cloud.md](docs/setup-cloud.md),
+  [values-cloud.yaml](charts/clont/examples/values-cloud.yaml): aws accounts, cur
+  spend, irsa.
+- on-prem — [docs/setup-onprem.md](docs/setup-onprem.md),
+  [values-onprem.yaml](charts/clont/examples/values-onprem.yaml): a vsphere site
+  and a rate card, no aws anywhere.
+- both — [values-hybrid.yaml](charts/clont/examples/values-hybrid.yaml): one
+  release covers a mixed estate; `priced_by` puts each cluster on the pool that
+  pays for its nodes.
 
 ## where the dollar figures come from
 

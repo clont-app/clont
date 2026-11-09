@@ -19,7 +19,10 @@ helm test clont -n clont          # validates the mounted config, no api calls
 ## quick start
 
 three ready values files in [examples/](examples/) — copy one, change the
-aliases, the account ids and the rate card, install.
+aliases, the account ids and the rate card, install. the full setup — what to
+grant, what to write in the config, how to prove the access before deploying — is
+in [docs/setup-cloud.md](../../docs/setup-cloud.md) and
+[docs/setup-onprem.md](../../docs/setup-onprem.md).
 
 ### cloud (aws)
 
