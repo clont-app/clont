@@ -7,6 +7,7 @@ rather than listed, and parsed totals are cached across cycles.
 
 from __future__ import annotations
 
+import csv
 import gzip
 import io
 import json
@@ -886,3 +887,84 @@ def test_a_discount_stays_on_the_service_it_discounts():
     records = _collect(_FakeProvider(_FakeS3(objects)))
 
     assert _amounts(records)[(_EC2, date(2024, 1, 2))] == Decimal("2.70")
+
+
+_CUR2_COLUMNS = [
+    "line_item_usage_start_date",
+    "line_item_unblended_cost",
+    "line_item_currency_code",
+    "line_item_line_item_type",
+    "line_item_usage_account_id",
+    "line_item_product_code",
+    "product",
+    "resource_tags",
+]
+_CUR2_META = "reports/clont-cur/metadata/BILLING_PERIOD=2024-01/clont-cur-Manifest.json"
+_CUR2_DATA = "reports/clont-cur/data/BILLING_PERIOD=2024-01/clont-cur-00001.csv.gz"
+
+
+def _cur2_row(cost: str, code: str, name: str | None, tags: dict | None = None) -> dict:
+    return {
+        "line_item_usage_start_date": "2024-01-01T00:00:00.000Z",
+        "line_item_unblended_cost": cost,
+        "line_item_currency_code": "USD",
+        "line_item_line_item_type": "Usage",
+        "line_item_usage_account_id": "111",
+        "line_item_product_code": code,
+        "product": json.dumps({"product_name": name} if name else {}),
+        "resource_tags": json.dumps(tags or {}),
+    }
+
+
+def _cur2_objects(rows: list[dict], *, data: list[str] | None = None) -> dict[str, bytes]:
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=_CUR2_COLUMNS)  # json cells need quoting
+    writer.writeheader()
+    writer.writerows(rows)
+    files = data or [f"s3://{BUCKET}/{_CUR2_DATA}"]
+    return {
+        _CUR2_META: json.dumps({"dataFiles": files, "columns": []}).encode(),
+        _CUR2_DATA: gzip.compress(out.getvalue().encode()),
+    }
+
+
+def test_cur2_export_is_read_from_its_metadata_folder():
+    rows = [
+        _cur2_row("1.25", "AmazonS3", "Amazon Simple Storage Service"),
+        _cur2_row("0.75", "AmazonS3", "Amazon Simple Storage Service"),
+    ]
+    s3 = _FakeS3(_cur2_objects(rows))
+
+    records = _collect(_FakeProvider(s3))
+
+    assert [(r.service, r.cost.amount) for r in records] == [
+        ("Amazon Simple Storage Service", Decimal("2.00"))
+    ]
+    assert _CUR2_DATA in s3.reads
+
+
+def test_cur2_without_a_product_name_falls_back_to_the_product_code():
+    records = _collect(_FakeProvider(_FakeS3(_cur2_objects([_cur2_row("1", "AWSGlue", None)]))))
+
+    assert [r.service for r in records] == ["AWSGlue"]
+
+
+def test_cur2_tags_come_out_of_the_resource_tags_map():
+    rows = [
+        _cur2_row("3", "AmazonEC2", "Amazon Elastic Compute Cloud", {"user_cost_center": "cc-1"}),
+        _cur2_row("1", "AmazonEC2", "Amazon Elastic Compute Cloud"),
+    ]
+
+    records = _collect(_FakeProvider(_FakeS3(_cur2_objects(rows))), tuning=_tuning("CostCenter"))
+
+    assert sorted((r.cost.amount, r.tags["CostCenter"]) for r in records) == [
+        (Decimal(1), ""),
+        (Decimal(3), "cc-1"),
+    ]
+
+
+def test_cur2_parquet_export_fails_loudly():
+    data = [f"s3://{BUCKET}/reports/clont-cur/data/BILLING_PERIOD=2024-01/x.snappy.parquet"]
+
+    with pytest.raises(RuntimeError, match="gzip csv only"):
+        _collect(_FakeProvider(_FakeS3(_cur2_objects([], data=data))))

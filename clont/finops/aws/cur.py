@@ -5,9 +5,15 @@ bucket you own, so a cycle costs a couple of S3 GETs instead of $0.01. Output is
 the daily per-service `CostRecord` stream the spend/budget/forecast detectors
 already consume.
 
-Legacy CUR layout only — gzip csv, manifest at the billing-period root:
+Two layouts, both gzip csv. Legacy CUR keeps the manifest at the period root:
 
     s3://<bucket>/<prefix>/<report>/<YYYYMMDD-YYYYMMDD>/<report>-Manifest.json
+
+CUR 2.0 (data exports, overwrite mode) keeps it under `metadata/`, names the
+data files as full `s3://` uris in `dataFiles`, and packs the product name and
+the user tags into json map columns (`product`, `resource_tags`):
+
+    s3://<bucket>/<prefix>/<export>/metadata/BILLING_PERIOD=<YYYY-MM>/<export>-Manifest.json
 
 The manifest names the data files, so the bucket is never listed and the role
 needs nothing but `s3:GetObject`. Keys are derived, not discovered: a month
@@ -119,6 +125,10 @@ _DdbGroup = tuple[datetime, str, str, str]
 
 # user cost-allocation tag columns: legacy, then the data-exports spelling
 _TAG_PREFIXES = ("resourceTags/user:", "resource_tags_user_")
+# cur 2.0 folds every tag into one json map column, keys spelled user_<key>
+_TAG_MAP = "resource_tags"
+# and the product attributes too, product_name among them
+_PRODUCT_MAP = "product"
 # splitting by tag multiplies the rows: days x services x distinct combos. a
 # high-cardinality required tag (Name, say) would otherwise eat the box, so
 # surplus combos fold into one labelled bucket instead of being dropped.
@@ -340,7 +350,7 @@ def _spend(
             )
             continue
         _check_format(manifest, folder)
-        for data_key in manifest.get("reportKeys", []):
+        for data_key in _data_keys(manifest, config.bucket):
             _read_into(
                 s3,
                 config.bucket,
@@ -393,20 +403,47 @@ def _next_month(month: date) -> date:
 
 
 def _manifest(s3, config, folder: str) -> dict | None:
-    parts = [config.prefix.strip("/"), config.report_name, folder, f"{config.report_name}-Manifest.json"]
-    key = "/".join(p for p in parts if p)
-    try:
-        body = s3.get_object(Bucket=config.bucket, Key=key)["Body"]
-    except ClientError as exc:
-        # a period AWS hasn't delivered yet is normal; anything else (denied,
-        # wrong bucket region) is the operator's to fix, so let it surface
-        if str(exc.response.get("Error", {}).get("Code")) in _ABSENT:
-            return None
-        raise
-    return json.loads(body.read())
+    """The period's manifest, legacy layout first, then cur 2.0."""
+    name = f"{config.report_name}-Manifest.json"
+    month = f"BILLING_PERIOD={folder[:4]}-{folder[4:6]}"
+    for parts in (
+        [config.prefix.strip("/"), config.report_name, folder, name],
+        [config.prefix.strip("/"), config.report_name, "metadata", month, name],
+    ):
+        key = "/".join(p for p in parts if p)
+        try:
+            body = s3.get_object(Bucket=config.bucket, Key=key)["Body"]
+        except ClientError as exc:
+            # a period AWS hasn't delivered yet is normal; anything else (denied,
+            # wrong bucket region) is the operator's to fix, so let it surface
+            if str(exc.response.get("Error", {}).get("Code")) in _ABSENT:
+                continue
+            raise
+        return json.loads(body.read())
+    return None
+
+
+def _data_keys(manifest: dict, bucket: str) -> list[str]:
+    """Object keys of the data files, whichever way the manifest spells them."""
+    if "reportKeys" in manifest:
+        return list(manifest["reportKeys"])
+    keys = []
+    for uri in manifest.get("dataFiles", []):
+        # cur 2.0 gives s3://<bucket>/<key>; only our own bucket is readable
+        keys.append(uri.removeprefix(f"s3://{bucket}/"))
+    return keys
 
 
 def _check_format(manifest: dict, folder: str) -> None:
+    if "dataFiles" in manifest:
+        # cur 2.0 has no format fields, the file names carry it
+        odd = [k for k in manifest["dataFiles"] if not k.endswith(".csv.gz")]
+        if odd:
+            raise RuntimeError(
+                f"CUR {folder} has {odd[0].rsplit('/', 1)[-1]}; clont reads gzip csv only "
+                "(recreate the export with GZIP + text/csv)"
+            )
+        return
     compression = str(manifest.get("compression", "GZIP")).upper()
     content = str(manifest.get("contentType", "text/csv")).lower()
     if compression != "GZIP" or "csv" not in content:
@@ -437,7 +474,7 @@ def _read_into(
     with gzip.GzipFile(fileobj=body) as gz:
         reader = csv.DictReader(io.TextIOWrapper(gz, encoding="utf-8"))
         columns = _tag_columns(reader.fieldnames, tags)
-        spend.seen_tags.update(k for k, column in columns if column)
+        spend.seen_tags.update(k for k, column in columns if column and column != _TAG_MAP)
         for row in reader:
             owner = _pick(row, _ACCOUNT) if (only is not None or split) else ""
             if only is not None and owner and owner != only:
@@ -460,6 +497,9 @@ def _read_into(
             # a credit with an ec2 usage type is not data transfer
             transfer = "" if charge else transfer_bucket(usage_type, product)
             row_tags = _row_tags(row, columns)
+            if any(column == _TAG_MAP for _, column in columns):
+                # a map only shows a key on rows that carry it
+                spend.seen_tags.update(k for k, v in row_tags if v)
             agent = ""
             # transfer wins: a row is counted in one bucket only
             if agent_tags and not charge and not transfer:
@@ -515,15 +555,44 @@ def _tag_columns(
         for prefix in _TAG_PREFIXES:
             if column.startswith(prefix):
                 present[_norm(column[len(prefix) :])] = column
-    return tuple((k, present.get(_norm(k))) for k in tags)
+    # a split column wins; the map is the cur 2.0 fallback
+    fallback = _TAG_MAP if _TAG_MAP in (fieldnames or ()) else None
+    return tuple((k, present.get(_norm(k), fallback)) for k in tags)
 
 
 def _row_tags(
     row: dict, columns: tuple[tuple[str, str | None], ...]
 ) -> tuple[tuple[str, str], ...]:
-    return tuple(
-        (k, (row.get(column) or "").strip() if column else "") for k, column in columns
-    )
+    tagmap = None
+    out = []
+    for k, column in columns:
+        if column == _TAG_MAP:
+            if tagmap is None:
+                tagmap = _user_tags(row.get(_TAG_MAP))
+            out.append((k, tagmap.get(_norm(k), "")))
+        else:
+            out.append((k, (row.get(column) or "").strip() if column else ""))
+    return tuple(out)
+
+
+def _user_tags(raw: str | None) -> dict[str, str]:
+    """normalized user tag key -> value, off a cur 2.0 resource_tags cell."""
+    found = {}
+    for key, value in _json_map(raw).items():
+        for prefix in ("user_", "user:"):
+            if key.startswith(prefix):
+                found[_norm(key[len(prefix) :])] = str(value or "").strip()
+    return found
+
+
+def _json_map(raw: str | None) -> dict:
+    if not raw or raw == "{}":
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _norm(name: str) -> str:
@@ -626,4 +695,10 @@ def _usage(row: dict) -> Decimal:
 def _service(row: dict) -> str:
     # a line with no product (a fee, an adjustment) is labelled by its line-item
     # type, which is exactly how Cost Explorer spells those
-    return _pick(row, _SERVICE) or _pick(row, _KIND) or "unknown"
+    return (
+        _pick(row, _SERVICE[:2])
+        or str(_json_map(row.get(_PRODUCT_MAP)).get("product_name") or "").strip()
+        or _pick(row, _SERVICE[2:])
+        or _pick(row, _KIND)
+        or "unknown"
+    )

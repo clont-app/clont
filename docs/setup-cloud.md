@@ -58,11 +58,12 @@ name**, point clont at the payer and let it find the rest:
 
 ## 3. turn on the cost and usage report
 
-billing → data exports → create a legacy cur export (**csv + gzip**, not
-parquet). write down four things, you need them in step 4:
+billing → data exports → create a cur 2.0 or legacy cur export (**csv + gzip**,
+not parquet; for cur 2.0 pick "overwrite existing report"). write down four
+things, you need them in step 4:
 
 - the s3 bucket name
-- the report name
+- the report / export name
 - the prefix / path you gave it
 - the bucket's region
 

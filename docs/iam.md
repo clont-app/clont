@@ -239,8 +239,8 @@ grant.)
 ## spend: the cost and usage report
 
 spend comes from the cur your account already writes to s3, so a cycle costs a
-couple of s3 gets instead of a billed cost explorer request. create a **legacy
-cur** (gzip + csv, hourly or daily) delivered to a bucket the role can read, then
+couple of s3 gets instead of a billed cost explorer request. create a **cur 2.0
+or legacy cur** export (gzip + csv, hourly or daily; cur 2.0 in overwrite mode) delivered to a bucket the role can read, then
 point clont at it:
 
 ```yaml
