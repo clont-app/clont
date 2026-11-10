@@ -239,10 +239,12 @@ grant.)
 ## spend: the cost and usage report
 
 spend comes from the cur your account already writes to s3, so a cycle costs a
-couple of s3 gets instead of a billed cost explorer request. create a **cur 2.0
-or legacy cur** export (gzip + csv, hourly or daily; cur 2.0 in overwrite mode) delivered to a bucket the role can read. clont finds the export by itself at
-startup (`bcm-data-exports`, then legacy `cur:DescribeReportDefinitions`), so
-the `cur:` block is optional — set it only to override what was found:
+couple of s3 gets instead of a billed cost explorer request. create a **cur 2.0**
+export (standard data export, gzip + csv, daily, overwrite mode) delivered to a
+bucket the role can read. clont finds it by itself at startup
+(`bcm-data-exports`), so the `cur:` block is optional — set it only to override
+what was found. a legacy cur is not looked up, but still reads if you name it in
+the `cur:` block:
 
 ```yaml
 aws:
@@ -277,7 +279,6 @@ all free, all read-only, none take a resource:
   "Action": [
     "bcm-data-exports:ListExports",
     "bcm-data-exports:GetExport",
-    "cur:DescribeReportDefinitions",
     "tag:GetResources",
     "bedrock:ListAgents",
     "aoss:ListCollections"

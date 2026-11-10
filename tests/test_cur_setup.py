@@ -100,7 +100,7 @@ def test_export_without_resource_ids_still_used():
     assert cur_setup.discover(provider).report_name == "x"
 
 
-def test_falls_back_to_legacy_cur_when_exports_denied():
+def test_legacy_cur_is_not_looked_up():
     report = {
         "ReportName": "old",
         "S3Bucket": "b",
@@ -111,8 +111,7 @@ def test_falls_back_to_legacy_cur_when_exports_denied():
         "AdditionalSchemaElements": ["RESOURCES"],
     }
     provider = _Provider({"cur": _Legacy([report])})
-    found = cur_setup.discover(provider)
-    assert (found.report_name, found.region) == ("old", "us-east-2")
+    assert cur_setup.discover(provider) is None
 
 
 def test_nothing_found_when_all_denied():

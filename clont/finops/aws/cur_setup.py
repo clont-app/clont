@@ -1,8 +1,9 @@
 """Find the account's cur export by itself, and say so when agents run without one.
 
-`bcm-data-exports` (cur 2.0) and `cur:DescribeReportDefinitions` (legacy) both
-hand back bucket, prefix, name, region and format, so the `cur:` block in the
-yaml becomes an override and not a step. Every call here is free and read-only.
+`bcm-data-exports` (cur 2.0) hands back bucket, prefix, name, region and
+format, so the `cur:` block in the yaml becomes an override and not a step.
+legacy cur is not looked up on purpose: a hand-set `cur:` block still reads it,
+but setup always points at cur 2.0. Every call here is free and read-only.
 
 Without a bill the agent spend split has nothing to read. Telling everybody to
 set up cur is noise, so the reminder only goes out when the account visibly
@@ -21,7 +22,7 @@ from clont.events.models import Event, EventSeverity
 
 log = get_logger("clont.finops.aws.cur_setup")
 
-# both billing apis live in us-east-1 only
+# the billing api lives in us-east-1 only
 _BILLING_REGION = "us-east-1"
 _CUR2_TABLE = "COST_AND_USAGE_REPORT"
 _SKIP = (ClientError,)
@@ -70,28 +71,6 @@ def _cur2_candidates(provider) -> list[tuple[int, CURConfig, str]]:
             return out
 
 
-def _legacy_candidates(provider) -> list[tuple[int, CURConfig, str]]:
-    client = provider.client("cur", _BILLING_REGION)
-    out: list[tuple[int, CURConfig, str]] = []
-    token = None
-    while True:
-        page = client.describe_report_definitions(**({"NextToken": token} if token else {}))
-        for report in page.get("ReportDefinitions", []):
-            csv = report.get("Format") == "textORcsv" and report.get("Compression") == "GZIP"
-            ids = "RESOURCES" in report.get("AdditionalSchemaElements", [])
-            name = report["ReportName"]
-            config = CURConfig(
-                bucket=report["S3Bucket"],
-                report_name=name,
-                prefix=report.get("S3Prefix", ""),
-                region=report.get("S3Region") or _BILLING_REGION,
-            )
-            out.append((_rank(csv, ids), config, _issues(name, csv, ids)))
-        token = page.get("NextToken")
-        if not token:
-            return out
-
-
 def _rank(csv: bool, ids: bool) -> int:
     # an unreadable format is useless, missing ids only blurs the agent split
     return (2 if csv else 0) + (1 if ids else 0)
@@ -109,28 +88,21 @@ def _issues(name: str, csv: bool, ids: bool) -> str:
 
 
 def discover(provider) -> CURConfig | None:
-    """The best readable cur export on this account, or None.
+    """the best readable cur 2.0 export on this account, or None.
 
-    cur 2.0 first, legacy cur after; a denied api is the same as no export,
-    it just goes in the log so the operator knows which grant to add.
+    a denied api is the same as no export, it just goes in the log so the
+    operator knows which grant to add.
     """
-    found: list[tuple[int, CURConfig, str]] = []
-    denied: list[str] = []
-    for action, source in (
-        ("bcm-data-exports:ListExports", _cur2_candidates),
-        ("cur:DescribeReportDefinitions", _legacy_candidates),
-    ):
-        try:
-            found.extend(source(provider))
-        except _SKIP as exc:
-            code = _code(exc)
-            if "Denied" in code or code == "UnauthorizedOperation":
-                denied.append(action)
-                continue
-            log.warning("%s: cur lookup via %s failed: %s", provider.alias, action, exc)
+    try:
+        found = _cur2_candidates(provider)
+    except _SKIP as exc:
+        code = _code(exc)
+        if "Denied" in code or code == "UnauthorizedOperation":
+            log.info("%s: can't look for a cur 2.0 export, role lacks bcm-data-exports:ListExports", provider.alias)
+        else:
+            log.warning("%s: cur 2.0 lookup failed: %s", provider.alias, exc)
+        return None
     if not found:
-        if denied:
-            log.info("%s: can't look for a cur export, role lacks %s", provider.alias, ", ".join(denied))
         return None
     found.sort(key=lambda item: item[0], reverse=True)
     rank, config, issue = found[0]
