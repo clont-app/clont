@@ -108,9 +108,12 @@ class Agent:
         recommend_interval_seconds: int = DEFAULT_RECOMMEND_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         uplink: ApiUplink | None = None,
+        notices: list[Event] | None = None,
     ) -> None:
         self._providers = providers
         self._channels = channels
+        # setup hints found at startup, sent with the first cycle and never again
+        self._notices = list(notices or [])
         self._uplink = uplink
         # None = CloudWatch metric collection is off, so the metric detectors
         # below never see a point. Health checks are unaffected (they're free).
@@ -347,7 +350,8 @@ class Agent:
         of (event, channel) deliveries that went out.
         """
         batch = self._collect_batch(force)
-        events = list(batch.events)
+        events = [*self._notices, *batch.events]
+        self._notices = []
         if self._uplink is not None:
             try:
                 events.extend(self._uplink.ship(batch))

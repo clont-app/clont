@@ -108,8 +108,8 @@ class CURConfig(_Model):
     """Where this account's Cost and Usage Report lands in S3.
 
     Set it and spend comes from the report instead of Cost Explorer — same
-    numbers, no per-request charge. Legacy CUR only: gzip + csv, the layout
-    whose manifest sits at the billing-period root.
+    numbers, no per-request charge. cur 2.0 or legacy, gzip + csv. Optional:
+    left out, clont looks the export up itself at startup.
 
     `amortize` is what keeps an all-upfront RI or savings plan from reading as a
     one-day spike; turn it off only to reconcile against an unblended invoice.
@@ -154,7 +154,7 @@ class AWSConfig(_Model):
     role_arn: str
     regions: list[str] = Field(default_factory=list)
     external_id: str | None = None
-    cur: CURConfig | None = None     # free spend source; without it there is no spend data
+    cur: CURConfig | None = None     # override; unset = found via bcm-data-exports at startup
     members: MembersConfig | None = None  # payer only: discover and fan out to linked accounts
 
 
@@ -373,7 +373,7 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   prod:
 #     role_arn: arn:aws:iam::111111111111:role/clont-readonly
 #     regions: [us-east-1]
-#     cur:                       # cost and usage report in s3 = free spend data
+#     cur:                       # optional, found by itself; set to override
 #       bucket: my-billing-bucket
 #       report_name: clont-cur
 #       prefix: reports

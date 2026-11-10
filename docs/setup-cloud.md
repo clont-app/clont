@@ -58,17 +58,19 @@ name**, point clont at the payer and let it find the rest:
 
 ## 3. turn on the cost and usage report
 
-billing → data exports → create a cur 2.0 or legacy cur export (**csv + gzip**,
-not parquet; for cur 2.0 pick "overwrite existing report"). write down four
-things, you need them in step 4:
+billing → data exports → create → standard data export (cur 2.0). tick
+**include resource ids**, pick **csv + gzip** (not parquet), "overwrite existing
+report", daily.
 
-- the s3 bucket name
-- the report / export name
-- the prefix / path you gave it
-- the bucket's region
+then give clont's role two things —
+[iam.md](iam.md#spend-the-cost-and-usage-report) has both grants:
 
-also allow clont's role to read that bucket —
-[iam.md](iam.md#spend-the-cost-and-usage-report) has the grant.
+- `s3:GetObject` on the export folder in that bucket
+- `bcm-data-exports:ListExports` + `GetExport`, so clont finds the export by
+  itself. nothing to copy into the yaml.
+
+skip this and clont still runs. if it sees agents (bedrock, opensearch
+serverless, your agent tags) it sends one notice with these steps.
 
 two things to know:
 
@@ -82,7 +84,7 @@ two things to know:
 ## 4. write clont.yaml
 
 one file, and it is the whole configuration — there are no env vars that
-override it. save this as `clont.yaml` and replace the five marked values:
+override it. save this as `clont.yaml` and replace the marked values:
 
 ```yaml
 interval_seconds: 300          # how often it looks around
@@ -90,11 +92,7 @@ aws:
   prod:                        # <- your alias, anything short
     role_arn: arn:aws:iam::111111111111:role/clont-readonly   # <- step 2
     regions: [us-east-1, eu-west-1]                           # <- yours
-    cur:
-      bucket: my-billing-bucket     # <- step 3
-      report_name: clont-cur        # <- step 3
-      prefix: reports               # <- step 3
-      region: us-east-1             # <- step 3, the bucket's region
+    # cur: found by itself (step 3); a cur: block here overrides it
 channels:
   log:
     min_severity: info         # print everything to stdout for now
@@ -233,7 +231,7 @@ no rush, the defaults work. in rough order of value:
 |---|---|
 | `accounts: none` | the config wasn't loaded — check `CLONT_CONFIG` points at the file |
 | 0 accounts scanned, or an assume-role error | the trust policy: the identity clont runs as isn't allowed to assume the role |
-| `costs=0`, health fine | no `cur:` block, the first export hasn't landed yet (24h), or the prefix/report name doesn't match s3 |
+| `costs=0`, health fine | no export found (see the startup log for a missing grant), the first export hasn't landed yet (24h), or a `cur:` override doesn't match s3 |
 | spend a day or two behind | normal — aws rewrites the report a few times a day |
 | every cost line unattributed | the tag keys were never activated as cost allocation tags |
 | no anomaly or disk-full events | `monitoring.metrics.enabled` is false, the default |

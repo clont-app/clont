@@ -168,3 +168,57 @@ def test_an_unreachable_cluster_is_isolated(monkeypatch, caplog):
         agent = build_agent(config)
     assert [p.alias for p in agent._providers] == ["prod"]
     assert "skipping kubernetes cluster lab" in caplog.text
+
+
+# --- cur discovery
+
+
+def test_found_cur_fills_in_and_yaml_wins(monkeypatch):
+    from clont.finops.aws import cur_setup
+
+    def fake_auth(self):
+        self.account_id = "111111111111"
+
+    found = CURConfig(bucket="found", report_name="auto")
+    asked = []
+
+    def fake_discover(provider):
+        asked.append(provider.alias)
+        return found
+
+    monkeypatch.setattr(_AUTH, fake_auth)
+    monkeypatch.setattr(cur_setup, "discover", fake_discover)
+    config = _config("auto")
+    config.aws["pinned"] = AWSConfig(
+        role_arn="arn:aws:iam::0:role/pinned", cur=CURConfig(bucket="mine", report_name="r")
+    )
+    agent = build_agent(config)
+    curs = {p.alias: p.cur.bucket for p in agent._providers}
+    assert curs == {"auto": "found", "pinned": "mine"}
+    assert asked == ["auto"]
+    assert agent._notices == []
+
+
+def test_no_cur_with_agents_queues_one_notice(monkeypatch):
+    from clont.finops.aws import cur_setup
+
+    def fake_auth(self):
+        self.account_id = "111111111111"
+
+    monkeypatch.setattr(_AUTH, fake_auth)
+    monkeypatch.setattr(cur_setup, "discover", lambda p: None)
+    monkeypatch.setattr(cur_setup, "agent_signs", lambda p, keys: ["bedrock agent in us-east-1"])
+    agent = build_agent(_config("prod"))
+    assert [n.key for n in agent._notices] == ["cur-setup:prod"]
+
+
+def test_no_cur_without_agents_stays_quiet(monkeypatch):
+    from clont.finops.aws import cur_setup
+
+    def fake_auth(self):
+        self.account_id = "111111111111"
+
+    monkeypatch.setattr(_AUTH, fake_auth)
+    monkeypatch.setattr(cur_setup, "discover", lambda p: None)
+    monkeypatch.setattr(cur_setup, "agent_signs", lambda p, keys: [])
+    assert build_agent(_config("prod"))._notices == []

@@ -15,7 +15,7 @@ aws:
   prod:
     role_arn: arn:aws:iam::111111111111:role/clont-readonly
     regions: [us-east-1, eu-west-1]
-    cur:
+    cur:                         # optional: clont finds the export by itself, this overrides
       bucket: my-billing-bucket    # bucket the report is delivered to
       report_name: clont-cur       # report name = its folder in the bucket
       prefix: reports              # s3 prefix given when the report was created

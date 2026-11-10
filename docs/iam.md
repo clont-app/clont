@@ -240,8 +240,9 @@ grant.)
 
 spend comes from the cur your account already writes to s3, so a cycle costs a
 couple of s3 gets instead of a billed cost explorer request. create a **cur 2.0
-or legacy cur** export (gzip + csv, hourly or daily; cur 2.0 in overwrite mode) delivered to a bucket the role can read, then
-point clont at it:
+or legacy cur** export (gzip + csv, hourly or daily; cur 2.0 in overwrite mode) delivered to a bucket the role can read. clont finds the export by itself at
+startup (`bcm-data-exports`, then legacy `cur:DescribeReportDefinitions`), so
+the `cur:` block is optional — set it only to override what was found:
 
 ```yaml
 aws:
@@ -266,8 +267,37 @@ billing period and never lists the bucket, so no `s3:ListBucket` needed:
 }
 ```
 
+and let it look the export up, plus spot agents when there is no export yet.
+all free, all read-only, none take a resource:
+
+```json
+{
+  "Sid": "ClontCURLookup",
+  "Effect": "Allow",
+  "Action": [
+    "bcm-data-exports:ListExports",
+    "bcm-data-exports:GetExport",
+    "cur:DescribeReportDefinitions",
+    "tag:GetResources",
+    "bedrock:ListAgents",
+    "aoss:ListCollections"
+  ],
+  "Resource": "*"
+}
+```
+
+the last three only matter without a cur: if clont sees an agent tag
+(`finops.agent_tag_keys`), a bedrock agent or an opensearch serverless
+collection, it logs and sends one notice per account on the first cycle with
+the three setup steps. no agents, no notice. without the lookup grants clont
+just says in the log which one is missing.
+
 stuff that will bite you:
 
+- **the bucket grant can't be automated.** clont finds the export but can only
+  read it once the role has `s3:GetObject` on that folder.
+- **parquet exports are skipped.** clont reads csv + gzip only; with only a
+  parquet export it logs which one and reads nothing.
 - **service names aren't spelled like cost explorer.** clont reports the cur's
   `product/ProductName` (`Amazon Elastic Compute Cloud`, not
   `Amazon Elastic Compute Cloud - Compute`), so budgets keyed by service need the
