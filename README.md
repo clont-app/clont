@@ -11,6 +11,59 @@ it makes is a `describe` / `get` / `list` — it never changes anything.
 for the bigger picture (free local tier vs paid hosted one, how the pieces fit)
 see [docs/architecture.md](docs/architecture.md).
 
+## install
+
+three ways, simplest first. all of them read one file, `clont.yaml` — the
+minimal one is in [docs/setup-cloud.md](docs/setup-cloud.md#4-write-clontyaml)
+(aws) or [docs/setup-onprem.md](docs/setup-onprem.md) (own iron). the iam role it
+needs is in [docs/iam.md](docs/iam.md).
+
+### pip
+
+python 3.11+. the quickest way to see what clont finds:
+
+```sh
+python3 -m venv ~/clont-venv
+~/clont-venv/bin/pip install clont                  # aws only
+~/clont-venv/bin/pip install 'clont[vsphere,k8s]'   # + own iron and kubernetes
+```
+
+one scan, a summary to the screen, then it exits:
+
+```sh
+CLONT_CONFIG=./clont.yaml ~/clont-venv/bin/clont run --once --summary -
+```
+
+drop `--once --summary -` and it keeps running, a cycle every
+`interval_seconds`.
+
+### docker
+
+for any linux box. the image reads `/etc/clont/clont.yaml`:
+
+```sh
+docker run -d --name clont --restart unless-stopped \
+  -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
+  -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
+  ghcr.io/clont-app/clont:0.3.2
+docker logs -f clont
+```
+
+### kubernetes (helm)
+
+the chart isn't in a registry yet, install it from a checkout:
+
+```sh
+git clone https://github.com/clont-app/clont && cd clont
+cp charts/clont/examples/values-cloud.yaml my-values.yaml   # or values-onprem / values-hybrid
+helm install clont ./charts/clont -n clont --create-namespace -f my-values.yaml
+helm test clont -n clont       # checks the mounted config, no api calls
+```
+
+on eks give the pod an irsa role instead of keys. all chart values are in
+[charts/clont/README.md](charts/clont/README.md), more in
+[running it on kubernetes](#running-it-on-kubernetes).
+
 ## what it watches
 
 ### health
