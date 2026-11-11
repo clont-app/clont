@@ -512,7 +512,7 @@ another account by adding another key.
   `amortize` (default `true` — spread ri / savings-plan fees over their term, so
   an all-upfront commitment isn't a one-day spike), `include_credits` (default
   `true`; `false` gives gross spend, before credits and refunds) and
-  `include_tax` (default `true`). legacy cur (gzip csv) only;
+  `include_tax` (default `true`). cur 2.0 or legacy cur, gzip csv only;
   setup is in [docs/iam.md](docs/iam.md). without it, and without
   `finops.allow_cost_explorer`, there's no spend data.
 - `members` (map, default `null`) — payer only: discover the org's accounts with

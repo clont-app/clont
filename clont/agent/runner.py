@@ -19,6 +19,7 @@ from clont.core.logging import get_logger
 from clont.core.config import BudgetRule
 from clont.core.models import Period
 from clont.events.detectors import (
+    AgentSpendDetector,
     BudgetDetector,
     CapacityForecastDetector,
     DataTransferDetector,
@@ -91,6 +92,9 @@ class Agent:
         k8s_unrequested_pct: float = 50.0,
         k8s_sources: list[KubernetesSource] | None = None,
         transfer_spend_pct: float = 15.0,
+        agent_floor_pct: float = 40.0,
+        agent_min_dollars: float = 1.0,
+        agent_cache_min_share_pct: float = 10.0,
         anomaly_sigma: float = 3.0,
         anomaly_min_points: int = 6,
         free_storage_min_pct: float = 10.0,
@@ -104,9 +108,12 @@ class Agent:
         recommend_interval_seconds: int = DEFAULT_RECOMMEND_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         uplink: ApiUplink | None = None,
+        notices: list[Event] | None = None,
     ) -> None:
         self._providers = providers
         self._channels = channels
+        # setup hints found at startup, sent with the first cycle and never again
+        self._notices = list(notices or [])
         self._uplink = uplink
         # None = CloudWatch metric collection is off, so the metric detectors
         # below never see a point. Health checks are unaffected (they're free).
@@ -129,6 +136,13 @@ class Agent:
             # same keys tag hygiene mandates: what must be tagged is what gets shown back
             ShowbackDetector(self._finops_tuning.required_tags, showback_unattributed_pct),
             DataTransferDetector(transfer_spend_pct, spend_min_dollars),
+            # no agent tag keys -> emits nothing
+            AgentSpendDetector(
+                self._finops_tuning.agent_tag_keys,
+                agent_floor_pct,
+                agent_min_dollars,
+                agent_cache_min_share_pct,
+            ),
         ]
         self._k8s_sources = k8s_sources or []
         # same keys as the tag showback: a namespace label `team` answers the question an
@@ -336,7 +350,8 @@ class Agent:
         of (event, channel) deliveries that went out.
         """
         batch = self._collect_batch(force)
-        events = list(batch.events)
+        events = [*self._notices, *batch.events]
+        self._notices = []
         if self._uplink is not None:
             try:
                 events.extend(self._uplink.ship(batch))

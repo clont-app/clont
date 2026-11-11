@@ -97,6 +97,10 @@ class AWSProvider:
         """This account's Cost and Usage Report location, if one is configured."""
         return self._config.cur
 
+    def use_cur(self, cur) -> None:
+        """Point at a cur export found at startup; a `cur:` block in the yaml wins."""
+        self._config = self._config.model_copy(update={"cur": cur})
+
     def regions(self) -> list[str]:
         """Regions in scope: the configured list, or every enabled region."""
         if self._config.regions:

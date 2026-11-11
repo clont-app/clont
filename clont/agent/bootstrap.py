@@ -9,6 +9,8 @@ from clont.agent.runner import Agent
 from clont.api.uplink import ApiUplink
 from clont.core.config import AWSConfig, Config, MetricsConfig
 from clont.core.logging import get_logger
+from clont.events.models import Event
+from clont.finops.aws import cur_setup
 from clont.finops.base import FinOpsTuning
 from clont.finops.k8s.source import KubernetesSource
 # the module, not the package: `core.config` already imports the onprem config models, so
@@ -25,18 +27,42 @@ from clont.providers.onprem.provider import OnPremProvider
 log = get_logger("clont.bootstrap")
 
 
-def _log_cost_source(alias: str, aws, allow_cost_explorer: bool) -> None:
+def _log_cost_source(alias: str, cur, allow_cost_explorer: bool) -> None:
     """Say once, at startup, where this account's spend will come from."""
-    if aws.cur is not None:
-        log.info("%s: spend from CUR s3://%s/%s", alias, aws.cur.bucket, aws.cur.prefix)
+    if cur is not None:
+        log.info("%s: spend from CUR s3://%s/%s", alias, cur.bucket, cur.prefix)
     elif allow_cost_explorer:
         log.warning("%s: spend from Cost Explorer — billed $0.01 per cycle", alias)
     else:
         log.warning(
-            "%s: no spend data — set aws.%s.cur (free) or finops.allow_cost_explorer (billed)",
+            "%s: no spend data — no cur export found; create one or set aws.%s.cur",
             alias,
             alias,
         )
+
+
+def _find_cur(provider: AWSProvider, config: Config) -> Event | None:
+    """Fill in a cur the yaml left out; a notice when agents run with no bill at all."""
+    try:
+        if provider.cur is None:
+            found = cur_setup.discover(provider)
+            if found is not None:
+                provider.use_cur(found)
+    except Exception as exc:  # noqa: BLE001 - a lookup must not cost the account
+        log.warning("%s: cur lookup failed: %s", provider.alias, exc)
+    _log_cost_source(provider.alias, provider.cur, config.finops.allow_cost_explorer)
+    if provider.cur is not None:
+        return None
+    try:
+        signs = cur_setup.agent_signs(provider, tuple(config.finops.agent_tag_keys))
+    except Exception as exc:  # noqa: BLE001 - same
+        log.warning("%s: agent check failed: %s", provider.alias, exc)
+        return None
+    if not signs:
+        return None  # no agents, nothing to nag about
+    event = cur_setup.notice(provider.alias, signs)
+    log.warning("%s\n%s", event.title, event.message)
+    return event
 
 
 def _build_metrics_policy(cfg: MetricsConfig) -> MetricsPolicy | None:
@@ -124,6 +150,8 @@ def _tuning(config: Config) -> FinOpsTuning:
         ri_sp_min_coverage=config.finops.ri_sp_min_coverage,
         nonprod_tags={k: tuple(v) for k, v in config.finops.nonprod_tags.items()},
         required_tags=tuple(config.finops.required_tags),
+        agent_tag_keys=tuple(config.finops.agent_tag_keys),
+        agent_idle_days=config.finops.agent_idle_days,
         allow_cost_explorer=config.finops.allow_cost_explorer,
         allow_cloudwatch_metrics=config.finops.allow_cloudwatch_metrics,
     )
@@ -211,11 +239,14 @@ def build_agent(config: Config) -> Agent:
     """
     providers: list[Provider] = []
     members: list[tuple[str, AWSConfig]] = []
+    notices: list[Event] = []
     for alias, aws in config.aws.items():
         provider = _authenticate(alias, aws)
         if provider is None:
             continue
-        _log_cost_source(alias, aws, config.finops.allow_cost_explorer)
+        notice = _find_cur(provider, config)
+        if notice is not None:
+            notices.append(notice)
         providers.append(provider)
         members.extend(_member_configs(provider, aws))
 
@@ -274,6 +305,9 @@ def build_agent(config: Config) -> Agent:
         k8s_unrequested_pct=config.finops.k8s_unrequested_pct,
         k8s_sources=k8s_sources,
         transfer_spend_pct=config.finops.transfer_spend_pct,
+        agent_floor_pct=config.finops.agent_floor_pct,
+        agent_min_dollars=config.finops.agent_min_dollars,
+        agent_cache_min_share_pct=config.finops.agent_cache_min_share_pct,
         anomaly_sigma=config.monitoring.anomaly_sigma,
         anomaly_min_points=config.monitoring.anomaly_min_points,
         free_storage_min_pct=config.monitoring.free_storage_min_pct,
@@ -286,4 +320,5 @@ def build_agent(config: Config) -> Agent:
         collect_interval_seconds=config.finops.collect_interval_seconds,
         recommend_interval_seconds=config.finops.recommend_interval_seconds,
         uplink=uplink,
+        notices=notices,
     )

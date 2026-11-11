@@ -7,6 +7,7 @@ rather than listed, and parsed totals are cached across cycles.
 
 from __future__ import annotations
 
+import csv
 import gzip
 import io
 import json
@@ -572,6 +573,103 @@ def test_a_report_with_no_usage_type_column_has_no_transfer_dimension():
     assert {r.dimensions for r in records} == {None}
 
 
+# --- agent spend: one more group dimension ----------------------------------
+
+
+_AGENT_COLUMNS = [*_USAGE_COLUMNS, "resourceTags/user:agent"]
+
+
+def _agent_objects() -> dict[str, bytes]:
+    rows = [
+        _row("2024-01-01", "3.00", "Amazon Bedrock")
+        | {"lineItem/UsageType": "USE1-Claude3.5Sonnet-input-tokens", "resourceTags/user:agent": "rag"},
+        _row("2024-01-01", "1.50", "Amazon Bedrock")
+        | {"lineItem/UsageType": "USE1-Claude3.5Sonnet-output-tokens", "resourceTags/user:agent": "rag"},
+        # on-demand invokes with no inference profile carry no tag, still agent spend
+        _row("2024-01-01", "0.25", "Amazon Bedrock")
+        | {"lineItem/UsageType": "USE1-Claude3.5Sonnet-cache-read-input-token-count"},
+        _row("2024-01-01", "5.76", "Amazon OpenSearch Service")
+        | {"lineItem/UsageType": "USE1-OCU-Hours", "resourceTags/user:agent": "rag"},
+        # someone else's lambda: shared service, no agent tag
+        _row("2024-01-01", "2.00", "AWS Lambda")
+        | {"lineItem/UsageType": "USE1-Lambda-GB-Second"},
+        _row("2024-01-01", "0.40", "AWS Lambda")
+        | {"lineItem/UsageType": "USE1-Lambda-GB-Second", "resourceTags/user:agent": "rag"},
+        # nat bytes stay transfer, never agent
+        _row("2024-01-01", "1.00", "Amazon Elastic Compute Cloud")
+        | {"lineItem/UsageType": "USE1-NatGateway-Bytes", "resourceTags/user:agent": "rag"},
+    ]
+    return _tagged_objects(_AGENT_COLUMNS, rows)
+
+
+def _agent_tuning(*keys: str) -> FinOpsTuning:
+    return FinOpsTuning(agent_tag_keys=keys)
+
+
+def _by(records) -> dict[tuple[str, str, str], Decimal]:
+    out: dict[tuple[str, str, str], Decimal] = {}
+    for r in records:
+        dims = r.dimensions or {}
+        key = (r.service, dims.get("agent", ""), (r.tags or {}).get("agent", ""))
+        out[key] = out.get(key, Decimal(0)) + r.cost.amount
+    return out
+
+
+def test_agent_rows_carry_their_bucket_as_a_dimension():
+    records = _collect(_FakeProvider(_FakeS3(_agent_objects())), tuning=_agent_tuning("agent"))
+
+    assert _by(records) == {
+        ("Amazon Bedrock", "tokens-in", "rag"): Decimal("3.00"),
+        ("Amazon Bedrock", "tokens-out", "rag"): Decimal("1.50"),
+        ("Amazon Bedrock", "cache-read", ""): Decimal("0.25"),
+        ("Amazon OpenSearch Service", "floor", "rag"): Decimal("5.76"),
+        ("AWS Lambda", "", ""): Decimal("2.00"),
+        ("AWS Lambda", "plumbing", "rag"): Decimal("0.40"),
+        ("Amazon Elastic Compute Cloud", "", "rag"): Decimal("1.00"),
+    }
+    nat = next(r for r in records if r.service == "Amazon Elastic Compute Cloud")
+    assert nat.dimensions == {"transfer": "nat"}
+
+
+def test_the_agent_split_leaves_every_total_unchanged():
+    off = _collect(_FakeProvider(_FakeS3(_agent_objects())))
+    cur.clear_cache()
+    on = _collect(_FakeProvider(_FakeS3(_agent_objects())), tuning=_agent_tuning("agent"))
+
+    def per_service(records):
+        out: dict[str, Decimal] = {}
+        for r in records:
+            out[r.service] = out.get(r.service, Decimal(0)) + r.cost.amount
+        return out
+
+    assert per_service(on) == per_service(off)
+    assert sum(r.cost.amount for r in on) == Decimal("13.91")
+
+
+def test_no_agent_tag_keys_means_no_agent_dimension():
+    records = _collect(_FakeProvider(_FakeS3(_agent_objects())))
+
+    assert not any("agent" in (r.dimensions or {}) for r in records)
+    assert {r.tags for r in records} == {None}
+    # same records the report gave before the feature existed
+    assert [(r.service, r.cost.amount, r.dimensions) for r in records] == [
+        ("AWS Lambda", Decimal("2.40"), None),
+        ("Amazon Bedrock", Decimal("4.75"), None),
+        ("Amazon Elastic Compute Cloud", Decimal("1.00"), {"transfer": "nat"}),
+        ("Amazon OpenSearch Service", Decimal("5.76"), None),
+    ]
+
+
+def test_changing_the_agent_keys_bypasses_the_cache():
+    provider = _FakeProvider(_FakeS3(_agent_objects()))
+
+    first = _collect(provider)
+    second = _collect(provider, tuning=_agent_tuning("agent"))
+
+    assert not any("agent" in (r.dimensions or {}) for r in first)
+    assert any("agent" in (r.dimensions or {}) for r in second)
+
+
 # --- amortization: commitments must not land on one day ---------------------
 
 
@@ -789,3 +887,84 @@ def test_a_discount_stays_on_the_service_it_discounts():
     records = _collect(_FakeProvider(_FakeS3(objects)))
 
     assert _amounts(records)[(_EC2, date(2024, 1, 2))] == Decimal("2.70")
+
+
+_CUR2_COLUMNS = [
+    "line_item_usage_start_date",
+    "line_item_unblended_cost",
+    "line_item_currency_code",
+    "line_item_line_item_type",
+    "line_item_usage_account_id",
+    "line_item_product_code",
+    "product",
+    "resource_tags",
+]
+_CUR2_META = "reports/clont-cur/metadata/BILLING_PERIOD=2024-01/clont-cur-Manifest.json"
+_CUR2_DATA = "reports/clont-cur/data/BILLING_PERIOD=2024-01/clont-cur-00001.csv.gz"
+
+
+def _cur2_row(cost: str, code: str, name: str | None, tags: dict | None = None) -> dict:
+    return {
+        "line_item_usage_start_date": "2024-01-01T00:00:00.000Z",
+        "line_item_unblended_cost": cost,
+        "line_item_currency_code": "USD",
+        "line_item_line_item_type": "Usage",
+        "line_item_usage_account_id": "111",
+        "line_item_product_code": code,
+        "product": json.dumps({"product_name": name} if name else {}),
+        "resource_tags": json.dumps(tags or {}),
+    }
+
+
+def _cur2_objects(rows: list[dict], *, data: list[str] | None = None) -> dict[str, bytes]:
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=_CUR2_COLUMNS)  # json cells need quoting
+    writer.writeheader()
+    writer.writerows(rows)
+    files = data or [f"s3://{BUCKET}/{_CUR2_DATA}"]
+    return {
+        _CUR2_META: json.dumps({"dataFiles": files, "columns": []}).encode(),
+        _CUR2_DATA: gzip.compress(out.getvalue().encode()),
+    }
+
+
+def test_cur2_export_is_read_from_its_metadata_folder():
+    rows = [
+        _cur2_row("1.25", "AmazonS3", "Amazon Simple Storage Service"),
+        _cur2_row("0.75", "AmazonS3", "Amazon Simple Storage Service"),
+    ]
+    s3 = _FakeS3(_cur2_objects(rows))
+
+    records = _collect(_FakeProvider(s3))
+
+    assert [(r.service, r.cost.amount) for r in records] == [
+        ("Amazon Simple Storage Service", Decimal("2.00"))
+    ]
+    assert _CUR2_DATA in s3.reads
+
+
+def test_cur2_without_a_product_name_falls_back_to_the_product_code():
+    records = _collect(_FakeProvider(_FakeS3(_cur2_objects([_cur2_row("1", "AWSGlue", None)]))))
+
+    assert [r.service for r in records] == ["AWSGlue"]
+
+
+def test_cur2_tags_come_out_of_the_resource_tags_map():
+    rows = [
+        _cur2_row("3", "AmazonEC2", "Amazon Elastic Compute Cloud", {"user_cost_center": "cc-1"}),
+        _cur2_row("1", "AmazonEC2", "Amazon Elastic Compute Cloud"),
+    ]
+
+    records = _collect(_FakeProvider(_FakeS3(_cur2_objects(rows))), tuning=_tuning("CostCenter"))
+
+    assert sorted((r.cost.amount, r.tags["CostCenter"]) for r in records) == [
+        (Decimal(1), ""),
+        (Decimal(3), "cc-1"),
+    ]
+
+
+def test_cur2_parquet_export_fails_loudly():
+    data = [f"s3://{BUCKET}/reports/clont-cur/data/BILLING_PERIOD=2024-01/x.snappy.parquet"]
+
+    with pytest.raises(RuntimeError, match="gzip csv only"):
+        _collect(_FakeProvider(_FakeS3(_cur2_objects([], data=data))))

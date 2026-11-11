@@ -239,9 +239,12 @@ grant.)
 ## spend: the cost and usage report
 
 spend comes from the cur your account already writes to s3, so a cycle costs a
-couple of s3 gets instead of a billed cost explorer request. create a **legacy
-cur** (gzip + csv, hourly or daily) delivered to a bucket the role can read, then
-point clont at it:
+couple of s3 gets instead of a billed cost explorer request. create a **cur 2.0**
+export (standard data export, gzip + csv, daily, overwrite mode) delivered to a
+bucket the role can read. clont finds it by itself at startup
+(`bcm-data-exports`), so the `cur:` block is optional — set it only to override
+what was found. a legacy cur is not looked up, but still reads if you name it in
+the `cur:` block:
 
 ```yaml
 aws:
@@ -266,8 +269,36 @@ billing period and never lists the bucket, so no `s3:ListBucket` needed:
 }
 ```
 
+and let it look the export up, plus spot agents when there is no export yet.
+all free, all read-only, none take a resource:
+
+```json
+{
+  "Sid": "ClontCURLookup",
+  "Effect": "Allow",
+  "Action": [
+    "bcm-data-exports:ListExports",
+    "bcm-data-exports:GetExport",
+    "tag:GetResources",
+    "bedrock:ListAgents",
+    "aoss:ListCollections"
+  ],
+  "Resource": "*"
+}
+```
+
+the last three only matter without a cur: if clont sees an agent tag
+(`finops.agent_tag_keys`), a bedrock agent or an opensearch serverless
+collection, it logs and sends one notice per account on the first cycle with
+the three setup steps. no agents, no notice. without the lookup grants clont
+just says in the log which one is missing.
+
 stuff that will bite you:
 
+- **the bucket grant can't be automated.** clont finds the export but can only
+  read it once the role has `s3:GetObject` on that folder.
+- **parquet exports are skipped.** clont reads csv + gzip only; with only a
+  parquet export it logs which one and reads nothing.
 - **service names aren't spelled like cost explorer.** clont reports the cur's
   `product/ProductName` (`Amazon Elastic Compute Cloud`, not
   `Amazon Elastic Compute Cloud - Compute`), so budgets keyed by service need the

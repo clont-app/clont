@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from clont.agent.bootstrap import build_agent
 from clont.core.config import Config
@@ -101,6 +102,26 @@ def test_tuning_flows_through_bootstrap_into_agent(tmp_path, monkeypatch):
 
     forecast = next(d for d in metric_detectors if hasattr(d, "_forecast_days"))
     assert forecast._forecast_days == 7
+
+
+def test_agent_spend_defaults_leave_the_feature_off(tmp_path, monkeypatch):
+    config = _load(tmp_path, monkeypatch, "interval_seconds: 300\n")
+    assert config.finops.agent_tag_keys == []
+    assert config.finops.agent_floor_pct == 40.0
+    assert config.finops.agent_min_dollars == 1.0
+    assert config.finops.agent_idle_days == 14
+    assert config.finops.agent_cache_min_share_pct == 10.0
+    assert build_agent(config)._finops_tuning.agent_tag_keys == ()
+
+
+def test_agent_tag_keys_flow_through_bootstrap(tmp_path, monkeypatch):
+    config = _load(tmp_path, monkeypatch, "finops:\n  agent_tag_keys: [agent, team]\n")
+    assert build_agent(config)._finops_tuning.agent_tag_keys == ("agent", "team")
+
+
+def test_agent_floor_pct_must_be_a_share(tmp_path, monkeypatch):
+    with pytest.raises(ValidationError):
+        _load(tmp_path, monkeypatch, "finops:\n  agent_floor_pct: 140\n")
 
 
 def test_unknown_finops_key_is_rejected(tmp_path, monkeypatch):
