@@ -8,6 +8,40 @@ clusters, looks around every few minutes, and pings you on slack / discord /
 telegram when something is wrong or costing you more than it should. every call
 it makes is a `describe` / `get` / `list` — it never changes anything.
 
+one scan of a sample account (`clont run --summary report.txt`):
+
+```
+====================================================================
+ CLOUD WASTE REPORT
+====================================================================
+
+  you're wasting
+    $494.34 / month
+    $5,932.08 / year
+
+  15 finding(s) across 2 account(s): prod, staging
+  scanned 2026-11-11 09:30 UTC  |  clont 0.3.2  |  6.412s
+
+--------------------------------------------------------------------
+ WHERE THE MONEY GOES
+--------------------------------------------------------------------
+
+  $246.40/mo   x4    unattached-ebs (ebs)
+                 - vol-0e4f1a2b3c4d5e6f7 [eu-west-1]  $176.00/mo  Unattached gp3 (2000 GiB) — delete
+                 - vol-03a9b8c7d6e5f4a3b [eu-west-1]  $44.00/mo  Unattached gp3 (500 GiB) — delete
+                 - vol-0b1c2d3e4f5a6b7c8 [eu-west-1]  $17.60/mo  Unattached gp3 (200 GiB) — delete
+                 ... and 1 more
+
+  $105.12/mo   x3    idle-nat (ec2)
+                 - nat-0a1b2c3d4e5f60718 [eu-west-1]  $35.04/mo  NAT gateway idle 14d (≈0 bytes processed) — delete if unused
+                 - nat-07c9e2f1a3b4d5e6f [eu-west-1]  $35.04/mo  NAT gateway idle 14d (≈0 bytes processed) — delete if unused
+                 - nat-0f3e8d2c1b0a99887 [us-east-1]  $35.04/mo  NAT gateway idle 14d (≈0 bytes processed) — delete if unused
+
+  ... 4 more kinds, then top spend and health
+```
+
+the numbers are made up, the format is the real one.
+
 for the bigger picture (free local tier vs paid hosted one, how the pieces fit)
 see [docs/architecture.md](docs/architecture.md).
 
@@ -425,31 +459,7 @@ told apart from "the role couldn't read anything".
 ### the shareable report
 
 `.txt` gives you something meant for a person who wasn't there. big number first,
-evidence under it:
-
-```
-====================================================================
- CLOUD WASTE REPORT
-====================================================================
-
-  you're wasting
-    $1,229.75 / month
-    $14,757.00 / year
-
-  12 finding(s) across 2 account(s): prod, staging
-  scanned 2026-08-20 11:04 UTC  |  clont 0.2.2  |  4.216s
-
---------------------------------------------------------------------
- WHERE THE MONEY GOES
---------------------------------------------------------------------
-
-  $412.80/mo   x1    idle_rds (rds)
-                 - db-analytics-old [eu-west-1]  $412.80/mo  0 connections for 21d
-
-  $388.80/mo   x4    idle_nat (ec2)
-                 - nat-0a1b2c3d [eu-west-1]  $97.20/mo  no traffic for 30d
-                 ... and 3 more
-```
+evidence under it — the sample at the top of this file is exactly this output.
 
 findings are grouped by kind and sorted by money, biggest first. then top spend,
 health, and any collector errors.
