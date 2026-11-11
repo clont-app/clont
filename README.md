@@ -1,5 +1,8 @@
 # clont
 
+[![ci](https://github.com/clont-app/clont/actions/workflows/ci.yml/badge.svg)](https://github.com/clont-app/clont/actions/workflows/ci.yml)
+[![pypi](https://img.shields.io/pypi/v/clont)](https://pypi.org/project/clont/)
+
 a long-running, **read-only** agent that watches your cloud for broken things and
 wasted money.
 
