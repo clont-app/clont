@@ -157,7 +157,7 @@ CLONT_CONFIG=./clont.yaml clont run --once --summary -
 one cycle, a summary to the screen, then it exits:
 
 ```
-clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.2)
+clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.3)
 accounts:   dc1
 duration:   22.7s
 
@@ -189,7 +189,7 @@ read it in this order:
 docker run -d --name clont --restart unless-stopped \
   -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
   -e DC1_VSPHERE_PASSWORD='...' \
-  ghcr.io/clont-app/clont:0.3.2
+  ghcr.io/clont-app/clont:0.3.3
 docker logs -f clont
 ```
 

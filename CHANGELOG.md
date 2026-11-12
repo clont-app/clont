@@ -1,5 +1,22 @@
 # changelog
 
+## 0.3.3
+
+### agent spend
+
+- per-agent spend report off cur — tokens, cache and fixed floors per agent, named by
+  `finops.agent_tag_keys`; empty list = off
+- agent spend detector — one event per agent and account, WARN when fixed floors eat
+  `agent_floor_pct` of the bill, plus a finding for uncached input tokens
+- idle agent stack — a floor that kept billing with no token traffic for
+  `agent_idle_days`
+- tested on real cur 2.0 rows from a bedrock nova micro run
+
+### cur
+
+- reads cur 2.0 exports
+- finds the cur export by itself, no bucket/prefix in the config needed
+
 ## 0.3.2
 
 ### helm chart

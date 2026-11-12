@@ -112,7 +112,7 @@ CLONT_CONFIG=./clont.yaml clont run --once --summary -
 one cycle, a summary to the screen, then it exits. you should see something like:
 
 ```
-clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.2)
+clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.3)
 accounts:   prod
 duration:   38.2s
 
@@ -178,7 +178,7 @@ pick one.
 docker run -d --name clont --restart unless-stopped \
   -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
   -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
-  ghcr.io/clont-app/clont:0.3.2
+  ghcr.io/clont-app/clont:0.3.3
 docker logs -f clont
 ```
 
