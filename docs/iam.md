@@ -16,8 +16,11 @@ runtime identity  ──sts:AssumeRole──►  clont-readonly role (per accoun
 
 ## the permissions policy
 
-attach this to the `clont-readonly` role. none of these actions support
-resource-level scoping, so `Resource` is `*`. they're all read-only.
+attach this to the `clont-readonly` role — it is the whole thing, paste it as
+is. the only line to edit is the bucket in `ClontCUR`: put your cur export's
+bucket, prefix and export name there (see
+[spend](#spend-the-cost-and-usage-report)). everything else is read-only and has
+no resource-level scoping, so `Resource` is `*`.
 
 ```json
 {
@@ -69,7 +72,29 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
         "s3:GetLifecycleConfiguration",
         "s3:GetBucketVersioning",
         "s3:ListBucketMultipartUploads",
-        "s3:ListMultipartUploadParts"
+        "s3:ListMultipartUploadParts",
+        "s3:GetBucketTagging",
+        "elasticloadbalancing:DescribeTags",
+        "lambda:ListFunctions",
+        "lambda:ListTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ClontCUR",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-billing-bucket/reports/clont-cur/*"
+    },
+    {
+      "Sid": "ClontCURLookup",
+      "Effect": "Allow",
+      "Action": [
+        "bcm-data-exports:ListExports",
+        "bcm-data-exports:GetExport",
+        "tag:GetResources",
+        "bedrock:ListAgents",
+        "aoss:ListCollections"
       ],
       "Resource": "*"
     }
@@ -77,7 +102,11 @@ resource-level scoping, so `Resource` is `*`. they're all read-only.
 }
 ```
 
-all of that is free. the list grows as you turn on more collectors.
+all of that is free. without `ClontCUR` clont sees resources but no spend.
+
+on a payer that fans out to member accounts, add `organizations:ListAccounts`
+to `ClontReadOnly` there (see [payer fan-out](#several-accounts-the-payer-fan-out)).
+the two billed grants below stay out unless you turn them on.
 
 > upgrading? `ec2:DescribeVpcEndpoints` pairs with `ec2:DescribeNatGateways` to
 > find nat processing an s3/dynamodb gateway endpoint would carry for free, and
@@ -256,6 +285,9 @@ aws:
       prefix: reports             # the s3 prefix you gave the report
       region: us-east-1           # bucket region
 ```
+
+both grants below are already in [the policy above](#the-permissions-policy) —
+they're repeated here to explain them.
 
 give the role read on that one report. clont works out the manifest key from the
 billing period and never lists the bucket, so no `s3:ListBucket` needed:

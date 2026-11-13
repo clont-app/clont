@@ -62,8 +62,8 @@ billing → data exports → create → standard data export (cur 2.0). tick
 **include resource ids**, pick **csv + gzip** (not parquet), "overwrite existing
 report", daily.
 
-then give clont's role two things —
-[iam.md](iam.md#spend-the-cost-and-usage-report) has both grants:
+the policy from step 2 already has both grants clont needs here — just put your
+bucket into `ClontCUR` ([iam.md](iam.md#spend-the-cost-and-usage-report)):
 
 - `s3:GetObject` on the export folder in that bucket
 - `bcm-data-exports:ListExports` + `GetExport`, so clont finds the export by
