@@ -3,8 +3,8 @@ name: clont
 description: Read-only multi-cloud monitoring & FinOps agent
 type: application
 # chart version tracks the agent release; appVersion is the image tag
-version: 0.3.2
-appVersion: "0.3.2"
+version: 0.3.4
+appVersion: "0.3.4"
 home: https://github.com/clont-app/clont
 sources:
   - https://github.com/clont-app/clont

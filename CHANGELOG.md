@@ -1,5 +1,18 @@
 # changelog
 
+## 0.3.4
+
+### docs
+
+- "before you install" steps in the readme: cur bucket and `clont-readonly` role for
+  aws, vcenter user and rate card for on-prem
+- `docs/setup-cloud.md` reordered: bucket and export first, then the role
+
+### helm chart
+
+- chart and appVersion move to 0.3.4, so the default image tag exists in ghcr
+  (0.3.2 had no image)
+
 ## 0.3.3
 
 ### agent spend

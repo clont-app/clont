@@ -10,9 +10,9 @@ minutes, most of it waiting for aws.
 ## before you start
 
 - an aws account, and permission to create an iam role in it (or someone who can
-  do step 2 for you)
+  do steps 1 and 2 for you)
 - somewhere to run a small container later: a linux box with docker, or a
-  kubernetes cluster. step 1 only needs python 3.11+ on your laptop.
+  kubernetes cluster. step 3 only needs python 3.11+ on your laptop.
 - a slack / discord / telegram webhook if you want pings, step 6
 
 ## words used below
@@ -25,7 +25,69 @@ minutes, most of it waiting for aws.
 | irsa | on eks, a way to give a pod an iam role so you don't handle access keys. |
 | alias | the short name you give an account in the config (`prod`, `dev`). it shows up in every message. |
 
-## 1. install it on your laptop first
+## the order, in short
+
+do the aws part first, install second. clont can't see anything until the role
+exists, and spend stays empty until aws writes the first report — which takes up
+to a day, so start that clock early.
+
+1. a bucket and a cost export in it — only if you want spend (step 1)
+2. a read-only role in each account (step 2)
+3. then `pip install`, docker or helm (step 3 and step 7)
+
+## 1. make the bucket and the cost export
+
+skip this if you only want health and idle checks — clont runs fine without it,
+just with no spend, budgets or forecast.
+
+in the payer (or single) account: billing → data exports → create → standard
+data export (cur 2.0).
+
+1. **export name** — e.g. `clont-cur`.
+2. tick **include resource ids**, pick **csv + gzip** (not parquet), "overwrite
+   existing report", daily.
+3. **s3 bucket** — choose "create a bucket", e.g. `my-billing-bucket`. aws adds
+   the bucket policy that lets it write there by itself. an existing bucket works
+   too.
+4. **s3 path prefix** — e.g. `reports`.
+5. create.
+
+write down three things, the role needs them in step 2: bucket, prefix, export
+name. the files land under `s3://<bucket>/<prefix>/<export-name>/`.
+
+two things to know:
+
+- aws takes **up to 24 hours** to write the first report. health checks work
+  immediately; spend, spikes, forecast and budgets stay empty until the file
+  exists.
+- for per-team showback you also have to activate your tag keys as **cost
+  allocation tags** in the billing console. until you do, the cur has no column
+  for them and every dollar reads as unattributed.
+
+## 2. make a read-only role in each account
+
+one role per aws account you want watched. in the console, iam → roles → create
+role:
+
+1. trusted entity — the identity clont will run as. on eks that's the irsa role
+   of its service account; on a vm, the user whose access keys it uses. the exact
+   json is in [iam.md](iam.md#trust-policy).
+2. permissions — paste the policy from
+   [iam.md](iam.md#the-permissions-policy). it is read-only. the one line to edit
+   is the `Resource` in `ClontCUR`, built from step 1:
+   `arn:aws:s3:::<bucket>/<prefix>/<export-name>/*`. no export? leave the
+   example line, it does no harm.
+3. name it `clont-readonly` and copy the role arn
+   (`arn:aws:iam::111111111111:role/clont-readonly`) — you need it in step 4.
+
+have an aws organization? make the role once per member account with the **same
+name**, point clont at the payer and let it find the rest:
+[iam.md](iam.md#several-accounts-the-payer-fan-out).
+
+clont finds the export by itself through `bcm-data-exports`, so nothing from
+step 1 goes into the yaml.
+
+## 3. install it on your laptop first
 
 you will run it on a server later. installing locally first means you can check
 your aws access before any deploy.
@@ -39,48 +101,6 @@ python3 -m venv ~/clont-venv
 the rest of this page writes `clont` — use `~/clont-venv/bin/clont`, or activate
 the venv (`source ~/clont-venv/bin/activate`).
 
-## 2. make a read-only role in each account
-
-one role per aws account you want watched. in the console, iam → roles → create
-role:
-
-1. trusted entity — the identity clont will run as. on eks that's the irsa role
-   of its service account; on a vm, the user whose access keys it uses. the exact
-   json is in [iam.md](iam.md#trust-policy).
-2. permissions — paste the policy from
-   [iam.md](iam.md#the-permissions-policy). it is `describe`/`list` only.
-3. name it `clont-readonly` and copy the role arn
-   (`arn:aws:iam::111111111111:role/clont-readonly`) — you need it in step 4.
-
-have an aws organization? make the role once per member account with the **same
-name**, point clont at the payer and let it find the rest:
-[iam.md](iam.md#several-accounts-the-payer-fan-out).
-
-## 3. turn on the cost and usage report
-
-billing → data exports → create → standard data export (cur 2.0). tick
-**include resource ids**, pick **csv + gzip** (not parquet), "overwrite existing
-report", daily.
-
-the policy from step 2 already has both grants clont needs here — just put your
-bucket into `ClontCUR` ([iam.md](iam.md#spend-the-cost-and-usage-report)):
-
-- `s3:GetObject` on the export folder in that bucket
-- `bcm-data-exports:ListExports` + `GetExport`, so clont finds the export by
-  itself. nothing to copy into the yaml.
-
-skip this and clont still runs. if it sees agents (bedrock, opensearch
-serverless, your agent tags) it sends one notice with these steps.
-
-two things to know:
-
-- aws takes **up to 24 hours** to write the first report. health checks work
-  immediately; spend, spikes, forecast and budgets stay empty until the file
-  exists.
-- for per-team showback you also have to activate your tag keys as **cost
-  allocation tags** in the billing console. until you do, the cur has no column
-  for them and every dollar reads as unattributed.
-
 ## 4. write clont.yaml
 
 one file, and it is the whole configuration — there are no env vars that
@@ -92,7 +112,7 @@ aws:
   prod:                        # <- your alias, anything short
     role_arn: arn:aws:iam::111111111111:role/clont-readonly   # <- step 2
     regions: [us-east-1, eu-west-1]                           # <- yours
-    # cur: found by itself (step 3); a cur: block here overrides it
+    # cur: found by itself (step 1); a cur: block here overrides it
 channels:
   log:
     min_severity: info         # print everything to stdout for now
@@ -112,7 +132,7 @@ CLONT_CONFIG=./clont.yaml clont run --once --summary -
 one cycle, a summary to the screen, then it exits. you should see something like:
 
 ```
-clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.3)
+clont scan summary (2026-11-09T10:21:04+00:00, clont 0.3.4)
 accounts:   prod
 duration:   38.2s
 
@@ -133,7 +153,7 @@ read it in this order:
    it names each collector that failed and why — a missing grant shows up here,
    not as an empty report.
 3. **`costs=`** — a number above 0 means the cur was found and read. `costs=0` on
-   a fresh export is normal for the first day (see step 3).
+   a fresh export is normal for the first day (see step 1).
 4. `health=` and `recommendations=` — what it checked and what it wants to tell
    you.
 
@@ -178,7 +198,7 @@ pick one.
 docker run -d --name clont --restart unless-stopped \
   -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
   -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
-  ghcr.io/clont-app/clont:0.3.3
+  ghcr.io/clont-app/clont:0.3.4
 docker logs -f clont
 ```
 

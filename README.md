@@ -23,7 +23,7 @@ one scan of a sample account (`clont run --summary report.txt`):
     $5,932.08 / year
 
   15 finding(s) across 2 account(s): prod, staging
-  scanned 2026-11-11 09:30 UTC  |  clont 0.3.3  |  6.412s
+  scanned 2026-11-11 09:30 UTC  |  clont 0.3.4  |  6.412s
 
 --------------------------------------------------------------------
  WHERE THE MONEY GOES
@@ -50,10 +50,40 @@ see [docs/architecture.md](docs/architecture.md).
 
 ## install
 
-three ways, simplest first. all of them read one file, `clont.yaml` — the
-minimal one is in [docs/setup-cloud.md](docs/setup-cloud.md#4-write-clontyaml)
-(aws) or [docs/setup-onprem.md](docs/setup-onprem.md) (own iron). the iam role it
-needs is in [docs/iam.md](docs/iam.md).
+### before you install: aws first
+
+clont sees nothing until aws lets it in, so do these two in the aws console
+before `pip install` or `helm`:
+
+1. **a bucket and a cost export** — billing → data exports → cur 2.0, csv + gzip,
+   "create a bucket" right there. only needed for spend; aws takes up to 24h to
+   write the first report, so do it first.
+2. **a read-only role** `clont-readonly` in each account, with
+   [the policy](docs/iam.md#the-permissions-policy) (put your bucket into
+   `ClontCUR`) and [a trust policy](docs/iam.md#trust-policy) for the identity
+   clont runs as.
+
+step by step: [docs/setup-cloud.md](docs/setup-cloud.md).
+
+### before you install: own iron (vmware on-prem)
+
+no bucket, no aws role. instead:
+
+1. **a read-only vcenter user**, e.g. `clont-ro@vsphere.local` — built-in
+   **Read-Only** role at the vcenter root, "propagate to children" ticked.
+2. **a rate card** — what your iron costs a month (servers, power, rack,
+   licenses). there is no invoice on-prem, so this is the one thing you write
+   yourself; estimates are fine.
+3. **network** — the box or pod running clont must reach vcenter on 443.
+4. optional, kubernetes on that iron: a kubeconfig or in-cluster access with
+   [get/list on six resources](docs/iam.md#kubernetes-get--list-nothing-else)
+   (the helm chart creates that rbac for you).
+
+install with `pip install 'clont[vsphere,k8s]'` — plain `clont` is aws-only.
+step by step: [docs/setup-onprem.md](docs/setup-onprem.md).
+
+three ways to install, simplest first. all of them read one file, `clont.yaml` —
+the minimal one is in [docs/setup-cloud.md](docs/setup-cloud.md#4-write-clontyaml).
 
 ### pip
 
@@ -82,7 +112,7 @@ for any linux box. the image reads `/etc/clont/clont.yaml`:
 docker run -d --name clont --restart unless-stopped \
   -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
   -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
-  ghcr.io/clont-app/clont:0.3.3
+  ghcr.io/clont-app/clont:0.3.4
 docker logs -f clont
 ```
 
