@@ -87,6 +87,12 @@ no resource-level scoping, so `Resource` is `*`.
       "Resource": "arn:aws:s3:::my-billing-bucket/reports/clont-cur/*"
     },
     {
+      "Sid": "ClontCURList",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::my-billing-bucket"
+    },
+    {
       "Sid": "ClontCURLookup",
       "Effect": "Allow",
       "Action": [
@@ -289,8 +295,8 @@ aws:
 both grants below are already in [the policy above](#the-permissions-policy) —
 they're repeated here to explain them.
 
-give the role read on that one report. clont works out the manifest key from the
-billing period and never lists the bucket, so no `s3:ListBucket` needed:
+give the role read on that one report, plus `s3:ListBucket` on the bucket
+itself:
 
 ```json
 {
@@ -298,8 +304,20 @@ billing period and never lists the bucket, so no `s3:ListBucket` needed:
   "Effect": "Allow",
   "Action": "s3:GetObject",
   "Resource": "arn:aws:s3:::my-billing-bucket/reports/clont-cur/*"
+},
+{
+  "Sid": "ClontCURList",
+  "Effect": "Allow",
+  "Action": "s3:ListBucket",
+  "Resource": "arn:aws:s3:::my-billing-bucket"
 }
 ```
+
+clont never lists the bucket — it works out the manifest key from the billing
+period. the list grant is there for the error: without it s3 answers a missing
+key with `AccessDenied` instead of `NoSuchKey`, so "this month's report isn't
+there yet" reads as a broken grant and the whole spend collector fails. note the
+resource is the bucket arn, no `/*` — `ListBucket` on objects matches nothing.
 
 and let it look the export up, plus spot agents when there is no export yet.
 all free, all read-only, none take a resource:
@@ -329,6 +347,11 @@ stuff that will bite you:
 
 - **the bucket grant can't be automated.** clont finds the export but can only
   read it once the role has `s3:GetObject` on that folder.
+- **`not authorized to perform: s3:ListBucket` on a `GetObject` call** means the
+  file clont asked for isn't there, not that it wanted to list. add
+  `ClontCURList` and the real reason shows up: usually `prefix`, `report_name`
+  or `region` in the `cur:` block don't match s3, or the first report hasn't
+  landed yet (up to 24h).
 - **parquet exports are skipped.** clont reads csv + gzip only; with only a
   parquet export it logs which one and reads nothing.
 - **service names aren't spelled like cost explorer.** clont reports the cur's
@@ -418,12 +441,54 @@ your clont runtime role/user arn.
 }
 ```
 
-- on **eks**, the runtime role is the pod's irsa service-account role.
+- on **eks**, the runtime role is the pod's irsa service-account role — and
+  that role needs its own trust policy, see below.
 - the `sts:ExternalId` condition is optional — add it only if you set
   `external_id` for that account in `clont.yaml`, and the two must match.
 - for **several accounts**, repeat this in each one. clont assumes every
   configured role on its own; an account it can't get into is logged and skipped,
   not fatal.
+
+### irsa: the pod's own role
+
+on eks the pod doesn't start with credentials — it swaps its service-account
+token for the role in the `eks.amazonaws.com/role-arn` annotation via
+`sts:AssumeRoleWithWebIdentity`. that role has to trust the cluster's oidc
+provider, not an account or a role. a plain `"AWS": "arn:aws:iam::…:root"` with
+`sts:AssumeRole` fails with `Not authorized to perform
+sts:AssumeRoleWithWebIdentity` before clont gets to any account.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<EKS_ACCOUNT>:oidc-provider/oidc.eks.<REGION>.amazonaws.com/id/<OIDC_ID>"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.<REGION>.amazonaws.com/id/<OIDC_ID>:sub": "system:serviceaccount:<NAMESPACE>:<SA_NAME>",
+          "oidc.eks.<REGION>.amazonaws.com/id/<OIDC_ID>:aud": "sts.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+```
+
+- the issuer: `aws eks describe-cluster --name <cluster> --query
+  cluster.identity.oidc.issuer --output text`. it must also exist under iam →
+  identity providers (`eksctl utils associate-iam-oidc-provider --cluster
+  <cluster> --approve` if not).
+- `<SA_NAME>` is the chart's service account: the release name (`clont`), or
+  `<release>-clont` for any other release name, or `serviceAccount.name` if you
+  set it. check with `kubectl get sa -n <namespace>`.
+- the same role can be both the irsa role and the `role_arn` in `clont.yaml`.
+  then it also needs the `sts:AssumeRole` statement from above, so clont can
+  assume it from itself.
 
 ## checking access
 

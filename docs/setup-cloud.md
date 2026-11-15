@@ -40,6 +40,9 @@ to a day, so start that clock early.
 skip this if you only want health and idle checks — clont runs fine without it,
 just with no spend, budgets or forecast.
 
+clont reads the export but never creates it — the role is read-only on purpose.
+so this is a one-time click in the console.
+
 in the payer (or single) account: billing → data exports → create → standard
 data export (cur 2.0).
 
@@ -48,7 +51,8 @@ data export (cur 2.0).
    existing report", daily.
 3. **s3 bucket** — choose "create a bucket", e.g. `my-billing-bucket`. aws adds
    the bucket policy that lets it write there by itself. an existing bucket works
-   too.
+   too: let the console update its bucket policy when it asks, don't write it by
+   hand.
 4. **s3 path prefix** — e.g. `reports`.
 5. create.
 
@@ -60,6 +64,9 @@ two things to know:
 - aws takes **up to 24 hours** to write the first report. health checks work
   immediately; spend, spikes, forecast and budgets stay empty until the file
   exists.
+- the `<prefix>/` folder doesn't exist before that. s3 has no real folders, it
+  shows up with the first file — an empty bucket just means nothing was
+  delivered yet, nobody has to create it.
 - for per-team showback you also have to activate your tag keys as **cost
   allocation tags** in the billing console. until you do, the cur has no column
   for them and every dollar reads as unattributed.
@@ -75,8 +82,8 @@ role:
 2. permissions — paste the policy from
    [iam.md](iam.md#the-permissions-policy). it is read-only. the one line to edit
    is the `Resource` in `ClontCUR`, built from step 1:
-   `arn:aws:s3:::<bucket>/<prefix>/<export-name>/*`. no export? leave the
-   example line, it does no harm.
+   `arn:aws:s3:::<bucket>/<prefix>/<export-name>/*`, and the bucket name in
+   `ClontCURList`. no export? leave the example lines, they do no harm.
 3. name it `clont-readonly` and copy the role arn
    (`arn:aws:iam::111111111111:role/clont-readonly`) — you need it in step 4.
 
@@ -251,6 +258,11 @@ no rush, the defaults work. in rough order of value:
 |---|---|
 | `accounts: none` | the config wasn't loaded — check `CLONT_CONFIG` points at the file |
 | 0 accounts scanned, or an assume-role error | the trust policy: the identity clont runs as isn't allowed to assume the role |
+| `not authorized to perform sts:AssumeRoleWithWebIdentity` | the irsa role doesn't trust the cluster's oidc provider, or `sub` names the wrong namespace / service account — [iam.md](iam.md#irsa-the-pods-own-role) |
+| `GetObject` fails with `not authorized to perform: s3:ListBucket` | the report file isn't where the `cur:` block points. add `ClontCURList` to see the real error |
+| `no cur export found; create one or set aws.<alias>.cur` | no data export in that account — make one (step 1) |
+| `no CUR manifest for <period> in s3://…` | the role can read the bucket, but the report isn't there: the export was never created, the first one hasn't landed (24h), or `prefix` / `report_name` don't match the export |
+| every finding shows up twice | two aliases point at the same account (same id in the `authenticated … as` log line). keep one |
 | `costs=0`, health fine | no export found (see the startup log for a missing grant), the first export hasn't landed yet (24h), or a `cur:` override doesn't match s3 |
 | spend a day or two behind | normal — aws rewrites the report a few times a day |
 | every cost line unattributed | the tag keys were never activated as cost allocation tags |

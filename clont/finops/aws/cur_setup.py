@@ -32,7 +32,8 @@ NOTICE_KIND = "cur-setup"
 SETUP_STEPS = (
     "1. billing → data exports → create → standard data export (cur 2.0), "
     "tick \"include resource ids\", format csv + gzip, overwrite, daily\n"
-    "2. give the clont role s3:GetObject on the export folder in that bucket\n"
+    "2. give the clont role s3:GetObject on the export folder in that bucket, "
+    "plus s3:ListBucket on the bucket itself, else a missing file reads as AccessDenied\n"
     "3. and bcm-data-exports:ListExports + bcm-data-exports:GetExport, "
     "so clont finds the export by itself — no yaml change"
 )

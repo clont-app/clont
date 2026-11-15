@@ -330,7 +330,7 @@ def test_no_cur_configured_means_no_records():
 
 
 def test_only_the_manifest_and_its_data_files_are_fetched():
-    # keys are derived from the billing period, so the role needs no ListBucket
+    # keys are derived from the billing period, nothing is listed
     s3 = _FakeS3(_objects())
 
     _collect(_FakeProvider(s3))

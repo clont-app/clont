@@ -15,9 +15,10 @@ the user tags into json map columns (`product`, `resource_tags`):
 
     s3://<bucket>/<prefix>/<export>/metadata/BILLING_PERIOD=<YYYY-MM>/<export>-Manifest.json
 
-The manifest names the data files, so the bucket is never listed and the role
-needs nothing but `s3:GetObject`. Keys are derived, not discovered: a month
-whose manifest isn't there yet is skipped, not an error.
+The manifest names the data files, so the bucket is never listed. The role
+still wants `s3:ListBucket` beside `s3:GetObject`: without it s3 answers a
+missing key with AccessDenied instead of NoSuchKey. Keys are derived, not
+discovered: a month whose manifest isn't there yet is skipped, not an error.
 
 The report is rewritten a few times a day, so re-reading it every 300s cycle
 would be pure waste — parsed totals are cached for `refresh_minutes`.
