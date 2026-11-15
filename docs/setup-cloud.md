@@ -37,8 +37,16 @@ to a day, so start that clock early.
 
 ## 1. make the bucket and the cost export
 
+**aws only.** on-prem and kubernetes need no bucket and no export, see
+[setup-onprem.md](setup-onprem.md).
+
 skip this if you only want health and idle checks — clont runs fine without it,
 just with no spend, budgets or forecast.
+
+`my-billing-bucket`, `reports` and `clont-cur` below are examples, pick your
+own. a general purpose bucket name is global across all of aws, so
+`my-billing-bucket` is most likely taken — use something like
+`<company>-billing-<account-id>`.
 
 clont reads the export but never creates it — the role is read-only on purpose.
 so this is a one-time click in the console.
@@ -64,7 +72,7 @@ bucket's policy — on an existing bucket merge this statement into the one it h
 
 ```sh
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-BUCKET=my-billing-bucket  PREFIX=reports  EXPORT=clont-cur  REGION=eu-west-1
+BUCKET=my-billing-bucket  PREFIX=reports  EXPORT=clont-cur  REGION=eu-west-1  # your own names
 
 # the bucket, skip if it exists (us-east-1: drop --create-bucket-configuration)
 aws s3api create-bucket --bucket $BUCKET --region $REGION \

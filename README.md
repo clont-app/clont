@@ -55,7 +55,7 @@ see [docs/architecture.md](docs/architecture.md).
 clont sees nothing until aws lets it in, so do these two in the aws console
 before `pip install` or `helm`:
 
-1. **a bucket and a cost export** — billing → data exports → cur 2.0, csv + gzip,
+1. **a bucket and a cost export** (aws only) — billing → data exports → cur 2.0, csv + gzip,
    "create a bucket" right there. only needed for spend; aws takes up to 24h to
    write the first report, so do it first.
 2. **a read-only role** `clont-readonly` in each account, with

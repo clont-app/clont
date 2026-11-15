@@ -17,8 +17,9 @@ runtime identity  ──sts:AssumeRole──►  clont-readonly role (per accoun
 ## the permissions policy
 
 attach this to the `clont-readonly` role — it is the whole thing, paste it as
-is. the only line to edit is the bucket in `ClontCUR`: put your cur export's
-bucket, prefix and export name there (see
+is. the only lines to edit are the bucket in `ClontCUR` and `ClontCURList`:
+`my-billing-bucket`, `reports` and `clont-cur` are examples, put your cur
+export's bucket, prefix and export name there (see
 [spend](#spend-the-cost-and-usage-report)). everything else is read-only and has
 no resource-level scoping, so `Resource` is `*`.
 
