@@ -56,6 +56,80 @@ data export (cur 2.0).
 4. **s3 path prefix** — e.g. `reports`.
 5. create.
 
+### or the same with the aws cli
+
+run as an admin of the payer account. `put-bucket-policy` **replaces** the
+bucket's policy — on an existing bucket merge this statement into the one it has
+(`aws s3api get-bucket-policy --bucket $BUCKET`) instead of overwriting it.
+
+```sh
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=my-billing-bucket  PREFIX=reports  EXPORT=clont-cur  REGION=eu-west-1
+
+# the bucket, skip if it exists (us-east-1: drop --create-bucket-configuration)
+aws s3api create-bucket --bucket $BUCKET --region $REGION \
+  --create-bucket-configuration LocationConstraint=$REGION
+
+# let aws billing write into it
+cat > cur-bucket-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AllowDataExportsWrite",
+    "Effect": "Allow",
+    "Principal": {"Service": ["billingreports.amazonaws.com", "bcm-data-exports.amazonaws.com"]},
+    "Action": ["s3:PutObject", "s3:GetBucketPolicy"],
+    "Resource": ["arn:aws:s3:::$BUCKET", "arn:aws:s3:::$BUCKET/*"],
+    "Condition": {"StringLike": {
+      "aws:SourceAccount": "$ACCOUNT",
+      "aws:SourceArn": ["arn:aws:cur:us-east-1:$ACCOUNT:definition/*",
+                        "arn:aws:bcm-data-exports:us-east-1:$ACCOUNT:export/*"]
+    }}
+  }]
+}
+EOF
+aws s3api put-bucket-policy --bucket $BUCKET --policy file://cur-bucket-policy.json
+
+# the export itself, the api lives in us-east-1 whatever the bucket region
+cat > cur-export.json <<EOF
+{
+  "Name": "$EXPORT",
+  "DataQuery": {
+    "QueryStatement": "SELECT bill_payer_account_id, line_item_usage_account_id, line_item_usage_start_date, line_item_line_item_type, line_item_product_code, line_item_usage_type, line_item_usage_amount, line_item_resource_id, line_item_unblended_cost, line_item_currency_code, product, resource_tags, reservation_reservation_a_r_n, reservation_effective_cost, reservation_unused_amortized_upfront_fee_for_billing_period, reservation_unused_recurring_fee, savings_plan_savings_plan_effective_cost, savings_plan_total_commitment_to_date, savings_plan_used_commitment FROM COST_AND_USAGE_REPORT",
+    "TableConfigurations": {"COST_AND_USAGE_REPORT": {
+      "TIME_GRANULARITY": "DAILY",
+      "INCLUDE_RESOURCES": "TRUE",
+      "INCLUDE_SPLIT_COST_ALLOCATION_DATA": "FALSE",
+      "INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY": "FALSE"
+    }}
+  },
+  "DestinationConfigurations": {"S3Destination": {
+    "S3Bucket": "$BUCKET", "S3Prefix": "$PREFIX", "S3Region": "$REGION",
+    "S3OutputConfigurations": {"OutputType": "CUSTOM", "Format": "TEXT_OR_CSV",
+                               "Compression": "GZIP", "Overwrite": "OVERWRITE_REPORT"}
+  }},
+  "RefreshCadence": {"Frequency": "SYNCHRONOUS"}
+}
+EOF
+aws bcm-data-exports create-export --region us-east-1 --export file://cur-export.json
+aws bcm-data-exports list-exports --region us-east-1   # it is there
+```
+
+the select is the columns clont reads; a wider one works too, it only makes the
+files bigger. for showback, activate your tag keys (the tag has to be on some
+resource already, else billing doesn't know it):
+
+```sh
+aws ce update-cost-allocation-tags-status --region us-east-1 \
+  --cost-allocation-tags-status TagKey=Owner,Status=Active TagKey=Environment,Status=Active
+```
+
+rightsizing advice needs compute optimizer, which is opt-in per account:
+
+```sh
+aws compute-optimizer update-enrollment-status --status Active --region us-east-1
+```
+
 write down three things, the role needs them in step 2: bucket, prefix, export
 name. the files land under `s3://<bucket>/<prefix>/<export-name>/`.
 
