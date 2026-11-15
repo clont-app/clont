@@ -1,5 +1,22 @@
 # changelog
 
+## 0.3.5
+
+### cur
+
+- the role needs `s3:ListBucket` beside `s3:GetObject`, else a missing manifest reads
+  as AccessDenied; the setup notice and `docs/iam.md` say so
+
+### docs
+
+- `docs/setup-cloud.md`: cur 2.0 export and bucket policy via aws cli, marked aws only
+- clont never creates the export, it is made once by hand; bucket names are examples
+- irsa trust policy for eks
+
+### helm chart
+
+- chart and appVersion move to 0.3.5
+
 ## 0.3.4
 
 ### docs
