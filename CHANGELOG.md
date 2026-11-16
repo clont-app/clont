@@ -1,5 +1,15 @@
 # changelog
 
+## unreleased
+
+### finops
+
+- idle elasticache: a cache or replication group that served no get/set commands
+  over the window (redis, valkey, memcached)
+- idle dynamodb: a table with no consumed reads or writes, gsi reads included;
+  tables younger than the window are skipped
+- both ride `finops.allow_cloudwatch_metrics`, like idle rds
+
 ## 0.3.5
 
 ### cur

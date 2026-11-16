@@ -134,6 +134,9 @@ with the rest. it only gives up if *no* account authenticates.
   `GetMetricData` is $0.01 per thousand *metrics*, one per resource per cycle, so
   the bill grows with your fleet. only worth it on an account that isn't enrolled
   in compute optimizer. the next three settings only apply to this fallback.
+  it also turns on idle elasticache (no get/set commands) and idle dynamodb (no
+  consumed reads or writes) — compute optimizer covers neither, so they have no
+  free path.
 - `idle_cpu_pct` (float, default `5`) — average cpu % below which ec2/rds counts
   as idle.
 - `idle_lookback_days` (int, default `14`) — window the idle averages are taken over.

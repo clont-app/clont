@@ -77,7 +77,9 @@ no resource-level scoping, so `Resource` is `*`.
         "s3:GetBucketTagging",
         "elasticloadbalancing:DescribeTags",
         "lambda:ListFunctions",
-        "lambda:ListTags"
+        "lambda:ListTags",
+        "dynamodb:ListTables",
+        "dynamodb:DescribeTable"
       ],
       "Resource": "*"
     },
@@ -240,6 +242,11 @@ two things worth remembering:
   `ec2:DescribeInstanceStatus`, `rds:DescribeDBInstances`,
   `ec2:DescribeNatGateways` + `cloudwatch:GetMetricData` (one metric per resource
   per cycle — this is the grant whose bill grows with your fleet)
+- **idle elasticache / dynamodb** (no commands, no consumed capacity over the
+  window) — same `finops.allow_cloudwatch_metrics` switch, compute optimizer has
+  no free equivalent. `elasticache:DescribeCacheClusters`, `dynamodb:ListTables`,
+  `dynamodb:DescribeTable` + `cloudwatch:GetMetricData` (two metrics per cache
+  node, two per table plus one per gsi)
 - **idle load balancers** (nothing registered) —
   `elasticloadbalancing:DescribeLoadBalancers`,
   `elasticloadbalancing:DescribeTargetGroups`,

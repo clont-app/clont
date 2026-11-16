@@ -10,6 +10,8 @@ from clont.finops.aws import (  # noqa: F401 - imported for registration
     expiry,
     idle,
     idle_agent,
+    idle_dynamodb,
+    idle_elasticache,
     idle_elb,
     idle_nat,
     idle_rds,
