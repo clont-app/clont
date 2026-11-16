@@ -1,6 +1,6 @@
 # changelog
 
-## unreleased
+## 0.3.6
 
 ### finops
 
@@ -9,6 +9,15 @@
 - idle dynamodb: a table with no consumed reads or writes, gsi reads included;
   tables younger than the window are skipped
 - both ride `finops.allow_cloudwatch_metrics`, like idle rds
+- `clont.example.yaml` turns `allow_cloudwatch_metrics` on
+
+### docs
+
+- iam the cur setup script needs: `cur:*`, `bcm-data-exports:*`, s3 bucket rights
+
+### helm chart
+
+- chart and appVersion move to 0.3.6
 
 ## 0.3.5
 
