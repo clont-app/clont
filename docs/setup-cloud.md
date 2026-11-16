@@ -66,7 +66,34 @@ data export (cur 2.0).
 
 ### or the same with the aws cli
 
-run as an admin of the payer account. `put-bucket-policy` **replaces** the
+run in the payer account, as a user or role that may create the bucket and the
+export. not an admin? this is the least it needs — the `ce` and
+`compute-optimizer` lines are only for the two optional commands below:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "Identity", "Effect": "Allow",
+     "Action": "sts:GetCallerIdentity", "Resource": "*"},
+    {"Sid": "CurBucket", "Effect": "Allow",
+     "Action": ["s3:CreateBucket", "s3:ListBucket", "s3:GetBucketLocation",
+                "s3:GetBucketPolicy", "s3:PutBucketPolicy"],
+     "Resource": "arn:aws:s3:::my-billing-bucket"},
+    {"Sid": "CurExport", "Effect": "Allow",
+     "Action": ["bcm-data-exports:*", "cur:*"], "Resource": "*"},
+    {"Sid": "Optional", "Effect": "Allow",
+     "Action": ["ce:UpdateCostAllocationTagsStatus",
+                "compute-optimizer:UpdateEnrollmentStatus",
+                "iam:CreateServiceLinkedRole"], "Resource": "*"}
+  ]
+}
+```
+
+put your bucket name in `CurBucket`. this is for the one-off setup only — clont
+itself never gets it, it runs with the read-only role from step 2.
+
+`put-bucket-policy` **replaces** the
 bucket's policy — on an existing bucket merge this statement into the one it has
 (`aws s3api get-bucket-policy --bucket $BUCKET`) instead of overwriting it.
 
@@ -330,9 +357,12 @@ no rush, the defaults work. in rough order of value:
 - **`finops.required_tags` / `nonprod_tags`** — empty by default, which switches
   off tag hygiene and showback. fill them once your tags are real.
 - **`monitoring.metrics.enabled`** and **`finops.allow_cloudwatch_metrics`** —
-  **the two settings that cost money** (cloudwatch api calls). off by default,
-  which is why you see no cpu anomalies or disk-full warnings. idle detection
-  already works for free through compute optimizer.
+  **the two settings that cost money** (cloudwatch api calls).
+  `monitoring.metrics.enabled` is off, which is why you see no cpu anomalies or
+  disk-full warnings. `allow_cloudwatch_metrics` is **on in the example yaml**:
+  without it idle rds / nat / elasticache / dynamodb and s3 cold data are never
+  checked. it is one metric per resource per refresh, cents on a normal fleet —
+  set it `false` if you want no billed call at all.
 
 ## when it looks wrong
 

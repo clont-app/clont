@@ -117,10 +117,10 @@ aws:
 # off-hours and tag-hygiene recommendations.
 finops:
   allow_cost_explorer: false     # true = spend via ce:GetCostAndUsage, billed $0.01 per cycle
-  # Idle detection comes from Compute Optimizer (free, and it carries a savings
-  # figure). Turn this on only on an account not enrolled in CO: it falls back to
-  # CloudWatch, which bills per metric — one per resource per cycle.
-  allow_cloudwatch_metrics: false
+  # Idle rds / nat / elasticache / dynamodb and s3 cold data read CloudWatch,
+  # which bills per metric — one per resource per refresh ($0.01 per 1000).
+  # On here so those checks work out of the box; set false to make no billed call.
+  allow_cloudwatch_metrics: true
 
   # How often collectors are actually called, however fast interval_seconds
   # ticks. Spend lands once a day upstream, so polling every cycle spends 288

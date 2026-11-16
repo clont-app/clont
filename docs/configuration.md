@@ -129,11 +129,12 @@ with the rest. it only gives up if *no* account authenticates.
   much of a budget. `critical` fires once you've actually gone over.
 - `forecast_alpha` (float, default `0.5`) — how much the forecast leans on recent
   days (higher = more recent).
-- `allow_cloudwatch_metrics` (bool, default `false`) — fall back to the cloudwatch
-  idle detectors (ec2 / rds / nat) instead of compute optimizer. billed:
-  `GetMetricData` is $0.01 per thousand *metrics*, one per resource per cycle, so
-  the bill grows with your fleet. only worth it on an account that isn't enrolled
-  in compute optimizer. the next three settings only apply to this fallback.
+- `allow_cloudwatch_metrics` (bool, default `false`, **`true` in
+  `clont.example.yaml`**) — the cloudwatch idle detectors: ec2 / rds / nat /
+  elasticache / dynamodb and s3 cold data. elasticache and dynamodb have no
+  compute optimizer answer at all, so they need this. billed: `GetMetricData` is
+  $0.01 per thousand *metrics*, one per resource per refresh, so the bill grows
+  with your fleet. the next three settings only apply to these detectors.
   it also turns on idle elasticache (no get/set commands) and idle dynamodb (no
   consumed reads or writes) — compute optimizer covers neither, so they have no
   free path.

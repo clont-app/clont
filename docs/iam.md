@@ -144,7 +144,7 @@ clont. each buys you something specific and each has a meter running.
 |---|---|---|---|
 | `finops.allow_cost_explorer` | `ce:GetCostAndUsage` | $0.01 a request | one request per refresh — ~$0.30/mo per account at the default daily cadence, ~$88/mo if you drop `collect_interval_seconds` to the 300s loop |
 | `monitoring.metrics.enabled` | `cloudwatch:GetMetricData` | $0.01 per 1,000 metrics asked for | grows with the **fleet**, not the cycle: `max_metrics_per_cycle` caps one cycle, `collect_every_seconds` caps the day. 1,000 metrics every 300s ≈ $86/mo per account |
-| `finops.allow_cloudwatch_metrics` | `cloudwatch:GetMetricData` | same | one metric per ec2 / rds / nat resource per refresh. compute optimizer answers the same question for free — only turn this on for an account that isn't enrolled |
+| `finops.allow_cloudwatch_metrics` | `cloudwatch:GetMetricData` | same | one metric per resource per refresh (ec2 / rds / nat / elasticache / dynamodb / s3). on in `clont.example.yaml` — elasticache and dynamodb have no free compute optimizer answer |
 
 two things worth remembering:
 
