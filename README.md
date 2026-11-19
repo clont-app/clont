@@ -162,10 +162,10 @@ how each one works: [docs/findings.md](docs/findings.md).
   into every event key, so nothing collides.
 - **read-only by construction** — every call is a `Describe*` / `Get*` (on
   vmware the built-in Read-Only role, on k8s `get`/`list`). see
-  [docs/iam.md](docs/iam.md), which also lists the two billed grants
-  (`ce:GetCostAndUsage`, `cloudwatch:GetMetricData`) that are left out of the
-  policy on purpose, and what each costs if you want them. out of the box clont
-  makes **no billed api call at all**.
+  [docs/iam.md](docs/iam.md), which also lists the two billed calls and what
+  each costs: `cloudwatch:GetMetricData` (in the policy, on in the example
+  config, cents a month) and `ce:GetCostAndUsage` (left out on purpose). with the
+  code defaults clont makes **no billed api call at all**.
 - **credentials refresh themselves** — the agent survives expiry without a restart.
 - **channels** — log (always on) plus slack, discord and telegram, each with its
   own severity floor and repeat throttle.

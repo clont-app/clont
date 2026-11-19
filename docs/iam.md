@@ -84,6 +84,12 @@ no resource-level scoping, so `Resource` is `*`.
       "Resource": "*"
     },
     {
+      "Sid": "ClontMetrics",
+      "Effect": "Allow",
+      "Action": "cloudwatch:GetMetricData",
+      "Resource": "*"
+    },
+    {
       "Sid": "ClontCUR",
       "Effect": "Allow",
       "Action": "s3:GetObject",
@@ -111,11 +117,17 @@ no resource-level scoping, so `Resource` is `*`.
 }
 ```
 
-all of that is free. without `ClontCUR` clont sees resources but no spend.
+all of that is free except `ClontMetrics`: `cloudwatch:GetMetricData` bills
+$0.01 per 1,000 metrics. it is in the policy because `clont.example.yaml` turns
+on `finops.allow_cloudwatch_metrics`, and idle elasticache, idle dynamodb and s3
+cold data have no free source. those checks refresh once a day, one metric per
+resource (two per cache node, two per table plus one per gsi) — a few hundred
+resources is cents a month. drop the statement if you set the knob to `false`.
+without `ClontCUR` clont sees resources but no spend.
 
 on a payer that fans out to member accounts, add `organizations:ListAccounts`
 to `ClontReadOnly` there (see [payer fan-out](#several-accounts-the-payer-fan-out)).
-the two billed grants below stay out unless you turn them on.
+`ce:GetCostAndUsage` stays out unless you turn it on (below).
 
 > upgrading? `ec2:DescribeVpcEndpoints` pairs with `ec2:DescribeNatGateways` to
 > find nat processing an s3/dynamodb gateway endpoint would carry for free, and
@@ -123,19 +135,17 @@ the two billed grants below stay out unless you turn them on.
 > versions, abandoned multipart uploads). without either you lose that one
 > collector and keep everything else.
 
-## the two billed grants — only if you want them
+## the billed knobs
 
-both are **deliberately missing from the policy above**. neither is needed to run
-clont. each buys you something specific and each has a meter running.
+`cloudwatch:GetMetricData` is already in the policy above (`ClontMetrics`).
+`ce:GetCostAndUsage` is **deliberately missing**: the cur has the same numbers
+for free. add it only if you set `finops.allow_cost_explorer`.
 
 ```json
 {
-  "Sid": "ClontBilled",
+  "Sid": "ClontCostExplorer",
   "Effect": "Allow",
-  "Action": [
-    "ce:GetCostAndUsage",
-    "cloudwatch:GetMetricData"
-  ],
+  "Action": "ce:GetCostAndUsage",
   "Resource": "*"
 }
 ```
@@ -144,7 +154,7 @@ clont. each buys you something specific and each has a meter running.
 |---|---|---|---|
 | `finops.allow_cost_explorer` | `ce:GetCostAndUsage` | $0.01 a request | one request per refresh — ~$0.30/mo per account at the default daily cadence, ~$88/mo if you drop `collect_interval_seconds` to the 300s loop |
 | `monitoring.metrics.enabled` | `cloudwatch:GetMetricData` | $0.01 per 1,000 metrics asked for | grows with the **fleet**, not the cycle: `max_metrics_per_cycle` caps one cycle, `collect_every_seconds` caps the day. 1,000 metrics every 300s ≈ $86/mo per account |
-| `finops.allow_cloudwatch_metrics` | `cloudwatch:GetMetricData` | same | one metric per resource per refresh (ec2 / rds / nat / elasticache / dynamodb / s3). on in `clont.example.yaml` — elasticache and dynamodb have no free compute optimizer answer |
+| `finops.allow_cloudwatch_metrics` | `cloudwatch:GetMetricData` | same | one metric per resource, refreshed once a day (ec2 / rds / nat / elasticache / dynamodb / s3) — 300 resources ≈ 9,000 metrics ≈ $0.09/mo. on in `clont.example.yaml`: elasticache and dynamodb have no free compute optimizer answer |
 
 two things worth remembering:
 
@@ -154,9 +164,10 @@ two things worth remembering:
   the cached result still feeds the detectors every cycle, so a shorter cadence
   buys freshness, not coverage. `clont run --summary` always forces a full
   refresh, so an ad-hoc scan sees today's numbers.
-- **the default setup makes no billed api call at all.** spend comes from the cur
+- **the code defaults make no billed api call at all.** spend comes from the cur
   (a couple of s3 gets), idle advice from compute optimizer, commitment advice
-  from free describes, and public ipv4 from two free ec2 describes.
+  from free describes, and public ipv4 from two free ec2 describes. the one paid
+  call `clont.example.yaml` turns on is `finops.allow_cloudwatch_metrics`.
 
 ## what each collector needs
 

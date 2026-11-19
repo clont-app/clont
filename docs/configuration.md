@@ -133,8 +133,8 @@ with the rest. it only gives up if *no* account authenticates.
   `clont.example.yaml`**) — the cloudwatch idle detectors: ec2 / rds / nat /
   elasticache / dynamodb and s3 cold data. elasticache and dynamodb have no
   compute optimizer answer at all, so they need this. billed: `GetMetricData` is
-  $0.01 per thousand *metrics*, one per resource per refresh, so the bill grows
-  with your fleet. the next three settings only apply to these detectors.
+  $0.01 per thousand *metrics*, one per resource, refreshed once a day, so the
+  bill grows with your fleet (~300 resources ≈ $0.09/mo). the next three settings only apply to these detectors.
   it also turns on idle elasticache (no get/set commands) and idle dynamodb (no
   consumed reads or writes) — compute optimizer covers neither, so they have no
   free path.
