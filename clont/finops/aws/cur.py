@@ -203,10 +203,22 @@ class _Charges:
 
 
 _cache: dict[str, tuple[float, _Spend]] = {}
+# the same gap shows up on every refresh, say it once per process
+_warned: set[str] = set()
+
+
+def _warn_once(msg: str, *args) -> None:
+    text = msg % args
+    if text in _warned:
+        log.debug(text)
+        return
+    _warned.add(text)
+    log.warning(text)
 
 
 def clear_cache() -> None:
     _cache.clear()
+    _warned.clear()
 
 
 @register("finops", Cloud.AWS, "cur")
@@ -344,7 +356,7 @@ def _spend(
     for folder in folders:
         manifest = _manifest(s3, config, folder)
         if manifest is None:
-            log.warning(
+            _warn_once(
                 "no CUR manifest for %s in s3://%s — spend for that period is missing",
                 folder,
                 config.bucket,
@@ -368,7 +380,7 @@ def _spend(
     if absent:
         # the tag exists on the resources but was never activated as a cost
         # allocation tag, so cur has no column for it -> reads as 100% untagged
-        log.warning(
+        _warn_once(
             "CUR carries no user tag column for %s — that spend shows as unattributed; "
             "activate the cost allocation tag in Billing",
             ", ".join(absent),

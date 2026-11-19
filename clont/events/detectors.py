@@ -614,6 +614,11 @@ def _project(
     """
     first = min(daily)
     span = (anchor - first).days + 1
+    # cur keeps filling the newest day for a day or so, it is a floor, not a sample
+    settling = None
+    if span >= 3:
+        settling = (anchor.weekday(), daily.get(anchor, Decimal(0)))
+        span -= 1
     samples = [
         ((first + timedelta(days=i)).weekday(), daily.get(first + timedelta(days=i), Decimal(0)))
         for i in range(span)
@@ -623,7 +628,12 @@ def _project(
         for day in range(anchor.day + 1, days_in_month + 1)
     ]
     return project_seasonal(
-        samples, remaining, alpha, missing=first.day - 1, min_samples=_MIN_SEASONAL_SAMPLES
+        samples,
+        remaining,
+        alpha,
+        missing=first.day - 1,
+        min_samples=_MIN_SEASONAL_SAMPLES,
+        settling=settling,
     )
 
 

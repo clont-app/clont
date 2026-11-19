@@ -197,3 +197,20 @@ def test_forecast_prices_remaining_weekends_at_weekend_rates():
 def test_forecast_low_band_never_undercuts_mtd():
     [event] = SpendForecastDetector(0.5).detect(_days(["100", "1", "1"]))
     assert Decimal(event.payload["forecast_low"]) >= Decimal(event.payload["mtd"])
+
+
+def test_forecast_does_not_sink_on_a_half_loaded_newest_day():
+    # cur fills the newest day in over hours, 4 of 10 dollars is not a cheap day
+    full = SpendForecastDetector(0.5).detect(_month(17, "10"))[0]
+    partial = SpendForecastDetector(0.5).detect(_month(16, "10") + _days_at(17, "4"))[0]
+    assert Decimal(partial.payload["forecast"]) == Decimal(full.payload["forecast"])
+    assert partial.payload["mtd"] == "164"
+
+
+def test_forecast_keeps_a_real_spike_on_the_newest_day():
+    [event] = SpendForecastDetector(0.5).detect(_month(16, "10") + _days_at(17, "50"))
+    assert Decimal(event.payload["forecast"]) == Decimal(160 + 50 + 14 * 10)
+
+
+def _days_at(day: int, amount: str) -> list[CostRecord]:
+    return [_cost("EC2", amount, date(2024, 1, day))]

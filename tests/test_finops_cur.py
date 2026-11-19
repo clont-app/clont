@@ -277,6 +277,20 @@ def test_missing_manifest_is_not_an_error():
     assert _collect(_FakeProvider(_FakeS3({}))) == []
 
 
+def test_a_missing_month_warns_once_not_every_refresh(caplog, monkeypatch):
+    # an export made in november never gets an october, nagging hourly is noise
+    provider = _FakeProvider(_FakeS3({}), cur_config=_config(refresh_minutes=1))
+    clock = [1000.0]
+    monkeypatch.setattr(cur.time, "monotonic", lambda: clock[0])
+
+    with caplog.at_level("WARNING"):
+        _collect(provider)
+        clock[0] += 61
+        _collect(provider)
+
+    assert caplog.text.count("no CUR manifest") == 1
+
+
 def test_denied_manifest_read_surfaces():
     class _Denied(_FakeS3):
         def get_object(self, Bucket: str, Key: str):  # noqa: N803

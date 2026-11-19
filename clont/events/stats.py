@@ -145,13 +145,16 @@ def project_seasonal(
     alpha: float,
     missing: int = 0,
     min_samples: int = 2,
+    settling: tuple[int, Decimal] | None = None,
 ) -> Projection:
     """Month-end forecast that respects the weekly shape, with an error band.
 
     `samples` are `(phase, amount)` oldest-first for the days actually seen,
     `remaining` the phases of the days still to come, `missing` the count of
     early days the window never covered (estimated at the flat level, since
-    their phases are unknown).
+    their phases are unknown). `settling` is a `(phase, amount-so-far)` day the
+    source is still filling in: it is kept out of the fit and priced at
+    `max(amount, expected)`, so a half-loaded day cannot drag the level down.
 
     The daily series is *deseasonalized* first — divided by its phase factor —
     so the EWMA measures the level rather than whichever weekdays happen to sit
@@ -176,9 +179,14 @@ def project_seasonal(
     level = ewma(deseason, alpha)
 
     ahead = sum((level * factors.get(p, Decimal(1)) for p in remaining), Decimal(0))
+    days = len(remaining) + missing
+    if settling is not None:
+        phase, so_far = settling
+        mtd += so_far
+        ahead += max(Decimal(0), level * factors.get(phase, Decimal(1)) - so_far)
+        days += 1
     total = mtd + ahead + level * missing
 
-    days = len(remaining) + missing
     spread = Decimal(str(_MAD_TO_STD)) * mad(deseason)
     band: Decimal | None = None
     if days == 0 or n >= 2:
