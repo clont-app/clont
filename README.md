@@ -87,7 +87,7 @@ the minimal one is in [docs/setup-cloud.md](docs/setup-cloud.md#4-write-clontyam
 
 ### pip
 
-python 3.11+. the quickest way to see what clont finds:
+python 3.14+. the quickest way to see what clont finds:
 
 ```sh
 python3 -m venv ~/clont-venv

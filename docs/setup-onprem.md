@@ -17,7 +17,7 @@ budgets, waste findings — works exactly like the aws side.
 
 - a vcenter (or a standalone esxi host), and someone who can create a user in it
 - somewhere to run a small container: a linux box with docker, or a kubernetes
-  cluster. step 1 only needs python 3.11+ on your laptop.
+  cluster. step 1 only needs python 3.14+ on your laptop.
 - rough monthly numbers for your hardware: power, rack/network, licenses, and
   what the servers cost to buy. estimates are fine — step 3 explains why.
 - the pod/container must reach vcenter on port 443

@@ -12,7 +12,7 @@ minutes, most of it waiting for aws.
 - an aws account, and permission to create an iam role in it (or someone who can
   do steps 1 and 2 for you)
 - somewhere to run a small container later: a linux box with docker, or a
-  kubernetes cluster. step 3 only needs python 3.11+ on your laptop.
+  kubernetes cluster. step 3 only needs python 3.14+ on your laptop.
 - a slack / discord / telegram webhook if you want pings, step 6
 
 ## words used below
