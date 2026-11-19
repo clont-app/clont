@@ -23,7 +23,7 @@ one scan of a sample account (`clont run --summary report.txt`):
     $5,932.08 / year
 
   15 finding(s) across 2 account(s): prod, staging
-  scanned 2026-11-11 09:30 UTC  |  clont 0.3.6  |  6.412s
+  scanned 2026-11-11 09:30 UTC  |  clont 0.3.7  |  6.412s
 
 --------------------------------------------------------------------
  WHERE THE MONEY GOES
@@ -112,7 +112,7 @@ for any linux box. the image reads `/etc/clont/clont.yaml`:
 docker run -d --name clont --restart unless-stopped \
   -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
   -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
-  ghcr.io/clont-app/clont:0.3.6
+  ghcr.io/clont-app/clont:0.3.7
 docker logs -f clont
 ```
 

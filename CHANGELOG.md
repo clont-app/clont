@@ -1,5 +1,22 @@
 # changelog
 
+## 0.3.7
+
+### finops
+
+- forecast no longer dips on a half-loaded cur day: the last day is left out of
+  the average and counted as max(billed so far, usual cost for that weekday)
+- the same cur warning is logged once, not on every pass
+
+### docs
+
+- `cloudwatch:GetMetricData` moves into the main iam policy
+- `clont.example.yaml` marks `allow_cloudwatch_metrics` as paid, with the price
+
+### helm chart
+
+- chart and appVersion move to 0.3.7
+
 ## 0.3.6
 
 ### finops
