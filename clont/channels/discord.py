@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from clont.channels._http import post_json
 from clont.channels.base import AbstractChannel
+from clont.channels.state import SentStore
 from clont.events.models import Event, EventSeverity
 
 _EMOJI = {
@@ -23,8 +24,9 @@ class DiscordChannel(AbstractChannel):
         webhook_url: str,
         min_severity: EventSeverity = EventSeverity.WARN,
         repeat_after: timedelta | None = None,
+        store: SentStore | None = None,
     ) -> None:
-        super().__init__(min_severity=min_severity, repeat_after=repeat_after)
+        super().__init__(min_severity=min_severity, repeat_after=repeat_after, store=store)
         self._webhook_url = webhook_url
 
     def _deliver(self, event: Event) -> None:

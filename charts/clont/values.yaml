@@ -19,6 +19,9 @@ config:
     log:
       repeat_hours: 3
       min_severity: info
+    # last-sent times, so a container restart doesn't re-alert everything
+    # survives a pod reschedule only with persistence.enabled
+    state_file: /var/lib/clont/alert-state.json
 
 # instead of the block above, mount a config you manage yourself. exactly one of
 # these, and the object has to carry the file under `configKey`
@@ -80,6 +83,14 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 priorityClassName: ""
+
+# keep /var/lib/clont (alert state) across pod reschedules. off = emptyDir,
+# which still survives a container restart
+persistence:
+  enabled: false
+  size: 64Mi
+  storageClass: ""
+  existingClaim: ""
 
 extraVolumes: []
   # - name: vcenter-ca

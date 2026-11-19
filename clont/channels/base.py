@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
+from clont.channels.state import SentStore
 from clont.events.models import Event, EventSeverity, severity_rank
 
 
@@ -34,12 +35,14 @@ class AbstractChannel(ABC):
         self,
         min_severity: EventSeverity = EventSeverity.WARN,
         repeat_after: timedelta | None = None,
+        store: SentStore | None = None,
     ) -> None:
         self.min_severity = min_severity
         self.repeat_after = repeat_after
-        # key -> last delivery time, in-memory; todo persist so a restart
-        # doesn't re-alert every open condition. must stay outside the ro role
-        self._last_sent: dict[str, datetime] = {}
+        # key -> last delivery time. with a store it survives a restart,
+        # without one it lives in memory only
+        self._store = store
+        self._last_sent: dict[str, datetime] = store.for_channel(self.name) if store else {}
 
     def send(self, event: Event) -> bool:
         """Deliver the event if it passes the severity gate and isn't throttled.
@@ -51,7 +54,10 @@ class AbstractChannel(ABC):
         if not self._should_send(event.key):
             return False
         self._deliver(event)
-        self._last_sent[event.key] = datetime.now(UTC)
+        now = datetime.now(UTC)
+        self._last_sent[event.key] = now
+        if self._store is not None:
+            self._store.mark(self.name, event.key, now)
         return True
 
     def _should_send(self, key: str) -> bool:

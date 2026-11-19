@@ -82,7 +82,12 @@ spec:
             name: {{ .Values.existingConfigMap | default (include "clont.fullname" .) }}
         {{- end }}
         - name: home
+        {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-state" (include "clont.fullname" .)) }}
+        {{- else }}
           emptyDir: {}
+        {{- end }}
         - name: tmp
           emptyDir: {}
         {{- with .Values.extraVolumes }}

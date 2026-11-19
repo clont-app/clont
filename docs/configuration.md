@@ -228,3 +228,8 @@ kubernetes:
   number re-notifies a still-open one that often.
 
 `min_severity` takes `info`, `warn` or `critical`.
+
+**`channels.state_file`** (str, default `null`) — a json file with the last time
+each condition was sent, so a restart doesn't re-alert every open one. unset keeps
+it in memory. the helm chart sets `/var/lib/clont/alert-state.json`; turn on
+`persistence.enabled` to keep it across pod reschedules too.

@@ -173,3 +173,68 @@ def test_build_wires_all_enabled_channels():
     assert by_name["discord"].repeat_after is None
     assert by_name["telegram"].repeat_after == timedelta(hours=6)
     assert by_name["log"].repeat_after == timedelta(hours=2)
+
+
+def test_state_file_stops_resend_after_restart(capture, tmp_path):
+    from clont.channels.state import SentStore
+
+    path = tmp_path / "state.json"
+    ch = SlackChannel("https://x", min_severity=EventSeverity.INFO, store=SentStore(path))
+    assert ch.send(_event(key="dup")) is True
+    # new process, same file
+    again = SlackChannel("https://x", min_severity=EventSeverity.INFO, store=SentStore(path))
+    assert again.send(_event(key="dup")) is False
+    assert again.send(_event(key="other")) is True
+    assert len(capture) == 2
+
+
+def test_state_file_is_per_channel(capture, tmp_path):
+    from clont.channels.state import SentStore
+
+    store = SentStore(tmp_path / "state.json")
+    SlackChannel("https://x", min_severity=EventSeverity.INFO, store=store).send(_event())
+    discord = DiscordChannel("https://y", min_severity=EventSeverity.INFO, store=store)
+    assert discord.send(_event()) is True
+
+
+def test_state_file_repeat_window_still_applies(capture, tmp_path):
+    import json
+    from datetime import UTC, datetime
+
+    from clont.channels.state import SentStore
+
+    path = tmp_path / "state.json"
+    old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    path.write_text(json.dumps({"slack": {"dup": old}}))
+    ch = SlackChannel(
+        "https://x",
+        min_severity=EventSeverity.INFO,
+        repeat_after=timedelta(hours=1),
+        store=SentStore(path),
+    )
+    assert ch.send(_event(key="dup")) is True
+
+
+def test_broken_or_stale_state_file_is_ignored(tmp_path):
+    import json
+    from datetime import UTC, datetime
+
+    from clont.channels.state import SentStore
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert SentStore(bad).for_channel("slack") == {}
+
+    stale = tmp_path / "stale.json"
+    ancient = (datetime.now(UTC) - timedelta(days=365)).isoformat()
+    stale.write_text(json.dumps({"slack": {"gone": ancient, "x": "garbage"}}))
+    assert SentStore(stale).for_channel("slack") == {}
+
+
+def test_build_shares_one_state_file(tmp_path):
+    cfg = ChannelsConfig(
+        slack=SlackConfig(webhook_url="https://x"), state_file=str(tmp_path / "s.json")
+    )
+    chans = build(cfg)
+    stores = {id(c._store) for c in chans}
+    assert len(stores) == 1 and None not in {c._store for c in chans}

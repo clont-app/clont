@@ -8,6 +8,7 @@ from clont.channels.base import Channel
 from clont.channels.discord import DiscordChannel
 from clont.channels.log import LogChannel
 from clont.channels.slack import SlackChannel
+from clont.channels.state import SentStore
 from clont.channels.telegram import TelegramChannel
 from clont.core.config import ChannelsConfig
 
@@ -19,10 +20,12 @@ def _repeat(hours: float | None) -> timedelta | None:
 
 def build(config: ChannelsConfig) -> list[Channel]:
     """Construct the enabled channels. LogChannel is always present."""
+    store = SentStore(config.state_file) if config.state_file else None
     channels: list[Channel] = [
         LogChannel(
             repeat_after=timedelta(hours=config.log.repeat_hours),
             min_severity=config.log.min_severity,
+            store=store,
         )
     ]
     if config.slack is not None:
@@ -31,6 +34,7 @@ def build(config: ChannelsConfig) -> list[Channel]:
                 config.slack.webhook_url,
                 min_severity=config.slack.min_severity,
                 repeat_after=_repeat(config.slack.repeat_hours),
+                store=store,
             )
         )
     if config.discord is not None:
@@ -39,6 +43,7 @@ def build(config: ChannelsConfig) -> list[Channel]:
                 config.discord.webhook_url,
                 min_severity=config.discord.min_severity,
                 repeat_after=_repeat(config.discord.repeat_hours),
+                store=store,
             )
         )
     if config.telegram is not None:
@@ -48,6 +53,7 @@ def build(config: ChannelsConfig) -> list[Channel]:
                 config.telegram.chat_id,
                 min_severity=config.telegram.min_severity,
                 repeat_after=_repeat(config.telegram.repeat_hours),
+                store=store,
             )
         )
     return channels
@@ -57,6 +63,7 @@ __all__ = [
     "Channel",
     "DiscordChannel",
     "LogChannel",
+    "SentStore",
     "SlackChannel",
     "TelegramChannel",
     "build",

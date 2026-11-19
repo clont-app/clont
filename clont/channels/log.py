@@ -11,6 +11,7 @@ import json
 from datetime import timedelta
 
 from clont.channels.base import AbstractChannel
+from clont.channels.state import SentStore
 from clont.core.logging import get_logger
 from clont.events.models import Event, EventSeverity
 
@@ -23,9 +24,10 @@ class LogChannel(AbstractChannel):
     def __init__(
         self,
         repeat_after: timedelta = timedelta(hours=3),
+        store: SentStore | None = None,
         min_severity: EventSeverity = EventSeverity.INFO,
     ) -> None:
-        super().__init__(min_severity=min_severity, repeat_after=repeat_after)
+        super().__init__(min_severity=min_severity, repeat_after=repeat_after, store=store)
 
     def _deliver(self, event: Event) -> None:
         record = {

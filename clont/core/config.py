@@ -73,6 +73,8 @@ class ChannelsConfig(_Model):
     slack: SlackConfig | None = None
     discord: DiscordConfig | None = None
     telegram: TelegramConfig | None = None
+    # where last-sent times live so a restart doesn't re-alert. unset = memory only
+    state_file: str | None = None
 
 
 # --- API uplink (optional; paid tier)
