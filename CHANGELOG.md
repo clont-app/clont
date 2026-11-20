@@ -1,5 +1,24 @@
 # changelog
 
+## 0.3.8
+
+### alerts
+
+- `channels.state_file` keeps last-sent times on disk, so a restart no longer
+  re-alerts every open condition. unset = memory only, as before
+- helm chart sets it to `/var/lib/clont/alert-state.json`; `persistence.enabled`
+  adds a pvc so it survives a pod reschedule too, `fsGroup: 10001` lets the pod
+  write to it
+
+### docs
+
+- python 3.14 in the install docs
+- `SECURITY.md` and `CONTRIBUTING.md`
+
+### helm chart
+
+- chart and appVersion move to 0.3.8
+
 ## 0.3.7
 
 ### finops
