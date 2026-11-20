@@ -251,6 +251,6 @@ channels:
     chat_id: "-1001234567890"
     min_severity: critical
 
-  # Remember what was already sent, so a restart doesn't re-alert every open
-  # condition. Unset = memory only.
+  # remember what was already sent, so a restart doesn't re-alert every open
+  # condition. unset = memory only
   state_file: /var/lib/clont/alert-state.json

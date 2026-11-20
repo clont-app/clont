@@ -24,8 +24,8 @@ class LogChannel(AbstractChannel):
     def __init__(
         self,
         repeat_after: timedelta = timedelta(hours=3),
-        store: SentStore | None = None,
         min_severity: EventSeverity = EventSeverity.INFO,
+        store: SentStore | None = None,
     ) -> None:
         super().__init__(min_severity=min_severity, repeat_after=repeat_after, store=store)
 

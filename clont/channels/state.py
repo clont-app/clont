@@ -61,9 +61,14 @@ class SentStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.")
-            with os.fdopen(fd, "w") as fh:
-                json.dump(payload, fh)
-            os.replace(tmp, self.path)  # never a half-written file
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(payload, fh)
+                os.replace(tmp, self.path)  # never a half-written file
+            except BaseException:
+                # disk full mid-write would otherwise leave a temp file per send
+                Path(tmp).unlink(missing_ok=True)
+                raise
         except OSError as exc:
             # delivery already happened, losing the stamp only means a repeat later
             log.warning("could not save alert state %s: %s", self.path, exc)
