@@ -146,6 +146,10 @@ class AWSProvider:
             # service, which the co docs don't mention — see the probes below
             (_CO_LAMBDA_ACTION, self._probe_co_lambda),
             (_CO_RDS_ACTION, self._probe_co_rds),
+            # ami gc grants: one denied and gc goes quiet for the region
+            ("ec2:DescribeImages", self._probe_images),
+            ("ec2:DescribeLaunchTemplates", self._probe_launch_templates),
+            ("autoscaling:DescribeLaunchConfigurations", self._probe_launch_configs),
         ]
         if self._config.cur is not None:
             probes.append(("s3:GetObject", self._probe_cur))
@@ -222,6 +226,15 @@ class AWSProvider:
 
     def _probe_describe_regions(self) -> None:
         self.client("ec2", "us-east-1").describe_regions()
+
+    def _probe_images(self) -> None:
+        self.client("ec2", "us-east-1").describe_images(Owners=["self"], MaxResults=5)
+
+    def _probe_launch_templates(self) -> None:
+        self.client("ec2", "us-east-1").describe_launch_templates(MaxResults=5)
+
+    def _probe_launch_configs(self) -> None:
+        self.client("autoscaling", "us-east-1").describe_launch_configurations(MaxRecords=1)
 
     def _probe_savings_plans(self) -> None:
         self.client("savingsplans", "us-east-1").describe_savings_plans(maxResults=1)

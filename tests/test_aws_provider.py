@@ -156,3 +156,23 @@ def test_preflight_ignores_a_type_not_opted_into(aws_creds):
     provider.client = lambda s, r=None: _CO() if s == "compute-optimizer" else real(s, r)
 
     assert provider.preflight() == []
+
+
+@mock_aws
+def test_preflight_reports_a_missing_ami_gc_grant(aws_creds):
+    from botocore.exceptions import ClientError
+
+    provider = AWSProvider("prod", AWSConfig(role_arn=ROLE_ARN))
+    provider.authenticate()
+    provider._probe_savings_plans = lambda: None
+    provider._probe_compute_optimizer = lambda: None
+    provider._probe_co_lambda = lambda: None
+    provider._probe_co_rds = lambda: None
+
+    assert provider.preflight() == []
+
+    def denied():
+        raise ClientError({"Error": {"Code": "UnauthorizedOperation"}}, "DescribeLaunchTemplates")
+
+    provider._probe_launch_templates = denied
+    assert provider.preflight() == ["ec2:DescribeLaunchTemplates"]
