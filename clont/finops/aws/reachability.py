@@ -22,7 +22,7 @@ from clont.core.registry import register
 from clont.finops.aws import pricing
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
-from clont.providers.aws.parsing import _Image, _Instance
+from clont.providers.aws.parsing import _EIP, _EBSVolume, _Image, _Instance, _NetworkInterface
 from clont.providers.aws.regions import for_each_region
 from clont.providers.base import Provider
 
@@ -194,6 +194,48 @@ def build_graph(
         if img.image_id in keep:
             node.roots.append("listed in finops.ami_keep")
     return graph
+
+
+def volume_users(vol: _EBSVolume) -> list[str]:
+    """edges into a volume, one per attachment still holding it"""
+    return [
+        f"instance {a.get('InstanceId', '?')} ({a.get('State', '')})"
+        for a in vol.attachments if a.get("State") != "detached"
+    ]
+
+
+def eni_users(eni: _NetworkInterface) -> list[str]:
+    """edge into an eni: whatever its attachment points at, instance or service"""
+    if not eni.attachment_id or eni.attachment_status == "detached":
+        return []
+    return [f"attachment {eni.attachment_id} ({eni.attachment_status})"]
+
+
+def orphan_volumes(ec2) -> list[_EBSVolume]:
+    """volumes nothing reaches. parity self-test: must equal waste's unattached-ebs"""
+    out: list[_EBSVolume] = []
+    for page in ec2.get_paginator("describe_volumes").paginate():
+        for raw in page.get("Volumes", []):
+            vol = _EBSVolume.model_validate(raw)
+            if not volume_users(vol):
+                out.append(vol)
+    return out
+
+
+def orphan_enis(ec2) -> list[_NetworkInterface]:
+    """enis nothing reaches that hold a billed address.
+    parity self-test: must equal public_ipv4's unattached-eni-ip"""
+    byoip = {
+        e.public_ip for raw in ec2.describe_addresses().get("Addresses", [])
+        if (e := _EIP.model_validate(raw)).byoip and e.public_ip
+    }
+    out: list[_NetworkInterface] = []
+    for page in ec2.get_paginator("describe_network_interfaces").paginate():
+        for raw in page.get("NetworkInterfaces", []):
+            eni = _NetworkInterface.model_validate(raw)
+            if not eni_users(eni) and set(eni.public_ips()) - byoip:
+                out.append(eni)
+    return out
 
 
 def find_orphans(

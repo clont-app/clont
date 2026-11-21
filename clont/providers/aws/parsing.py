@@ -137,6 +137,7 @@ class _EBSVolume(BaseModel):
     iops: int = Field(default=0, validation_alias="Iops")
     throughput: int = Field(default=0, validation_alias="Throughput")
     tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
+    attachments: list[dict] = Field(default_factory=list, validation_alias="Attachments")
 
     def tag_map(self) -> dict[str, str]:
         return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
@@ -182,6 +183,9 @@ class _NetworkInterface(BaseModel):
     )
     allocation_id: str = Field(
         default="", validation_alias=AliasPath("Association", "AllocationId")
+    )
+    attachment_id: str = Field(
+        default="", validation_alias=AliasPath("Attachment", "AttachmentId")
     )
     attachment_status: str = Field(
         default="", validation_alias=AliasPath("Attachment", "Status")
