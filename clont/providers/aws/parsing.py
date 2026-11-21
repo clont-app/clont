@@ -150,6 +150,10 @@ class _EIP(BaseModel):
     allocation_id: str = Field(default="", validation_alias="AllocationId")
     association_id: str = Field(default="", validation_alias="AssociationId")
     pool: str = Field(default="", validation_alias="PublicIpv4Pool")
+    tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
+
+    def tag_map(self) -> dict[str, str]:
+        return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
 
     @property
     def byoip(self) -> bool:

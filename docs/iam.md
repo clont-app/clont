@@ -283,6 +283,12 @@ two things worth remembering:
   `elasticloadbalancing:DescribeLoadBalancers`,
   `elasticloadbalancing:DescribeTargetGroups`,
   `elasticloadbalancing:DescribeTargetHealth` (last two already listed for health)
+- **eks leftovers** (billed resources a deleted cluster tagged `owned`) —
+  nothing new: `eks:ListClusters`, `ec2:DescribeInstances`,
+  `ec2:DescribeVolumes`, `ec2:DescribeAddresses`,
+  `elasticloadbalancing:DescribeLoadBalancers`, `elasticloadbalancing:DescribeTags`,
+  `elasticloadbalancing:DescribeTargetGroups`, `elasticloadbalancing:DescribeTargetHealth`,
+  all already listed. a failed read skips the check, it never guesses
 - **off-hours scheduling** — `ec2:DescribeInstances` (state + tags; needs
   `nonprod_tags`)
 - **tag hygiene** — `ec2:DescribeInstances`, `ec2:DescribeVolumes`,

@@ -25,6 +25,18 @@ _KIND = "idle-elb"
 _USD = "USD"
 
 
+def has_targets(elb, lb_arn: str) -> bool:
+    """True if any of the LB's target groups has a registered target."""
+    groups = elb.describe_target_groups(LoadBalancerArn=lb_arn).get("TargetGroups", [])
+    for tg in groups:
+        health = elb.describe_target_health(
+            TargetGroupArn=tg["TargetGroupArn"]
+        ).get("TargetHealthDescriptions", [])
+        if health:
+            return True
+    return False
+
+
 @register("finops", Cloud.AWS, "idle_elb")
 class IdleLoadBalancerCollector:
     cloud = Cloud.AWS
@@ -47,20 +59,9 @@ class IdleLoadBalancerCollector:
                 lb = _LoadBalancer.model_validate(raw)
                 if lb.state and lb.state != "active":
                     continue  # provisioning/failed — let it settle, not "idle"
-                if not self._has_targets(elb, lb.arn):
+                if not has_targets(elb, lb.arn):
                     out.append(self._rec(lb, region))
         return out
-
-    def _has_targets(self, elb, lb_arn: str) -> bool:
-        """True if any of the LB's target groups has a registered target."""
-        groups = elb.describe_target_groups(LoadBalancerArn=lb_arn).get("TargetGroups", [])
-        for tg in groups:
-            health = elb.describe_target_health(
-                TargetGroupArn=tg["TargetGroupArn"]
-            ).get("TargetHealthDescriptions", [])
-            if health:
-                return True
-        return False
 
     def _rec(self, lb: _LoadBalancer, region: str) -> Recommendation:
         kind = (lb.lb_type or "load balancer").upper()

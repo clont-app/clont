@@ -7,6 +7,7 @@ from clont.finops.aws import (  # noqa: F401 - imported for registration
     compute_optimizer,
     cost_explorer,
     cur,
+    eks_leftovers,
     expiry,
     idle,
     idle_agent,
