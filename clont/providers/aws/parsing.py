@@ -247,6 +247,41 @@ class _Snapshot(BaseModel):
     volume_id: str = Field(default="", validation_alias="VolumeId")
     volume_size: int = Field(default=0, validation_alias="VolumeSize")
     start_time: datetime | None = Field(default=None, validation_alias="StartTime")
+    tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
+
+    def tag_map(self) -> dict[str, str]:
+        return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
+
+
+class _ImageDisk(BaseModel):
+    """one ebs block device mapping of an ami"""
+
+    snapshot_id: str = Field(default="", validation_alias=AliasPath("Ebs", "SnapshotId"))
+    volume_size: int = Field(default=0, validation_alias=AliasPath("Ebs", "VolumeSize"))
+
+
+class _Image(BaseModel):
+    """one self-owned ``describe_images`` entry, the root of an ami chain
+
+    ``LastLaunchedTime`` is absent for an image never launched *or* last
+    launched before 2017-04, when aws started tracking it
+    """
+
+    image_id: str = Field(validation_alias="ImageId")
+    name: str = Field(default="", validation_alias="Name")
+    state: str = Field(default="", validation_alias="State")
+    public: bool = Field(default=False, validation_alias="Public")
+    created: datetime | None = Field(default=None, validation_alias="CreationDate")
+    last_launched: datetime | None = Field(default=None, validation_alias="LastLaunchedTime")
+    disks: list[_ImageDisk] = Field(default_factory=list, validation_alias="BlockDeviceMappings")
+    tags: list[dict] = Field(default_factory=list, validation_alias="Tags")
+
+    def tag_map(self) -> dict[str, str]:
+        return {t.get("Key", ""): t.get("Value", "") for t in self.tags}
+
+    def snapshots(self) -> dict[str, int]:
+        """snapshot id -> size in GiB, instance-store mappings skipped"""
+        return {d.snapshot_id: d.volume_size for d in self.disks if d.snapshot_id}
 
 
 class _COOption(BaseModel):
@@ -423,6 +458,7 @@ class _Instance(BaseModel):
     instance_id: str = Field(validation_alias="InstanceId")
     state: str = Field(default="", validation_alias=AliasPath("State", "Name"))
     instance_type: str = Field(default="", validation_alias="InstanceType")
+    image_id: str = Field(default="", validation_alias="ImageId")
     lifecycle: str = Field(default="", validation_alias="InstanceLifecycle")
     availability_zone: str = Field(
         default="", validation_alias=AliasPath("Placement", "AvailabilityZone")

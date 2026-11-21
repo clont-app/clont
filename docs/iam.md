@@ -79,9 +79,20 @@ no resource-level scoping, so `Resource` is `*`.
         "lambda:ListFunctions",
         "lambda:ListTags",
         "dynamodb:ListTables",
-        "dynamodb:DescribeTable"
+        "dynamodb:DescribeTable",
+        "ec2:DescribeImages",
+        "ec2:DescribeImageAttribute",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeLaunchTemplateVersions",
+        "autoscaling:DescribeLaunchConfigurations"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ClontAmiAliases",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/*"
     },
     {
       "Sid": "ClontMetrics",
@@ -238,6 +249,16 @@ two things worth remembering:
   `nat` bucket of the data transfer report, which comes from cur.
 - **stale snapshots** (old or orphaned) — `ec2:DescribeSnapshots`,
   `ec2:DescribeVolumes` (to tell orphaned from live)
+- **orphaned amis** (amis nothing launches, plus the snapshots only they hold) —
+  `ec2:DescribeImages`, `ec2:DescribeInstances`, `ec2:DescribeLaunchTemplates`,
+  `ec2:DescribeLaunchTemplateVersions`, `autoscaling:DescribeLaunchConfigurations`,
+  `ec2:DescribeSnapshots` (dlm-owned snapshots), `ec2:DescribeImageAttribute`
+  (shared amis are kept). all free. any one of them denied and the region reports
+  no orphans at all rather than a wrong one. clont never sets the `clont:keep`
+  tag, it only reads it. a launch template whose ami is `resolve:ssm:<name>` is
+  resolved through `ssm:GetParameters` (`ClontAmiAliases`), scoped to aws's public
+  `/aws/service/*` parameters. pointing templates at your own parameters? add
+  their arns there, else that region reports no orphans and the log says why
 - **s3 storage waste** (no lifecycle rule, noncurrent versions, abandoned
   multipart uploads) — `s3:ListAllMyBuckets`, `s3:GetBucketLocation`,
   `s3:GetLifecycleConfiguration`, `s3:GetBucketVersioning`,

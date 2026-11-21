@@ -211,6 +211,12 @@ class FinOpsConfig(_Model):
     idle_lookback_days: int = 14           # trailing window the idle averages span
     idle_rds_max_connections: float = 1.0  # avg DB connections below which RDS is idle
     snapshot_max_age_days: int = 90        # EBS snapshots older than this are "old"
+    # ami gc. the window is generous on purpose, it stands in for quarterly batch and
+    # fleets scaled to zero, which aren't read
+    ami_unlaunched_days: int = Field(default=120, ge=1)  # no launch this long before an ami can be an orphan
+    ami_min_age_days: int = Field(default=30, ge=0)      # an image younger than this is never an orphan
+    # pinned amis, for clients who won't tag. a `clont:keep` tag on the ami does the same
+    ami_keep: list[str] = Field(default_factory=list)
 
     # On-prem waste: one inventory pass against the operator's own rate card
     onprem_min_savings_usd: float = 1.0        # per finding per month, below it is noise
@@ -401,6 +407,9 @@ log_level: info             # daemon log verbosity: debug|info|warning|error|cri
 #   idle_lookback_days: 14         # trailing window the idle averages span
 #   idle_rds_max_connections: 1    # avg DB connections below which RDS is idle
 #   snapshot_max_age_days: 90      # EBS snapshots older than this are "old"
+#   ami_unlaunched_days: 120       # an ami unlaunched this long, with nothing pointing at it, is an orphan
+#   ami_min_age_days: 30           # ...unless it is younger than this
+#   ami_keep: [ami-0abc123]        # never an orphan, same as a clont:keep tag on the ami
 #   s3_multipart_min_age_days: 7   # incomplete multipart uploads older than this are abandoned
 #   s3_cold_min_gb: 100            # ignore standard-class buckets smaller than this
 #   ri_sp_min_utilization: 90      # WARN when a commitment is used less than this %
