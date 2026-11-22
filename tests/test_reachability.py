@@ -103,8 +103,10 @@ def _recs(aws, patch=None, fail=None, asg_fail=None, tuning=None, backup=None):
     return ReachabilityCollector(provider, tuning).recommendations(None)
 
 
-def _denied(op: str, msg: str = "not authorized") -> ClientError:
-    return ClientError({"Error": {"Code": "UnauthorizedOperation", "Message": msg}}, op)
+def _denied(
+    op: str, msg: str = "not authorized", code: str = "UnauthorizedOperation"
+) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": msg}}, op)
 
 
 def test_unreached_ami_is_an_orphan_with_its_path(aws):
@@ -277,8 +279,12 @@ def test_ssm_denied_on_template_versions_makes_everything_live(aws, caplog):
     ec2, _ = aws
     _ami(ec2)
     ec2.create_launch_template(LaunchTemplateName="web", LaunchTemplateData={"ImageId": "ami-x"})
+    # code and message as a live account answers ResolveAlias=true without the grant
     fail = {"describe_launch_template_versions": _denied(
-        "DescribeLaunchTemplateVersions", "not authorized to perform ssm:GetParameters"
+        "DescribeLaunchTemplateVersions",
+        "User: arn:aws:sts::123456789012:federated-user/x is not authorized to perform: "
+        "ssm:GetParameters on resource: arn:aws:ssm:us-east-1::parameter/aws/service/x",
+        code="SsmAccessDenied",
     )}
     with caplog.at_level(logging.WARNING):
         assert _recs(aws, fail=fail) == []
