@@ -1,29 +1,40 @@
 # changelog
 
-## unreleased
+## 0.4.0
 
 ### upgrading
 
 - widen the read-only role first: `ec2:DescribeImages`,
-  `ec2:DescribeImageAttribute`, `ec2:DescribeLaunchTemplates`,
-  `ec2:DescribeLaunchTemplateVersions`, `autoscaling:DescribeLaunchConfigurations`,
-  optional `backup:ListBackupVaults` + `backup:ListRecoveryPointsByBackupVault`,
-  and `ssm:GetParameters` on `/aws/service/*` (`ClontAmiAliases`). see
-  [docs/iam.md](docs/iam.md). preflight names any grant that is missing;
-  without them the ami check reports nothing, it never guesses
+  `ec2:DescribeImageAttribute`, `ec2:DescribeSnapshotAttribute`,
+  `ec2:DescribeLaunchTemplates`, `ec2:DescribeLaunchTemplateVersions`,
+  `autoscaling:DescribeLaunchConfigurations`, optional `backup:ListBackupVaults`
+  + `backup:ListRecoveryPointsByBackupVault`, and `ssm:DescribeParameters` +
+  `ssm:GetParameters` (`ClontAmiAliases`). see [docs/iam.md](docs/iam.md).
+  preflight probes `ec2:DescribeImages`, `ec2:DescribeLaunchTemplates` and
+  `autoscaling:DescribeLaunchConfigurations`; any other missing grant shows up
+  as a WARNING in the run log naming it. a missing required grant makes the
+  region report no orphans, it never guesses
 
 ### finops
 
 - orphaned amis: mark and sweep from instances, launch templates and launch
   configurations. an orphan ami and the snapshots only it holds are one
   finding, and the finding says why it's an orphan
-- dlm, aws backup, shared amis, `clont:keep` and `finops.ami_keep` are roots.
+- dlm, aws backup, shared amis, ami ids in ssm parameters, `clont:keep` and
+  `finops.ami_keep` are roots. a snapshot that is shared, public or used by a
+  launch template is kept, never on the delete list.
   `ami_unlaunched_days` (120) and `ami_min_age_days` (30) set the window
 - eks leftovers: volumes, csi snapshots, addresses, and load balancers a
   deleted cluster tagged `owned`, one finding per cluster. a running instance
-  that still carries the tag keeps the cluster alive
+  that still carries the tag keeps the cluster alive. clusters are listed in
+  every enabled region, so an explicit `regions:` list can't make a live one
+  look gone
 - stale snapshots: one that backs an ami or is dlm-owned is no longer
   reported. behind an orphan ami it is part of that ami's finding
+
+### helm chart
+
+- chart and appVersion move to 0.4.0
 
 ## 0.3.8
 
