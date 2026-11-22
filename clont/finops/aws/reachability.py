@@ -5,7 +5,9 @@ template version, launch configuration. shared, public and dlm-owned amis are
 roots, and so is anything the client pins: a `clont:keep` tag on the ami (any
 value, clont only reads it) or its id in `finops.ami_keep`. spot / fleet / batch / image builder aren't read, `LastLaunchedTime`
 covers any launch and a generous `ami_unlaunched_days` covers rare use.
-any failed read makes every ami in that region live, a false "garbage" is
+aws backup recovery points are roots too. that read is optional: denied, and a
+never-launched orphan comes back `approximate`, it may be a backup.
+any other failed read makes every ami in that region live, a false "garbage" is
 worse than a miss.
 """
 
@@ -29,6 +31,8 @@ from clont.providers.base import Provider
 log = get_logger("clont.finops.aws.reachability")
 
 DLM_TAG = "aws:dlm:lifecycle-policy-id"
+BACKUP_TAG = "aws:backup:source-resource"
+_BACKUP_GRANT = "backup:ListBackupVaults and backup:ListRecoveryPointsByBackupVault"
 KEEP_TAG = "clont:keep"
 _USD = "USD"
 _KIND = "orphaned-ami"
@@ -49,6 +53,7 @@ class AmiGraph:
     amis: dict[str, AmiNode] = field(default_factory=dict)
     images_known: bool = True
     degraded: str = ""  # missing grant, non-empty = every ami here is live
+    backup_known: bool = True  # false = a never-launched orphan may be a backup
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,7 @@ class Orphan:
     snapshots: dict[str, int]  # the ones it alone holds, id -> GiB
     kept: list[str]            # its snapshots a live ami also uses
     idle_days: int | None      # since last launch, None = never / pre 2017-04
+    unsure: bool = False       # never launched and aws backup unreadable
 
 
 def read_images(ec2) -> list[_Image]:
@@ -182,6 +188,8 @@ def build_graph(
     reads.run("ec2:DescribeLaunchTemplates and ec2:DescribeLaunchTemplateVersions", templates)
     reads.run("autoscaling:DescribeLaunchConfigurations", configurations)
     reads.run("ec2:DescribeSnapshots", dlm)
+    backups = _backup_amis(provider, region)
+    graph.backup_known = backups is not None
 
     for node in graph.amis.values():
         img = node.image
@@ -189,11 +197,42 @@ def build_graph(
             node.roots.append("public")
         if DLM_TAG in img.tag_map() or set(img.snapshots()) & dlm_snapshots:
             node.roots.append("owned by dlm")
+        if BACKUP_TAG in img.tag_map():
+            node.roots.append("made by aws backup")
+        elif backups and img.image_id in backups:
+            node.roots.append(f"aws backup recovery point in vault {backups[img.image_id]}")
         if KEEP_TAG in img.tag_map():
             node.roots.append(f"tagged {KEEP_TAG}")
         if img.image_id in keep:
             node.roots.append("listed in finops.ami_keep")
     return graph
+
+
+def _backup_amis(provider: Provider, region: str) -> dict[str, str] | None:
+    """ami id -> vault for every ec2 recovery point, None = can't read backup"""
+    out: dict[str, str] = {}
+    try:
+        backup = provider.client("backup", region)
+        vaults: list[str] = []
+        for page in backup.get_paginator("list_backup_vaults").paginate():
+            vaults.extend(v["BackupVaultName"] for v in page.get("BackupVaultList", []))
+        for vault in vaults:
+            pages = backup.get_paginator("list_recovery_points_by_backup_vault").paginate(
+                BackupVaultName=vault, ByResourceType="EC2"
+            )
+            for page in pages:
+                for rp in page.get("RecoveryPoints", []):
+                    arn = rp.get("RecoveryPointArn", "")
+                    if ":image/" in arn:
+                        out[arn.rsplit("/", 1)[1]] = vault
+    except Exception as exc:  # noqa: BLE001 - optional grant, orphans just get less sure
+        log.warning(
+            "reachability: aws backup unreadable in %s for %s — add %s to the role; "
+            "never-launched amis there come back approximate: %s",
+            region, provider.alias, _BACKUP_GRANT, exc,
+        )
+        return None
+    return out
 
 
 def volume_users(vol: _EBSVolume) -> list[str]:
@@ -282,7 +321,8 @@ def find_orphans(
         claimed.update(own)
         idle = None if img.last_launched is None else (now - img.last_launched).days
         kept = sorted(s for s in img.snapshots() if s in live_snaps)
-        out.append(Orphan(img, own, kept, idle))
+        unsure = idle is None and not graph.backup_known
+        out.append(Orphan(img, own, kept, idle, unsure))
     return out
 
 
@@ -323,7 +363,7 @@ class ReachabilityCollector:
             summary=_summary(orphan),
             estimated_savings=Money(amount=amount, currency=_USD),
             priced_region=quotes[0].region if quotes else region,
-            approximate=any(q.approximate for q in quotes),
+            approximate=orphan.unsure or any(q.approximate for q in quotes),
         )
 
 
@@ -349,6 +389,11 @@ def _summary(orphan: Orphan) -> str:
         action = " — deregister it"
     if orphan.kept:
         action += f"; keep {', '.join(orphan.kept)}, a live ami uses it"
+    if orphan.unsure:
+        action += (
+            f"; aws backup wasn't readable ({_BACKUP_GRANT}), "
+            "check it isn't a backup recovery point first"
+        )
     return path + action
 
 

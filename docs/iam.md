@@ -84,7 +84,9 @@ no resource-level scoping, so `Resource` is `*`.
         "ec2:DescribeImageAttribute",
         "ec2:DescribeLaunchTemplates",
         "ec2:DescribeLaunchTemplateVersions",
-        "autoscaling:DescribeLaunchConfigurations"
+        "autoscaling:DescribeLaunchConfigurations",
+        "backup:ListBackupVaults",
+        "backup:ListRecoveryPointsByBackupVault"
       ],
       "Resource": "*"
     },
@@ -253,8 +255,11 @@ two things worth remembering:
   `ec2:DescribeImages`, `ec2:DescribeInstances`, `ec2:DescribeLaunchTemplates`,
   `ec2:DescribeLaunchTemplateVersions`, `autoscaling:DescribeLaunchConfigurations`,
   `ec2:DescribeSnapshots` (dlm-owned snapshots), `ec2:DescribeImageAttribute`
-  (shared amis are kept). all free. any one of them denied and the region reports
-  no orphans at all rather than a wrong one. clont never sets the `clont:keep`
+  (shared amis are kept), `backup:ListBackupVaults` +
+  `backup:ListRecoveryPointsByBackupVault` (aws backup recovery points are kept).
+  all free. the backup pair is optional: denied, and a never-launched orphan
+  comes back approximate with a "may be a backup" note. any other one denied
+  and the region reports no orphans at all rather than a wrong one. clont never sets the `clont:keep`
   tag, it only reads it. a launch template whose ami is `resolve:ssm:<name>` is
   resolved through `ssm:GetParameters` (`ClontAmiAliases`), scoped to aws's public
   `/aws/service/*` parameters. pointing templates at your own parameters? add

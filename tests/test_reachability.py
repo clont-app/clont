@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from clont.finops.aws import pricing
-from clont.finops.aws.reachability import DLM_TAG, KEEP_TAG, ReachabilityCollector
+from clont.finops.aws.reachability import BACKUP_TAG, DLM_TAG, KEEP_TAG, ReachabilityCollector
 from clont.finops.base import FinOpsTuning
 
 REGION = "us-east-1"
@@ -51,11 +51,31 @@ class _Patched:
         return _Pages(pag, self._patch) if name == "describe_images" else pag
 
 
+class _Backup:
+    """moto has no recovery points, so a vault -> ami ids stub"""
+
+    def __init__(self, points: dict[str, list[str]] | None = None, fail=None) -> None:
+        self._points = points or {}
+        self._fail = fail
+
+    def get_paginator(self, name: str):
+        if self._fail:
+            raise self._fail
+        return self
+
+    def paginate(self, BackupVaultName=None, **kw):
+        if BackupVaultName is None:
+            yield {"BackupVaultList": [{"BackupVaultName": v} for v in self._points]}
+            return
+        arns = [f"arn:aws:ec2:{REGION}::image/{a}" for a in self._points[BackupVaultName]]
+        yield {"RecoveryPoints": [{"RecoveryPointArn": a} for a in arns]}
+
+
 class _Provider:
     alias = "prod"
 
-    def __init__(self, ec2, asg) -> None:
-        self._clients = {"ec2": ec2, "autoscaling": asg}
+    def __init__(self, ec2, asg, backup=None) -> None:
+        self._clients = {"ec2": ec2, "autoscaling": asg, "backup": backup or _Backup()}
 
     def regions(self) -> list[str]:
         return [REGION]
@@ -77,9 +97,9 @@ def _ami(ec2, name: str = "golden") -> str:
     return ec2.register_image(Name=name, RootDeviceName="/dev/xvda")["ImageId"]
 
 
-def _recs(aws, patch=None, fail=None, asg_fail=None, tuning=None):
+def _recs(aws, patch=None, fail=None, asg_fail=None, tuning=None, backup=None):
     ec2, asg = aws
-    provider = _Provider(_Patched(ec2, patch, fail), _Patched(asg, fail=asg_fail))
+    provider = _Provider(_Patched(ec2, patch, fail), _Patched(asg, fail=asg_fail), backup)
     return ReachabilityCollector(provider, tuning).recommendations(None)
 
 
@@ -340,3 +360,39 @@ def test_image_attribute_denied_makes_everything_live(aws, caplog):
     with caplog.at_level(logging.WARNING):
         assert ReachabilityCollector(provider).recommendations(None) == []
     assert "ec2:DescribeImageAttribute" in caplog.text
+
+
+def test_backup_tag_is_a_root(aws):
+    ec2, _ = aws
+    ami = _ami(ec2)
+    ec2.create_tags(Resources=[ami], Tags=[{"Key": BACKUP_TAG, "Value": "arn:aws:ec2:x"}])
+    assert _recs(aws) == []
+
+
+def test_backup_recovery_point_is_a_root(aws):
+    ec2, _ = aws
+    kept, other = _ami(ec2, "restore-point"), _ami(ec2, "other")
+    recs = _recs(aws, backup=_Backup({"Default": [kept]}))
+    assert [r.resource.resource_id for r in recs] == [other]
+    assert recs[0].approximate is False
+
+
+def test_backup_denied_never_launched_is_approximate(aws, caplog):
+    ec2, _ = aws
+    _ami(ec2)
+    with caplog.at_level(logging.WARNING):
+        [rec] = _recs(aws, backup=_Backup(fail=_denied("ListBackupVaults")))
+    assert rec.approximate is True
+    assert "check it isn't a backup recovery point" in rec.summary
+    assert "backup:ListRecoveryPointsByBackupVault" in caplog.text
+
+
+def test_backup_denied_launched_stays_exact(aws):
+    ec2, _ = aws
+    ami = _ami(ec2)
+    [rec] = _recs(
+        aws, patch={ami: {"LastLaunchedTime": _iso(200)}},
+        backup=_Backup(fail=_denied("ListBackupVaults")),
+    )
+    assert rec.approximate is False
+    assert "backup" not in rec.summary
