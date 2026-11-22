@@ -40,6 +40,7 @@ log = get_logger("clont.finops.aws.reachability")
 
 DLM_TAG = "aws:dlm:lifecycle-policy-id"
 BACKUP_TAG = "aws:backup:source-resource"
+MANAGED_TAGS = (DLM_TAG, BACKUP_TAG)  # a policy or a vault owns these, not the user
 _BACKUP_GRANT = "backup:ListBackupVaults and backup:ListRecoveryPointsByBackupVault"
 KEEP_TAG = "clont:keep"
 _USD = "USD"

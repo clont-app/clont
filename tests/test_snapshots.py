@@ -116,6 +116,14 @@ def test_dlm_snapshot_is_not_reported():
     assert recs == []
 
 
+def test_backup_snapshot_is_not_reported():
+    # source volume gone is normal for a backup, deleting it kills the restore
+    snap = _snap("snap-bk", "vol-gone", 8, age_days=400)
+    snap["Tags"] = [{"Key": "aws:backup:source-resource", "Value": "arn:aws:ec2:x:1:volume/vol-gone"}]
+    recs = SnapshotCollector(_FakeProvider(_FakeEC2([snap], []))).recommendations(None)
+    assert recs == []
+
+
 class _NoImagesEC2(_FakeEC2):
     def get_paginator(self, name: str) -> _Paginator:
         if name == "describe_images":

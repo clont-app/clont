@@ -254,6 +254,7 @@ def test_csi_snapshot_behind_an_ami_or_dlm_is_not_a_leftover(aws, monkeypatch):
     # moto drops the snapshot id from a registered ami's mappings
     monkeypatch.setattr(mod, "read_images", lambda ec2: [_Image()])
     _snapshot(vol, {**_CSI, "aws:dlm:lifecycle-policy-id": "policy-1"})
+    _snapshot(vol, {**_CSI, "aws:backup:source-resource": f"arn:aws:ec2:{REGION}:1:volume/{vol}"})
     assert _recs() == []
 
 

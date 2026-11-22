@@ -12,7 +12,8 @@ placeholder source (``vol-ffffffff``) is never treated as orphaned.
 
 a snapshot that backs an ami is never reported here: behind a live ami it isn't
 garbage, behind an orphan ami it is part of that ami's finding in
-`reachability`. dlm-owned snapshots are skipped too, the policy deletes them.
+`reachability`. dlm and aws backup snapshots are skipped too, their policy or vault
+owns them.
 only when ``describe_images`` can't be read does the "may back an AMI" caveat
 come back.
 """
@@ -25,7 +26,7 @@ from clont.core.logging import get_logger
 from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.aws import pricing
-from clont.finops.aws.reachability import DLM_TAG, read_images
+from clont.finops.aws.reachability import MANAGED_TAGS, read_images
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
 from clont.providers.aws.parsing import _Snapshot
@@ -77,7 +78,7 @@ class SnapshotCollector:
         for page in ec2.get_paginator("describe_snapshots").paginate(OwnerIds=["self"]):
             for raw in page.get("Snapshots", []):
                 snap = _Snapshot.model_validate(raw)
-                if DLM_TAG in snap.tag_map():
+                if any(t in snap.tag_map() for t in MANAGED_TAGS):
                     continue
                 if in_amis is not None and snap.snapshot_id in in_amis:
                     continue

@@ -28,7 +28,7 @@ from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.aws import pricing
 from clont.finops.aws.idle_elb import has_targets
-from clont.finops.aws.reachability import DLM_TAG, read_images
+from clont.finops.aws.reachability import MANAGED_TAGS, read_images
 from clont.finops.aws.snapshots import stale_kind
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
@@ -166,7 +166,7 @@ def _snapshots(
             snap = _Snapshot.model_validate(raw)
             tags = snap.tag_map()
             name = owner(tags)
-            if not name or DLM_TAG in tags or snap.snapshot_id in in_amis:
+            if not name or any(t in tags for t in MANAGED_TAGS) or snap.snapshot_id in in_amis:
                 continue
             # snapshots prices the orphaned and old ones, the rest nobody does
             claim = stale_kind(snap, volume_ids, cutoff) or ""
