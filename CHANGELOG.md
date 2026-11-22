@@ -1,5 +1,30 @@
 # changelog
 
+## unreleased
+
+### upgrading
+
+- widen the read-only role first: `ec2:DescribeImages`,
+  `ec2:DescribeImageAttribute`, `ec2:DescribeLaunchTemplates`,
+  `ec2:DescribeLaunchTemplateVersions`, `autoscaling:DescribeLaunchConfigurations`,
+  optional `backup:ListBackupVaults` + `backup:ListRecoveryPointsByBackupVault`,
+  and `ssm:GetParameters` on `/aws/service/*` (`ClontAmiAliases`). see
+  [docs/iam.md](docs/iam.md). preflight names any grant that is missing;
+  without them the ami check reports nothing, it never guesses
+
+### finops
+
+- orphaned amis: mark and sweep from instances, launch templates and launch
+  configurations. an orphan ami and the snapshots only it holds are one
+  finding, and the finding says why it's an orphan
+- dlm, aws backup, shared amis, `clont:keep` and `finops.ami_keep` are roots.
+  `ami_unlaunched_days` (120) and `ami_min_age_days` (30) set the window
+- eks leftovers: volumes, csi snapshots, addresses, and load balancers a
+  deleted cluster tagged `owned`, one finding per cluster. a running instance
+  that still carries the tag keeps the cluster alive
+- stale snapshots: one that backs an ami or is dlm-owned is no longer
+  reported. behind an orphan ami it is part of that ami's finding
+
 ## 0.3.8
 
 ### alerts

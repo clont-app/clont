@@ -142,6 +142,9 @@ on eks give the pod an irsa role instead of keys. all chart values are in
 - **savings** — rightsizing, idle resources, unattached ebs, gp2 → gp3,
   commitments to buy or about to lapse, graviton, s3 waste, data transfer, tag
   hygiene and showback. each with a monthly dollar figure.
+- **orphans with a reason** — amis nothing launches, the snapshots only they
+  hold, and what a deleted eks cluster left behind. each finding says why it's
+  an orphan: no instance, no launch template, no launch configuration uses it.
 - **public ipv4** — every address counted ($3.65/month each since 2024), the
   unattached and secondary ones flagged.
 - **own iron** — vmware priced off a rate card you write: idle and stopped vms,
