@@ -38,6 +38,19 @@ _AMI_PLACEHOLDER = "vol-ffffffff"  # source shown for AMI-backing snapshots
 _USD = "USD"
 
 
+def stale_kind(snap: _Snapshot, live_volumes: set[str], cutoff: datetime) -> str | None:
+    """the kind this check reports a snapshot under, None if it doesn't"""
+    if (
+        snap.volume_id.startswith("vol-")
+        and snap.volume_id != _AMI_PLACEHOLDER
+        and snap.volume_id not in live_volumes
+    ):
+        return "orphaned-snapshot"
+    if snap.start_time is not None and snap.start_time < cutoff:
+        return "old-snapshot"
+    return None
+
+
 @register("finops", Cloud.AWS, "snapshots")
 class SnapshotCollector:
     cloud = Cloud.AWS
@@ -95,19 +108,15 @@ class SnapshotCollector:
         self, snap: _Snapshot, live_volumes: set[str], amis_known: bool,
         cutoff: datetime, now: datetime, region: str,
     ) -> Recommendation | None:
-        orphaned = (
-            snap.volume_id.startswith("vol-")
-            and snap.volume_id != _AMI_PLACEHOLDER
-            and snap.volume_id not in live_volumes
-        )
+        kind = stale_kind(snap, live_volumes, cutoff)
         size = f"({snap.volume_size} GiB)"
-        if orphaned:
+        if kind == "orphaned-snapshot":
             tail = ", no AMI uses it — delete it" if amis_known else " — delete if not backing an AMI"
             return self._rec(
                 snap, "orphaned-snapshot", region,
                 f"Snapshot of deleted volume {snap.volume_id} {size}{tail}",
             )
-        if snap.start_time is not None and snap.start_time < cutoff:
+        if kind == "old-snapshot" and snap.start_time is not None:
             age_days = (now - snap.start_time).days
             tail = (
                 ", no AMI uses it — review retention" if amis_known

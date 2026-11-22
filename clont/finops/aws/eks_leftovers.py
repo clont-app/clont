@@ -9,12 +9,17 @@ volumes, elastic ips and empty alb/nlb are already priced by unattached-ebs,
 public ipv4 and idle-elb, so here they are named, not priced again. a classic
 elb and an alb/nlb that still has targets registered are priced here, no
 other check covers them.
+
+csi snapshots (VolumeSnapshot) carry the same tags. one that snapshots reports
+as orphaned or old is named, the rest are priced here. a snapshot behind an ami
+or owned by dlm is not a leftover, and if images can't be read no snapshot is.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from clont.core.logging import get_logger
@@ -22,9 +27,11 @@ from clont.core.models import Cloud, CloudResource, Money, Period
 from clont.core.registry import register
 from clont.finops.aws import pricing
 from clont.finops.aws.idle_elb import has_targets
+from clont.finops.aws.reachability import DLM_TAG, read_images
+from clont.finops.aws.snapshots import stale_kind
 from clont.finops.base import FinOpsTuning
 from clont.finops.models import CostRecord, Recommendation
-from clont.providers.aws.parsing import _EIP, _EBSVolume, _Instance, _LoadBalancer
+from clont.providers.aws.parsing import _EIP, _EBSVolume, _Instance, _LoadBalancer, _Snapshot
 from clont.providers.aws.regions import for_each_region
 from clont.providers.base import Provider
 
@@ -99,7 +106,9 @@ def _pairs(tags: list[dict]) -> dict[str, str]:
     return {t.get("Key", ""): t.get("Value", "") for t in tags}
 
 
-def scan_region(provider: Provider, region: str) -> RegionScan:
+def scan_region(
+    provider: Provider, region: str, snapshot_max_age_days: int = 90
+) -> RegionScan:
     """every owned, billed resource in the region, grouped by cluster"""
     scan = RegionScan()
     ec2 = provider.client("ec2", region)
@@ -113,9 +122,11 @@ def scan_region(provider: Provider, region: str) -> RegionScan:
             for raw in res.get("Instances", []):
                 scan.live |= tagged_clusters(_Instance.model_validate(raw).tag_map())
 
+    volume_ids: set[str] = set()
     for page in ec2.get_paginator("describe_volumes").paginate():
         for raw in page.get("Volumes", []):
             vol = _EBSVolume.model_validate(raw)
+            volume_ids.add(vol.volume_id)
             name = owner(vol.tag_map())
             # attached means something still holds it
             if name and vol.state == "available":
@@ -130,9 +141,41 @@ def scan_region(provider: Provider, region: str) -> RegionScan:
                 Leftover("elastic ip", eip.public_ip or eip.allocation_id, claim)
             )
 
+    cutoff = datetime.now(UTC) - timedelta(days=snapshot_max_age_days)
+    _snapshots(provider, region, ec2, volume_ids, cutoff, scan)
     _elbv2(provider, region, scan)
     _classic(provider, region, scan)
     return scan
+
+
+def _snapshots(
+    provider: Provider, region: str, ec2, volume_ids: set[str], cutoff: datetime,
+    scan: RegionScan,
+) -> None:
+    try:
+        in_amis = {s for img in read_images(ec2) for s in img.snapshots()}
+    except Exception as exc:  # noqa: BLE001 - an ami may hold any of them
+        log.warning(
+            "eks leftovers: describe_images failed in %s for %s, skipping snapshots: %s",
+            region, provider.alias, exc,
+        )
+        return
+    for page in ec2.get_paginator("describe_snapshots").paginate(OwnerIds=["self"]):
+        for raw in page.get("Snapshots", []):
+            snap = _Snapshot.model_validate(raw)
+            tags = snap.tag_map()
+            name = owner(tags)
+            if not name or DLM_TAG in tags or snap.snapshot_id in in_amis:
+                continue
+            # snapshots prices the orphaned and old ones, the rest nobody does
+            claim = stale_kind(snap, volume_ids, cutoff) or ""
+            if claim:
+                scan.leftovers[name].append(Leftover("snapshot", snap.snapshot_id, claim))
+            else:
+                q = pricing.snapshot_quote(snap.volume_size, region)
+                scan.leftovers[name].append(
+                    Leftover("snapshot", snap.snapshot_id, "", q.amount, q.approximate)
+                )
 
 
 def _elbv2(provider: Provider, region: str, scan: RegionScan) -> None:
@@ -182,6 +225,7 @@ class EksLeftoversCollector:
 
     def __init__(self, provider: Provider, tuning: FinOpsTuning | None = None) -> None:
         self._provider = provider
+        self._tuning = tuning or FinOpsTuning()
         self._clusters: set[str] | None = None
 
     def collect(self, period: Period) -> list[CostRecord]:
@@ -209,7 +253,7 @@ class EksLeftoversCollector:
 
     def _region(self, region: str) -> list[Recommendation]:
         try:
-            scan = scan_region(self._provider, region)
+            scan = scan_region(self._provider, region, self._tuning.snapshot_max_age_days)
         except Exception as exc:  # noqa: BLE001 - unknown consumer means live
             log.warning(
                 "eks leftovers: read failed in %s for %s, skipping the region: %s",

@@ -204,3 +204,80 @@ def test_elbv2_priced_only_when_it_still_has_targets(aws):
     assert "application lb empty, already in idle-elb" in rec.summary
     assert "application lb busy;" in rec.summary
     assert rec.estimated_savings.amount == pricing.load_balancer_quote(REGION).amount
+
+
+def _snapshot(volume: str, tags: dict[str, str]) -> str:
+    return boto3.client("ec2", REGION).create_snapshot(
+        VolumeId=volume,
+        TagSpecifications=[{"ResourceType": "snapshot", "Tags": _tags(**tags)}],
+    )["SnapshotId"]
+
+
+_CSI = {"CSIVolumeSnapshotName": "snapcontent-1", "ebs.csi.aws.com/cluster": "true",
+        "kubernetes.io/cluster/old": "owned", "ebs.csi.aws.com/cluster-name": "old"}
+
+
+def test_csi_snapshot_of_deleted_volume_is_named_not_priced(aws):
+    ec2 = boto3.client("ec2", REGION)
+    vol = ec2.create_volume(AvailabilityZone=f"{REGION}a", Size=10)["VolumeId"]
+    snap = _snapshot(vol, _CSI)
+    ec2.delete_volume(VolumeId=vol)
+
+    rec, = _recs()
+    assert rec.resource.resource_id == "old"
+    assert f"snapshot {snap}, already in orphaned-snapshot" in rec.summary
+    assert rec.estimated_savings.amount == Decimal(0)
+
+
+def test_csi_snapshot_nobody_prices_is_priced_here(aws):
+    # source volume still there and the snapshot is fresh, so snapshots skips it
+    vol = boto3.client("ec2", REGION).create_volume(
+        AvailabilityZone=f"{REGION}a", Size=10)["VolumeId"]
+    snap = _snapshot(vol, _CSI)
+
+    rec, = _recs()
+    assert f"snapshot {snap}" in rec.summary and "already in" not in rec.summary
+    assert rec.estimated_savings.amount == pricing.snapshot_quote(10, REGION).amount
+
+
+def test_csi_snapshot_behind_an_ami_or_dlm_is_not_a_leftover(aws, monkeypatch):
+    import clont.finops.aws.eks_leftovers as mod
+
+    vol = boto3.client("ec2", REGION).create_volume(
+        AvailabilityZone=f"{REGION}a", Size=10)["VolumeId"]
+    held = _snapshot(vol, _CSI)
+
+    class _Image:
+        def snapshots(self):
+            return {held}
+
+    # moto drops the snapshot id from a registered ami's mappings
+    monkeypatch.setattr(mod, "read_images", lambda ec2: [_Image()])
+    _snapshot(vol, {**_CSI, "aws:dlm:lifecycle-policy-id": "policy-1"})
+    assert _recs() == []
+
+
+def test_csi_snapshot_of_live_cluster_is_not_a_leftover(aws):
+    boto3.client("eks", REGION).create_cluster(
+        name="old", roleArn="arn:aws:iam::123456789012:role/eks",
+        resourcesVpcConfig={"subnetIds": _subnets()},
+    )
+    vol = boto3.client("ec2", REGION).create_volume(
+        AvailabilityZone=f"{REGION}a", Size=10)["VolumeId"]
+    _snapshot(vol, _CSI)
+    assert _recs() == []
+
+
+def test_images_unreadable_drops_snapshots_only(aws, monkeypatch):
+    import clont.finops.aws.eks_leftovers as mod
+
+    def denied(ec2):
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(mod, "read_images", denied)
+    vol = _volume({"kubernetes.io/cluster/old": "owned"})
+    _snapshot(vol, _CSI)
+
+    rec, = _recs()
+    assert f"volume {vol}" in rec.summary
+    assert "snapshot" not in rec.summary
