@@ -96,6 +96,32 @@ def test_dead_cluster_leftovers_collapse_into_one_finding(aws):
     assert rec.estimated_savings.amount == pricing.load_balancer_quote(REGION).amount
 
 
+def test_csi_volume_rules():
+    with_id = {"CSIVolumeName": "pvc-1", "ebs.csi.aws.com/cluster": "true",
+               "kubernetes.io/cluster/old": "owned", "ebs.csi.aws.com/cluster-name": "old"}
+    assert owner(with_id) == "old"
+    assert owner({"ebs.csi.aws.com/cluster-name": "old"}) == "old"
+    # no cluster id: csi marks it, but names no cluster
+    assert owner({"CSIVolumeName": "pvc-1", "ebs.csi.aws.com/cluster": "true",
+                  "kubernetes.io/created-for/pvc/name": "data"}) is None
+    # id and name disagree, can't tell whose
+    assert owner({"kubernetes.io/cluster/a": "owned", "ebs.csi.aws.com/cluster-name": "b"}) is None
+
+
+def test_csi_volume_of_dead_cluster(aws):
+    named = _volume({"CSIVolumeName": "pvc-1", "ebs.csi.aws.com/cluster": "true",
+                     "kubernetes.io/cluster/old": "owned",
+                     "ebs.csi.aws.com/cluster-name": "old"})
+    bare = _volume({"CSIVolumeName": "pvc-2", "ebs.csi.aws.com/cluster": "true"})
+
+    rec, = _recs()
+    assert rec.resource.resource_id == "old"
+    assert f"volume {named}, already in unattached-ebs" in rec.summary
+    # left to plain unattached-ebs
+    assert bare not in rec.summary
+    assert rec.estimated_savings.amount == Decimal(0)
+
+
 def test_live_eks_cluster_is_not_a_leftover(aws):
     boto3.client("eks", REGION).create_cluster(
         name="live", roleArn="arn:aws:iam::123456789012:role/eks",

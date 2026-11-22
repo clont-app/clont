@@ -48,6 +48,8 @@ CLUSTER_TAGS: tuple[ClusterTag, ...] = (
     ClusterTag("kubernetes.io/cluster/", in_key=True),    # in-tree provider, eksctl, kops
     ClusterTag("elbv2.k8s.aws/cluster", in_key=False),    # aws load balancer controller
     ClusterTag("eks:cluster-name", in_key=False),         # managed node groups, addons
+    # ebs csi, only with --k8s-tag-cluster-id. bare ebs.csi.aws.com/cluster=true names nobody
+    ClusterTag("ebs.csi.aws.com/cluster-name", in_key=False),
 )
 
 
