@@ -7,16 +7,24 @@ value, clont only reads it) or its id in `finops.ami_keep`. spot / fleet / batch
 covers any launch and a generous `ami_unlaunched_days` covers rare use.
 aws backup recovery points are roots too. that read is optional: denied, and a
 never-launched orphan comes back `approximate`, it may be a backup.
+an ami id named in any ssm parameter is a root (golden images that terraform or
+cloudformation read at deploy time). optional too: denied, and every orphan comes
+back `approximate`.
+a snapshot of an orphan that is shared, public or named in a launch template's
+block device mapping is kept, not put on the delete list.
 any other failed read makes every ami in that region live, a false "garbage" is
 worse than a miss.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+from botocore.exceptions import ClientError
 
 from clont.core.logging import get_logger
 from clont.core.models import Cloud, CloudResource, Money, Period
@@ -38,6 +46,10 @@ _USD = "USD"
 _KIND = "orphaned-ami"
 _LIVE_STATES = ["pending", "running", "shutting-down", "stopping", "stopped"]
 _SSM_ALIAS = "resolve:ssm:"
+_SSM_GRANT = "ssm:DescribeParameters and ssm:GetParameters"
+_SSM_BATCH = 10  # get_parameters takes at most 10 names
+_AMI_ID = re.compile(r"\bami-[0-9a-f]{8,17}\b")
+_LIVE_AMI = "a live ami uses it"
 
 
 @dataclass
@@ -54,15 +66,18 @@ class AmiGraph:
     images_known: bool = True
     degraded: str = ""  # missing grant, non-empty = every ami here is live
     backup_known: bool = True  # false = a never-launched orphan may be a backup
+    ssm_known: bool = True     # false = any orphan may be named in a parameter
+    snap_users: dict[str, str] = field(default_factory=dict)  # snapshot -> who uses it directly
 
 
 @dataclass(frozen=True)
 class Orphan:
     image: _Image
     snapshots: dict[str, int]  # the ones it alone holds, id -> GiB
-    kept: list[str]            # its snapshots a live ami also uses
+    kept: dict[str, str]       # its snapshots something else still uses -> why
     idle_days: int | None      # since last launch, None = never / pre 2017-04
     unsure: bool = False       # never launched and aws backup unreadable
+    ssm_unknown: bool = False  # ssm parameters unreadable
 
 
 def read_images(ec2) -> list[_Image]:
@@ -126,6 +141,12 @@ def build_graph(
     if not graph.amis:
         return graph
 
+    def snap_edges(mappings: list[dict], who: str) -> None:
+        for m in mappings or []:
+            snap = (m.get("Ebs") or {}).get("SnapshotId", "")
+            if snap:
+                graph.snap_users.setdefault(snap, who)
+
     def edge(ami: str, who: str) -> None:
         if ami.startswith(_SSM_ALIAS):
             # alias that didn't resolve, can't tell which ami it means
@@ -154,8 +175,10 @@ def build_graph(
             )
             for page in pages:
                 for v in page.get("LaunchTemplateVersions", []):
-                    ami = v.get("LaunchTemplateData", {}).get("ImageId", "")
+                    data = v.get("LaunchTemplateData", {})
+                    ami = data.get("ImageId", "")
                     n = v.get("VersionNumber")
+                    snap_edges(data.get("BlockDeviceMappings", []), f"launch template {lt} v{n}")
                     if ami.startswith(_SSM_ALIAS):
                         ami = resolve(lt, n) or ami
                     if ami:
@@ -174,6 +197,7 @@ def build_graph(
             for lc in page.get("LaunchConfigurations", []):
                 name = lc.get("LaunchConfigurationName")
                 edge(lc.get("ImageId", ""), f"launch configuration {name}")
+                snap_edges(lc.get("BlockDeviceMappings", []), f"launch configuration {name}")
 
     dlm_snapshots: set[str] = set()
 
@@ -190,6 +214,8 @@ def build_graph(
     reads.run("ec2:DescribeSnapshots", dlm)
     backups = _backup_amis(provider, region)
     graph.backup_known = backups is not None
+    params = _ssm_amis(provider, region)
+    graph.ssm_known = params is not None
 
     for node in graph.amis.values():
         img = node.image
@@ -201,6 +227,8 @@ def build_graph(
             node.roots.append("made by aws backup")
         elif backups and img.image_id in backups:
             node.roots.append(f"aws backup recovery point in vault {backups[img.image_id]}")
+        if params and img.image_id in params:
+            node.roots.append(f"named in ssm parameter {params[img.image_id]}")
         if KEEP_TAG in img.tag_map():
             node.roots.append(f"tagged {KEEP_TAG}")
         if img.image_id in keep:
@@ -233,6 +261,50 @@ def _backup_amis(provider: Provider, region: str) -> dict[str, str] | None:
         )
         return None
     return out
+
+
+def _ssm_amis(provider: Provider, region: str) -> dict[str, str] | None:
+    """ami id -> the ssm parameter naming it, None = can't read ssm"""
+    out: dict[str, str] = {}
+    try:
+        ssm = provider.client("ssm", region)
+        names: list[str] = []
+        for page in ssm.get_paginator("describe_parameters").paginate():
+            # securestring is a secret, never an ami pointer worth decrypting
+            names.extend(
+                p["Name"] for p in page.get("Parameters", []) if p.get("Type") != "SecureString"
+            )
+        for i in range(0, len(names), _SSM_BATCH):
+            got = ssm.get_parameters(Names=names[i : i + _SSM_BATCH])
+            for p in got.get("Parameters", []):
+                for ami in _AMI_ID.findall(p.get("Value", "")):
+                    out.setdefault(ami, p["Name"])
+    except Exception as exc:  # noqa: BLE001 - optional grant, orphans just get less sure
+        log.warning(
+            "reachability: ssm parameters unreadable in %s for %s — add %s to the role; "
+            "orphan amis there come back approximate: %s",
+            region, provider.alias, _SSM_GRANT, exc,
+        )
+        return None
+    return out
+
+
+def _snapshot_shared(ec2, snap: str) -> str:
+    """why a snapshot can't go, "" if it can"""
+    try:
+        attr = ec2.describe_snapshot_attribute(SnapshotId=snap, Attribute="createVolumePermission")
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "InvalidSnapshot.NotFound":
+            return ""
+        log.warning("reachability: can't read sharing of %s, keeping it: %s", snap, exc)
+        return "sharing unreadable (ec2:DescribeSnapshotAttribute)"
+    except Exception as exc:  # noqa: BLE001 - unknown means keep
+        log.warning("reachability: can't read sharing of %s, keeping it: %s", snap, exc)
+        return "sharing unreadable (ec2:DescribeSnapshotAttribute)"
+    perms = attr.get("CreateVolumePermissions", [])
+    if any(p.get("Group") == "all" for p in perms):
+        return "it is public"
+    return "it is shared with another account" if perms else ""
 
 
 def volume_users(vol: _EBSVolume) -> list[str]:
@@ -317,12 +389,23 @@ def find_orphans(
     out: list[Orphan] = []
     for ami in sorted(orphan_ids):
         img = graph.amis[ami].image
-        own = {s: gib for s, gib in img.snapshots().items() if s not in live_snaps | claimed}
+        kept: dict[str, str] = {}
+        own: dict[str, int] = {}
+        for s, gib in img.snapshots().items():
+            if s in claimed:
+                continue
+            if s in live_snaps:
+                kept[s] = _LIVE_AMI
+            elif s in graph.snap_users:
+                kept[s] = f"{graph.snap_users[s]} uses it"
+            elif why := _snapshot_shared(ec2, s):
+                kept[s] = why
+            else:
+                own[s] = gib
         claimed.update(own)
         idle = None if img.last_launched is None else (now - img.last_launched).days
-        kept = sorted(s for s in img.snapshots() if s in live_snaps)
         unsure = idle is None and not graph.backup_known
-        out.append(Orphan(img, own, kept, idle, unsure))
+        out.append(Orphan(img, own, kept, idle, unsure, not graph.ssm_known))
     return out
 
 
@@ -363,7 +446,7 @@ class ReachabilityCollector:
             summary=_summary(orphan),
             estimated_savings=Money(amount=amount, currency=_USD),
             priced_region=quotes[0].region if quotes else region,
-            approximate=orphan.unsure or any(q.approximate for q in quotes),
+            approximate=orphan.unsure or orphan.ssm_unknown or any(q.approximate for q in quotes),
         )
 
 
@@ -387,12 +470,20 @@ def _summary(orphan: Orphan) -> str:
         )
     else:
         action = " — deregister it"
-    if orphan.kept:
-        action += f"; keep {', '.join(orphan.kept)}, a live ami uses it"
+    by_why: dict[str, list[str]] = {}
+    for snap, why in sorted(orphan.kept.items()):
+        by_why.setdefault(why, []).append(snap)
+    for why, ids in by_why.items():
+        action += f"; keep {', '.join(ids)}, {why}"
     if orphan.unsure:
         action += (
             f"; aws backup wasn't readable ({_BACKUP_GRANT}), "
             "check it isn't a backup recovery point first"
+        )
+    if orphan.ssm_unknown:
+        action += (
+            f"; ssm parameters weren't readable ({_SSM_GRANT}), "
+            "check no parameter names it first"
         )
     return path + action
 

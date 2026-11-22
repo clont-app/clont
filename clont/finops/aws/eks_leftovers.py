@@ -1,6 +1,7 @@
 """eks leftovers: billed resources a deleted cluster tagged as its own
 
-a cluster is live if `eks:ListClusters` names it in any region, or if any
+a cluster is live if `eks:ListClusters` names it in any enabled region (not
+only the scanned ones), or if any
 instance that isn't terminated still carries its tag (self-managed, kops).
 only `owned` counts, `shared` (vpc, subnets) is never garbage. any failed read
 drops the findings, a false "garbage" is worse than a miss.
@@ -236,19 +237,31 @@ class EksLeftoversCollector:
             self._clusters = self._all_clusters()
         except Exception as exc:  # noqa: BLE001 - can't tell live from dead
             log.warning(
-                "eks leftovers: eks:ListClusters failed for %s — add it to the role; "
-                "skipping the check: %s", self._provider.alias, exc,
+                "eks leftovers: eks:ListClusters or ec2:DescribeRegions failed for %s — "
+                "add them to the role; skipping the check: %s", self._provider.alias, exc,
             )
             return []
         return for_each_region(self._provider, self._region, what="eks leftovers")
 
     def _all_clusters(self) -> set[str]:
-        # a tag can name a cluster from another region, so look everywhere
+        # a tag can name a cluster from another region, so look in every enabled
+        # one, not just the configured `regions:`
+        resp = self._provider.client("ec2", "us-east-1").describe_regions(
+            Filters=[{"Name": "opt-in-status", "Values": ["opt-in-not-required", "opted-in"]}]
+        )
+        scanned = set(self._provider.regions())
+        regions = {r["RegionName"] for r in resp.get("Regions", [])} | scanned
         out: set[str] = set()
-        for region in self._provider.regions():
-            eks = self._provider.client("eks", region)
-            for page in eks.get_paginator("list_clusters").paginate():
-                out.update(page.get("clusters", []))
+        for region in sorted(regions):
+            try:
+                eks = self._provider.client("eks", region)
+                for page in eks.get_paginator("list_clusters").paginate():
+                    out.update(page.get("clusters", []))
+            except Exception as exc:  # noqa: BLE001
+                if region in scanned:
+                    raise
+                # an scp that denies the region denies clusters there too
+                log.warning("eks leftovers: ListClusters failed in %s, skipping it: %s", region, exc)
         return out
 
     def _region(self, region: str) -> list[Recommendation]:

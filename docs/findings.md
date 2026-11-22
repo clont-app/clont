@@ -104,9 +104,10 @@ the same event pipeline:
   configuration points at, unlaunched for `ami_unlaunched_days` (120) and older
   than `ami_min_age_days` (30), folded into one finding with the snapshots only
   they hold. the finding spells out the path: what was checked and found
-  nothing. dlm, aws backup, shared amis, `clont:keep` and `ami_keep` are roots,
-  never orphans. one unreadable source and the region reports none, not a
-  wrong one.
+  nothing. dlm, aws backup, shared amis, ami ids in ssm parameters, `clont:keep`
+  and `ami_keep` are roots, never orphans. a snapshot that is shared, public or
+  used by a launch template is named as kept, not put on the delete list. one
+  unreadable required source and the region reports none, not a wrong one.
 - **eks leftovers** — volumes, csi snapshots, addresses and load balancers
   tagged `owned` by a cluster that no longer exists, one finding per dead
   cluster. a running instance with the tag keeps the cluster alive. a snapshot

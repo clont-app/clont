@@ -82,11 +82,13 @@ no resource-level scoping, so `Resource` is `*`.
         "dynamodb:DescribeTable",
         "ec2:DescribeImages",
         "ec2:DescribeImageAttribute",
+        "ec2:DescribeSnapshotAttribute",
         "ec2:DescribeLaunchTemplates",
         "ec2:DescribeLaunchTemplateVersions",
         "autoscaling:DescribeLaunchConfigurations",
         "backup:ListBackupVaults",
-        "backup:ListRecoveryPointsByBackupVault"
+        "backup:ListRecoveryPointsByBackupVault",
+        "ssm:DescribeParameters"
       ],
       "Resource": "*"
     },
@@ -94,7 +96,10 @@ no resource-level scoping, so `Resource` is `*`.
       "Sid": "ClontAmiAliases",
       "Effect": "Allow",
       "Action": "ssm:GetParameters",
-      "Resource": "arn:aws:ssm:*::parameter/aws/service/*"
+      "Resource": [
+        "arn:aws:ssm:*::parameter/aws/service/*",
+        "arn:aws:ssm:*:*:parameter/*"
+      ]
     },
     {
       "Sid": "ClontMetrics",
@@ -255,15 +260,21 @@ two things worth remembering:
   `ec2:DescribeImages`, `ec2:DescribeInstances`, `ec2:DescribeLaunchTemplates`,
   `ec2:DescribeLaunchTemplateVersions`, `autoscaling:DescribeLaunchConfigurations`,
   `ec2:DescribeSnapshots` (dlm-owned snapshots), `ec2:DescribeImageAttribute`
-  (shared amis are kept), `backup:ListBackupVaults` +
-  `backup:ListRecoveryPointsByBackupVault` (aws backup recovery points are kept).
-  all free. the backup pair is optional: denied, and a never-launched orphan
-  comes back approximate with a "may be a backup" note. any other one denied
-  and the region reports no orphans at all rather than a wrong one. clont never sets the `clont:keep`
-  tag, it only reads it. a launch template whose ami is `resolve:ssm:<name>` is
-  resolved through `ssm:GetParameters` (`ClontAmiAliases`), scoped to aws's public
-  `/aws/service/*` parameters. pointing templates at your own parameters? add
-  their arns there, else that region reports no orphans and the log says why
+  (shared amis are kept), `ec2:DescribeSnapshotAttribute` (a shared or public
+  snapshot is kept, never on the delete list), `backup:ListBackupVaults` +
+  `backup:ListRecoveryPointsByBackupVault` (aws backup recovery points are kept),
+  `ssm:DescribeParameters` + `ssm:GetParameters` (an ami id in any String or
+  StringList parameter is kept — golden images that terraform or cloudformation
+  read at deploy time; SecureString is never read). all free. the backup and ssm
+  pairs are optional: denied backup, and a never-launched orphan comes back
+  approximate with a "may be a backup" note; denied ssm, and every orphan comes
+  back approximate with a "check no parameter names it" note. any other one
+  denied and the region reports no orphans at all rather than a wrong one. clont
+  never sets the `clont:keep` tag, it only reads it. a launch template whose ami
+  is `resolve:ssm:<name>` is resolved through the same `ssm:GetParameters`
+  (`ClontAmiAliases`): aws's public `/aws/service/*` parameters plus your own.
+  don't want clont reading your parameters? drop the second arn — your own
+  aliases then can't resolve, that region reports no orphans and the log says why
 - **s3 storage waste** (no lifecycle rule, noncurrent versions, abandoned
   multipart uploads) — `s3:ListAllMyBuckets`, `s3:GetBucketLocation`,
   `s3:GetLifecycleConfiguration`, `s3:GetBucketVersioning`,
@@ -289,8 +300,10 @@ two things worth remembering:
   `elasticloadbalancing:DescribeTargetGroups`,
   `elasticloadbalancing:DescribeTargetHealth` (last two already listed for health)
 - **eks leftovers** (billed resources a deleted cluster tagged `owned`) —
-  nothing new: `eks:ListClusters`, `ec2:DescribeInstances`,
-  `ec2:DescribeVolumes`, `ec2:DescribeAddresses`,
+  nothing new: `eks:ListClusters` (in every enabled region, not only the
+  scanned ones), `ec2:DescribeRegions`, `ec2:DescribeInstances`,
+  `ec2:DescribeVolumes`, `ec2:DescribeAddresses`, `ec2:DescribeImages`,
+  `ec2:DescribeSnapshots` (csi snapshots, minus the ones an ami holds),
   `elasticloadbalancing:DescribeLoadBalancers`, `elasticloadbalancing:DescribeTags`,
   `elasticloadbalancing:DescribeTargetGroups`, `elasticloadbalancing:DescribeTargetHealth`,
   all already listed. a failed read skips the check, it never guesses

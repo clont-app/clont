@@ -281,3 +281,14 @@ def test_images_unreadable_drops_snapshots_only(aws, monkeypatch):
     rec, = _recs()
     assert f"volume {vol}" in rec.summary
     assert "snapshot" not in rec.summary
+
+
+def test_cluster_in_an_unscanned_region_is_live(aws):
+    # regions: [us-east-1] only, the cluster lives in eu-west-1
+    iam = boto3.client("iam", REGION)
+    role = iam.create_role(RoleName="eks", AssumeRolePolicyDocument="{}")["Role"]["Arn"]
+    boto3.client("eks", "eu-west-1").create_cluster(
+        name="far", roleArn=role, resourcesVpcConfig={"subnetIds": []},
+    )
+    _volume({"kubernetes.io/cluster/far": "owned"})
+    assert _recs() == []

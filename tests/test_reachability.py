@@ -74,8 +74,11 @@ class _Backup:
 class _Provider:
     alias = "prod"
 
-    def __init__(self, ec2, asg, backup=None) -> None:
-        self._clients = {"ec2": ec2, "autoscaling": asg, "backup": backup or _Backup()}
+    def __init__(self, ec2, asg, backup=None, ssm=None) -> None:
+        self._clients = {
+            "ec2": ec2, "autoscaling": asg, "backup": backup or _Backup(),
+            "ssm": ssm or boto3.client("ssm", REGION),
+        }
 
     def regions(self) -> list[str]:
         return [REGION]
@@ -97,9 +100,9 @@ def _ami(ec2, name: str = "golden") -> str:
     return ec2.register_image(Name=name, RootDeviceName="/dev/xvda")["ImageId"]
 
 
-def _recs(aws, patch=None, fail=None, asg_fail=None, tuning=None, backup=None):
+def _recs(aws, patch=None, fail=None, asg_fail=None, tuning=None, backup=None, ssm=None):
     ec2, asg = aws
-    provider = _Provider(_Patched(ec2, patch, fail), _Patched(asg, fail=asg_fail), backup)
+    provider = _Provider(_Patched(ec2, patch, fail), _Patched(asg, fail=asg_fail), backup, ssm)
     return ReachabilityCollector(provider, tuning).recommendations(None)
 
 
@@ -402,3 +405,73 @@ def test_backup_denied_launched_stays_exact(aws):
     )
     assert rec.approximate is False
     assert "backup" not in rec.summary
+
+
+def test_ami_named_in_an_ssm_parameter_is_a_root(aws):
+    ec2, _ = aws
+    golden, other = _ami(ec2, "golden"), _ami(ec2, "other")
+    ssm = boto3.client("ssm", REGION)
+    ssm.put_parameter(Name="/golden/latest", Value=golden, Type="String")
+    ssm.put_parameter(Name="/amis", Value=f"x,{golden}", Type="StringList")
+    ssm.put_parameter(Name="/secret", Value=other, Type="SecureString")
+    recs = _recs(aws)
+    # securestring isn't read, so other is still an orphan
+    assert [r.resource.resource_id for r in recs] == [other]
+    assert recs[0].approximate is False
+
+
+def test_ssm_denied_makes_orphans_approximate(aws, caplog):
+    ec2, _ = aws
+    ami = _ami(ec2)
+
+    class _NoSsm:
+        def get_paginator(self, name):
+            raise _denied("DescribeParameters", code="AccessDeniedException")
+
+    with caplog.at_level(logging.WARNING):
+        [rec] = _recs(aws, patch={ami: {"LastLaunchedTime": _iso(200)}}, ssm=_NoSsm())
+    assert rec.approximate is True
+    assert "check no parameter names it" in rec.summary
+    assert "ssm:DescribeParameters" in caplog.text
+
+
+def _real_snapshot(ec2) -> str:
+    vol = ec2.create_volume(AvailabilityZone=f"{REGION}a", Size=20)["VolumeId"]
+    return ec2.create_snapshot(VolumeId=vol)["SnapshotId"]
+
+
+def test_shared_snapshot_is_kept_not_deleted(aws):
+    ec2, _ = aws
+    ami = _ami(ec2)
+    snap = _real_snapshot(ec2)
+    ec2.modify_snapshot_attribute(
+        SnapshotId=snap, Attribute="createVolumePermission",
+        OperationType="add", UserIds=["111122223333"],
+    )
+    disk = {"DeviceName": "/dev/xvda", "Ebs": {"SnapshotId": snap, "VolumeSize": 20}}
+    [rec] = _recs(aws, patch={ami: {"BlockDeviceMappings": [disk]}})
+    assert rec.estimated_savings.amount == 0
+    assert f"keep {snap}, it is shared with another account" in rec.summary
+    assert "delete its" not in rec.summary
+
+
+def test_snapshot_in_a_launch_template_is_kept(aws):
+    ec2, _ = aws
+    ami = _ami(ec2)
+    snap = _real_snapshot(ec2)
+    ec2.create_launch_template(LaunchTemplateName="data", LaunchTemplateData={
+        "BlockDeviceMappings": [{"DeviceName": "/dev/xvdb", "Ebs": {"SnapshotId": snap}}],
+    })
+    disk = {"DeviceName": "/dev/xvda", "Ebs": {"SnapshotId": snap, "VolumeSize": 20}}
+    [rec] = _recs(aws, patch={ami: {"BlockDeviceMappings": [disk]}})
+    assert rec.estimated_savings.amount == 0
+    assert f"keep {snap}, launch template" in rec.summary
+
+
+def test_unshared_real_snapshot_is_priced(aws):
+    ec2, _ = aws
+    ami = _ami(ec2)
+    snap = _real_snapshot(ec2)
+    disk = {"DeviceName": "/dev/xvda", "Ebs": {"SnapshotId": snap, "VolumeSize": 20}}
+    [rec] = _recs(aws, patch={ami: {"BlockDeviceMappings": [disk]}})
+    assert rec.estimated_savings.amount == pricing.snapshot_monthly(20, REGION)
