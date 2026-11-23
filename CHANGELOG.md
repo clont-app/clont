@@ -1,5 +1,13 @@
 # changelog
 
+## 0.4.1
+
+### finops
+
+- aws backup snapshots (`aws:backup:source-resource`) are no longer reported as
+  stale or orphaned, in `snapshots` and eks leftovers. the vault owns them, same
+  as dlm
+
 ## 0.4.0
 
 ### upgrading
