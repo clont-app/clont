@@ -520,6 +520,18 @@ def test_more_garbage_than_the_gap_drops_the_datastores_rows(caplog):
     assert float(gap.estimated_savings.amount) == pytest.approx(340 * STORAGE_RATE, abs=0.01)
 
 
+def test_a_stale_summary_is_all_live_not_a_parity_bug(caplog):
+    # 160 gib in the layouts, the summary still says 100 used: seen on lab1 after a power-on
+    stale = _ds(**{"summary.freeSpace": 1900 * GIB})
+    rows = [_file("[san-01] scratch/loose-flat.vmdk", 0)]
+    with caplog.at_level(logging.WARNING):
+        result = swept(rows, datastores=stale)
+    assert result.garbage == ()
+    assert result.dropped == ()
+    assert "free space is stale" in result.reasons["san-01"]
+    assert not any("parity failed" in r.getMessage() for r in caplog.records)
+
+
 def test_exactly_the_gap_passes_parity():
     assert len(swept([_file("[san-01] scratch/all-flat.vmdk", 340)]).garbage) == 1
 

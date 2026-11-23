@@ -19,6 +19,8 @@
   isos and datastores mounted outside the pass are live. what gc lists comes off
   `unaccounted-storage`, and a datastore that fails the parity check drops its rows
 - a vm with no `layoutEx` makes only its own datastores all-live, not the whole site
+- a datastore whose free space lags its vms (hostd after a power-on) is all-live with
+  a refresh hint, not a parity failure
 - two or more orphaned disks under the savings floor on one datastore fold into one
   `small-orphans` row
 - `inventory.browse` (default `true`) turns the browse off per site

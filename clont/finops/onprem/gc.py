@@ -144,9 +144,19 @@ def sweep(
             reasons[ds.name] = why
             log.warning("datastore gc: every file on %s counts as live, %s", ds.name, why)
             continue
+        gap = ds.capacity_gib - ds.free_gib - claimed.get(_key(ds.name), Decimal(0))
+        if gap < 0:
+            # the layouts hold more than the summary calls used: hostd hasn't caught up
+            # with a power-on or a new disk yet, so there is no bound to test against
+            why = (
+                f"its free space is stale, the vms hold {-gap:.1f} GiB more than it "
+                "reports used — refresh the datastore and rerun"
+            )
+            reasons[ds.name] = why
+            log.warning("datastore gc: every file on %s counts as live, %s", ds.name, why)
+            continue
         found = _sweep_one(ds, site.files[ds.uid], owned, pins, now - fresh)
         held = sum((g.size_gib for g in found), Decimal(0))
-        gap = ds.capacity_gib - ds.free_gib - claimed.get(_key(ds.name), Decimal(0))
         if held > gap:
             # more garbage than the space nobody claims: the graph is wrong, not the array
             log.warning(
