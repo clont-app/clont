@@ -214,7 +214,10 @@ class VsphereInventory:
         if usage_window_days > 0:
             site.usage.update(usage_rows(site.vms(), self.samples(usage_window_days)))
         if browse:
-            site = replace(site, files=self.browse())
+            try:
+                site = replace(site, files=self.browse())
+            except Exception as exc:  # noqa: BLE001 - gc is extra, the pass is not
+                log.warning("%s: datastore browse failed, gc skipped: %s", self.endpoint, exc)
         log.info(
             "%s: %d pools, %d hosts, %d vms, %d datastores, %d measured",
             self.endpoint,

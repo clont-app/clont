@@ -65,6 +65,7 @@ aws:
 #       verify_ssl: true           # false only for a self-signed lab cert
 #       usage_window_days: 14      # trailing p95 window; 0 = no perf read, all vms billed
 #                                  # at what they reserved and no idle/rightsize advice
+#       browse: true               # datastore gc, needs Datastore.Browse; false = no browse tasks
 #       # ca_bundle: /etc/clont/vcenter-ca.pem   # a private ca, instead of turning tls off
 #     rate_card:
 #       power_and_cooling: 3400    # or measured per chassis, later
@@ -162,6 +163,9 @@ finops:
   onprem_idle_ram_pct: 20            # p95 ram below which a running vm is idle
   onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking, 0 < x <= 100
   onprem_snapshot_max_days: 3        # vm snapshots older than this are a finding (vmware: 72h)
+  # datastore gc needs Datastore.Browse on the clont role, without it the gap stays a size
+  onprem_gc_min_age_days: 7          # datastore files touched more recently are live
+  onprem_gc_keep: []                 # never garbage, e.g. ["[san-01] golden/", "isos/"]
 
   # Kubernetes: what a cluster holds and never asked for. Priced through the pool
   # under `onprem:`/`aws:` that already pays for the nodes — the rightsize headroom

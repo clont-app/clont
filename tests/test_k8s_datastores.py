@@ -536,3 +536,11 @@ def test_a_provider_with_no_guests_to_ask_is_not_an_error():
 
     recs = OnPremWasteCollector(Bare()).recommendations(Period(start=DAY, end=DAY))
     assert any(rec.kind == "unaccounted-storage" for rec in recs)
+
+
+def test_in_tree_volume_paths_are_handed_to_datastore_gc():
+    # a csi handle is an fcd id under fcd/, gc roots that dir. an in-tree path is the
+    # file itself, so the site is told it, attached or not
+    source = {"vsphereVolume": {"volumePath": "[san-01] myvols/pvc-7.vmdk"}}
+    held = ledger([pv(source=source), pv("pvc-2", claim="apps/other")])
+    assert held.paths == ("[san-01] myvols/pvc-7.vmdk",)

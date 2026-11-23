@@ -120,6 +120,9 @@ class InventoryConfig(_Model):
     # vm is charged what it reserved. capped at 30 days, because that is how long vcenter
     # keeps the 2-hour rollups by default and a longer ask just reads short
     usage_window_days: int = Field(default=14, ge=0, le=30)
+    # the waste pass lists vmdk/vmx files for datastore gc. needs Datastore.Browse, and
+    # without it the pass warns and the storage gap stays a size. false skips the tasks
+    browse: bool = True
 
     @model_validator(mode="after")
     def _one_password_source(self) -> InventoryConfig:

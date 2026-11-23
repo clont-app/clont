@@ -144,6 +144,8 @@ def _tuning(config: Config) -> FinOpsTuning:
         onprem_idle_ram_pct=config.finops.onprem_idle_ram_pct,
         onprem_rightsize_target_pct=config.finops.onprem_rightsize_target_pct,
         onprem_snapshot_max_days=config.finops.onprem_snapshot_max_days,
+        onprem_gc_min_age_days=config.finops.onprem_gc_min_age_days,
+        onprem_gc_keep=tuple(config.finops.onprem_gc_keep),
         k8s_pool_unrequested_pct=config.finops.k8s_pool_unrequested_pct,
         k8s_overcommit_ratio=config.finops.k8s_overcommit_ratio,
         k8s_claim_min_gib=config.finops.k8s_claim_min_gib,

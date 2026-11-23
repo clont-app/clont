@@ -194,3 +194,15 @@ def test_snapshot_max_days_override_reaches_the_tuning(tmp_path, monkeypatch):
     assert _config(tmp_path, monkeypatch, "finops:\n  onprem_snapshot_max_days: 0\n")
     with pytest.raises(ValidationError):
         _config(tmp_path, monkeypatch, "finops:\n  onprem_snapshot_max_days: -1\n")
+
+
+def test_gc_min_age_and_keep_list_reach_the_tuning(tmp_path, monkeypatch):
+    config = _config(tmp_path, monkeypatch, "{}\n")
+    assert config.finops.onprem_gc_min_age_days == 7
+    assert config.finops.onprem_gc_keep == []
+    yaml = 'finops:\n  onprem_gc_min_age_days: 2\n  onprem_gc_keep: ["[san-01] golden/", "isos/"]\n'
+    tuning = build_agent(_config(tmp_path, monkeypatch, yaml))._finops_tuning
+    assert tuning.onprem_gc_min_age_days == 2
+    assert tuning.onprem_gc_keep == ("[san-01] golden/", "isos/")
+    with pytest.raises(ValidationError):
+        _config(tmp_path, monkeypatch, "finops:\n  onprem_gc_min_age_days: -1\n")

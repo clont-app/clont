@@ -230,6 +230,12 @@ class FinOpsConfig(_Model):
     onprem_rightsize_target_pct: float = Field(default=70.0, gt=0, le=100)
     # vmware's own advice is 72h. 0 flags every snapshot, which is what a seeded run wants
     onprem_snapshot_max_days: float = Field(default=3.0, ge=0)
+    # datastore gc. a file touched this recently may be a vmotion, a clone or a backup
+    # proxy's hot-add in flight, so it is live
+    onprem_gc_min_age_days: float = Field(default=7.0, ge=0)
+    # datastore paths never called garbage, the on-prem `clont:keep`. `[ds] folder/` or
+    # `folder/` on any datastore, globs allowed
+    onprem_gc_keep: list[str] = Field(default_factory=list)
 
     # Kubernetes: what a cluster holds and never asked for — the savings floor and the
     # rightsize headroom above are shared on purpose, a node is a vm in another spelling

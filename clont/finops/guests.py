@@ -31,6 +31,8 @@ class GuestStorage:
     unplaced_gib: Decimal = Decimal(0)    # of the detached, what named no datastore
     unknown_gib: Decimal = Decimal(0)     # a driver with no rule: deliberately not subtracted
     elsewhere_gib: Decimal = Decimal(0)   # nfs, ceph, a cloud disk, another site's array
+    # `[ds1] kubevols/x.vmdk` paths it owns, so datastore gc never calls them garbage
+    paths: tuple[str, ...] = ()
 
     def line(self) -> str:
         """One line for the log: what was reconciled, and what was left out of it."""

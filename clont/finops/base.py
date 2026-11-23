@@ -46,6 +46,8 @@ class FinOpsTuning:
     onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
     onprem_rightsize_target_pct: float = 70.0  # headroom left over the p95 when shrinking
     onprem_snapshot_max_days: float = 3.0      # vm snapshot age that is a finding, vmware: 72h
+    onprem_gc_min_age_days: float = 7.0        # a datastore file younger than this is live
+    onprem_gc_keep: tuple[str, ...] = ()       # datastore paths the operator pins, never garbage
     # kubernetes: the findings only a cluster view makes visible. the savings floor and the
     # headroom target are the on-prem ones on purpose — a node is a vm in another spelling
     k8s_pool_unrequested_pct: float = 25.0   # pool capacity no pod asked for before it is a finding

@@ -70,6 +70,7 @@ class OnPremProvider:
         self._ttl = pass_ttl_seconds
         self._clock = clock
         self._last: tuple[float, SiteInventory] | None = None
+        self._browsed: tuple[float, SiteInventory] | None = None
         self._guests: list[tuple[str, Callable[[], GuestStorage]]] = []
 
     @property
@@ -97,6 +98,23 @@ class OnPremProvider:
         with self._session() as session:
             site = session.site(usage_window_days=self._config.usage_window_days)
         self._last = (self._clock(), site)
+        return site
+
+    def browsed_inventory(self) -> SiteInventory:
+        """The pass plus the datastore file list, for the waste pass and nobody else.
+
+        Its own cache: the hourly cost pass has no use for a browse task per datastore,
+        and must not wait on one. `inventory.browse: false` makes this `inventory()`.
+        """
+        if not self._config.browse:
+            return self.inventory()
+        if self._browsed is not None and self._clock() - self._browsed[0] < self._ttl:
+            return self._browsed[1]
+        with self._session() as session:
+            site = session.site(usage_window_days=self._config.usage_window_days, browse=True)
+        now = self._clock()
+        self._browsed = (now, site)
+        self._last = (now, site)
         return site
 
     def attach_guest(self, name: str, reader: Callable[[], GuestStorage]) -> None:

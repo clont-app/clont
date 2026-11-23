@@ -38,7 +38,7 @@ measurement must never read as zero usage.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -84,6 +84,8 @@ class Datastore:
     url: str | None = None
     # morefs of every host that mounts it, including hosts outside this pass
     mount_hosts: tuple[str, ...] = ()
+    # the ones of those this pass never saw: a second vcenter, a standalone host
+    unseen_hosts: tuple[str, ...] = ()
 
     @property
     def overcommit(self) -> Decimal:
@@ -104,6 +106,15 @@ class Snapshot:
     created: datetime | None
     size_gib: Decimal = Decimal(0)
     quiesced: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class VmFile:
+    """One file a vm owns per `layoutEx.file`: disks, deltas, vmx, nvram, swap, logs."""
+
+    path: str  # `[san-01] app-01/app-01-flat.vmdk`
+    size_gib: Decimal = Decimal(0)
+    kind: str = ""  # diskDescriptor, diskExtent, config, ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +141,9 @@ class Vm:
     # vcenter's own flag that a delete left delta disks behind
     consolidation_needed: bool = False
     vmx_path: str | None = None  # "[san-01] app-01/app-01.vmx"
+    # every file it owns. empty when `layoutEx` never came back, and then gc can't know
+    # what this vm holds
+    files: tuple[VmFile, ...] = ()
 
     @property
     def running(self) -> bool:
@@ -280,7 +294,10 @@ def build_site(
     dc_of = _datacenter_index(ancestry or {}, datacenters or {})
     host_objects = {host_id: _host(host_id, props) for host_id, props in hosts.items()}
     host_names = {host_id: host.name for host_id, host in host_objects.items()}
-    ds_objects = {ds_id: _datastore(ds_id, props) for ds_id, props in datastores.items()}
+    ds_objects = {
+        ds_id: _seen_by(_datastore(ds_id, props), host_objects)
+        for ds_id, props in datastores.items()
+    }
     vm_objects = {vm_id: _vm(vm_id, props, host_names) for vm_id, props in vms.items()}
 
     # (name, kind, datacenter, host ids) — membership first, objects once it is settled,
@@ -489,7 +506,30 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
         snapshots=_snapshots(props),
         consolidation_needed=props.get("runtime.consolidationNeeded") is True,
         vmx_path=_text(props.get("config.files.vmPathName")) or None,
+        files=_vm_files(props.get("layoutEx.file")),
     )
+
+
+def _seen_by(datastore: Datastore, hosts: dict[str, Host]) -> Datastore:
+    unseen = tuple(host for host in datastore.mount_hosts if host not in hosts)
+    return replace(datastore, unseen_hosts=unseen) if unseen else datastore
+
+
+def _vm_files(value: object) -> tuple[VmFile, ...]:
+    out = []
+    for item in _items(value):
+        if not isinstance(item, dict):
+            continue
+        name = _text(item.get("name"))
+        if name:
+            out.append(
+                VmFile(
+                    path=name,
+                    size_gib=Decimal(_int(item.get("size"))) / BYTES_PER_GIB,
+                    kind=_text(item.get("type")),
+                )
+            )
+    return tuple(out)
 
 
 def _mount_hosts(value: object) -> list[str]:

@@ -102,6 +102,11 @@ def place(
     released: list[Volume] = []
     gib = dict.fromkeys(_BUCKETS, Decimal(0))
     counted = 0
+    volumes = list(volumes)
+    # in-tree paths name the file itself. a csi handle is an fcd id, under fcd/ already
+    paths = sorted(
+        {v.handle for v in volumes if v.on_datastore and v.handle.startswith("[")}
+    )
     for volume in volumes:
         if volume.released:
             released.append(volume)
@@ -141,6 +146,7 @@ def place(
         unplaced_gib=gib["unplaced"],
         unknown_gib=gib["unknown"],
         elsewhere_gib=gib["elsewhere"],
+        paths=tuple(paths),
     )
     log.debug("%s", storage.line())
     missing = wanted - set(by_claim)

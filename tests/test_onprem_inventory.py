@@ -569,3 +569,40 @@ def test_a_browse_that_never_finishes_leaves_the_datastore_out(monkeypatch, capl
     _, session = _browsing(monkeypatch, [slow])
     assert session.browse(timeout_seconds=0) == {}
     assert any("timed out on slow" in r.getMessage() for r in caplog.records)
+
+
+def test_layout_files_are_the_edges_and_unseen_mounts_are_named():
+    from clont.providers.onprem.inventory import build_site
+
+    hosts = {
+        "h-1": {
+            "name": "esx-01",
+            "hardware.cpuInfo.numCpuCores": 4,
+            "hardware.memorySize": 16 * 1024**3,
+            "datastore": ["ds-1"],
+            "vm": ["vm-1"],
+        }
+    }
+    datastores = {
+        "ds-1": {
+            "name": "san-01",
+            "summary.capacity": 100 * 1024**3,
+            "host": [{"key": "h-1"}, {"key": "h-other"}],
+        }
+    }
+    vms = {
+        "vm-1": {
+            "name": "web-1",
+            "layoutEx.file": [
+                {"key": 0, "name": "[san-01] web-1/web-1.vmx", "type": "config", "size": 4096},
+                {"key": 1, "name": "[san-01] web-1/web-1-flat.vmdk", "size": 2 * 1024**3},
+                {"key": 2, "type": "log"},
+            ],
+        }
+    }
+    site = build_site({}, hosts, datastores, vms)
+    [vm] = site.vms()
+    # a row with no name can't be an edge, so it is not one
+    assert [f.path for f in vm.files] == ["[san-01] web-1/web-1.vmx", "[san-01] web-1/web-1-flat.vmdk"]
+    assert vm.files[1].size_gib == 2
+    assert site.datastores[0].unseen_hosts == ("h-other",)

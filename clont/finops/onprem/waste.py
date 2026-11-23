@@ -30,6 +30,10 @@ What the snapshot alone proves:
   are what the files hold now. the advice is the snapshot manager, never the delta files:
   removing those by hand breaks the chain
 * **consolidation needed** is vcenter saying a delete left deltas behind. a risk, $0
+* **an orphaned vmdk / an unregistered vm folder** is the file list behind the storage
+  gap, when the role has `Datastore.Browse` (`gc.py`). priced at the datastore's pool
+  storage rate, approximate. whatever gc lists comes off `unaccounted-storage`, so the
+  same GiB is never priced twice, and the gap that's left is logs, isos and other files
 
 And what the measured window adds:
 
@@ -71,6 +75,7 @@ from clont.core.registry import register
 from clont.finops.base import FinOpsTuning
 from clont.finops.guests import GuestStorage
 from clont.finops.models import CostRecord, Recommendation
+from clont.finops.onprem import gc
 from clont.finops.onprem.rates import allocate
 from clont.providers.onprem.inventory import Pool, SiteInventory, Snapshot, Vm
 from clont.providers.onprem.metrics import Usage
@@ -131,10 +136,11 @@ class OnPremWasteCollector:
         return []
 
     def recommendations(self, period: Period) -> list[Recommendation]:
-        site = self._provider.inventory()
+        site = self._site()
         now = datetime.now(UTC)
         findings: list[Finding] = []
         priced: list[tuple[Pool, dict]] = []
+        ds_rates: dict[str, tuple[str, Decimal]] = {}
         for pool in site.pools:
             try:
                 result = allocate(pool.allocation_payload(self._card(pool), site.usage))
@@ -143,6 +149,12 @@ class OnPremWasteCollector:
                 log.warning("%s: pool %s not priced: %s", self._provider.alias, pool.key, exc)
                 continue
             priced.append((pool, result))
+            for datastore in pool.datastores:
+                # a shared array goes to the first pool that prices it, as in `_once`
+                ds_rates.setdefault(
+                    datastore.uid,
+                    (pool.key, _handback_rate(result, "storage_gib_month", "storage")),
+                )
             findings.extend(pool_findings(pool, result, self._tuning))
             findings.extend(usage_findings(pool, result, site.usage, self._tuning))
             findings.extend(
@@ -164,8 +176,17 @@ class OnPremWasteCollector:
         else:
             # what the clusters on this iron own up to holding, so the storage gap is not
             # offered back twice — see `_unaccounted_gib`
-            findings.extend(site_findings(site, rate, self._tuning, self._guests(), now=now))
+            findings.extend(
+                site_findings(
+                    site, rate, self._tuning, self._guests(), now=now, ds_rates=ds_rates
+                )
+            )
         return [self._rec(finding) for finding in _once(findings)]
+
+    def _site(self) -> SiteInventory:
+        # the browsed pass when the provider has one, gc needs the file list
+        ask = getattr(self._provider, "browsed_inventory", None)
+        return ask() if callable(ask) else self._provider.inventory()
 
     def _guests(self) -> list[GuestStorage]:
         """What the clusters on this site hold, or nothing when none is attached.
@@ -356,12 +377,17 @@ def site_findings(
     guests: Iterable[GuestStorage] = (),
     *,
     now: datetime | None = None,
+    ds_rates: dict[str, tuple[str, Decimal]] | None = None,
 ) -> list[Finding]:
-    """The leftovers that belong to no pool, priced at the site's mean storage rate."""
+    """The leftovers that belong to no pool, priced at the site's mean storage rate.
+
+    `ds_rates` is datastore moref -> (pool key, $/GiB-month) for the gc rows; a datastore
+    no priced pool mounts falls back to the site rate.
+    """
     floor = Decimal(str(tuning.onprem_min_savings_usd))
-    out: list[Finding] = snapshot_findings(
-        site.orphan_vms, _SITE, storage_rate, tuning, now or datetime.now(UTC)
-    )
+    now = now or datetime.now(UTC)
+    guests = list(guests)
+    out: list[Finding] = snapshot_findings(site.orphan_vms, _SITE, storage_rate, tuning, now)
 
     for vm in site.orphan_vms:
         monthly = vm.committed_gib * storage_rate
@@ -403,21 +429,79 @@ def site_findings(
             )
         )
 
-    gap = _unaccounted_gib(site, tuning, guests)
+    swept = gc.sweep(site, tuning, now, keep=[p for g in guests for p in g.paths])
+    if swept is not None:
+        out.extend(gc_findings(swept, ds_rates or {}, storage_rate, now))
+
+    gap = _unaccounted_gib(site, tuning, guests, swept)
     if gap is not None and gap.unexplained * storage_rate >= floor:
+        if swept is None:
+            what = (
+                "— isos, orphaned vmdks or dead vm folders. clont reads vcenter under the "
+                "Read-Only role and cannot browse a datastore, so this is the size, "
+                "not the file list"
+            )
+        else:
+            what = (
+                "and no listed vmdk or vm folder explains — logs, isos, other files, and "
+                "whatever sits on datastores gc could not judge"
+            )
         out.append(
             Finding(
                 kind="unaccounted-storage",
                 resource_id="datastore-leftovers",
                 region=_SITE,
                 summary=(
-                    f"{_gib(gap.unexplained)} GiB of datastore space no vm accounts for — "
-                    "isos, orphaned vmdks or dead vm folders. clont reads vcenter under the "
-                    "Read-Only role and cannot browse a datastore, so this is the size, "
-                    f"not the file list{gap.credit}"
+                    f"{_gib(gap.unexplained)} GiB of datastore space no vm accounts for "
+                    f"{what}{gap.credit}{gap.listed_credit}"
                 ),
                 monthly=gap.unexplained * storage_rate,
                 approximate=True,
+            )
+        )
+    return out
+
+
+def gc_findings(
+    swept: gc.Sweep,
+    ds_rates: dict[str, tuple[str, Decimal]],
+    storage_rate: Decimal,
+    now: datetime,
+) -> list[Finding]:
+    """One finding per unowned disk or unregistered folder, the path in the summary.
+
+    No savings floor: the win is freed disk, and the gap they come off is priced in full
+    either way.
+    """
+    out: list[Finding] = []
+    for row in swept.garbage:
+        region, rate = ds_rates.get(row.datastore.uid, (_SITE, storage_rate))
+        size = row.size_gib
+        age = _age(now - row.modified)
+        if row.kind == gc.UNREGISTERED_VM:
+            vmx = next(f.path for f in row.files if f.path.lower().endswith(".vmx"))
+            summary = (
+                f"{row.path}/ holds {vmx.rsplit('/', 1)[-1]} and no vm in inventory points "
+                f"at it — an unregistered vm, {len(row.files)} file(s), "
+                f"~{_gib_fine(size)} GiB, last touched {age} ago. someone may have only "
+                "removed it from inventory: re-register or delete the folder"
+            )
+        else:
+            names = ", ".join(f.path.rsplit("/", 1)[-1] for f in row.files)
+            summary = (
+                f"{row.path} is a disk no vm lists in its layout ({names}), "
+                f"~{_gib_fine(size)} GiB, last touched {age} ago — check nothing outside "
+                "this vcenter uses it, then delete it in the datastore browser"
+            )
+        out.append(
+            Finding(
+                kind=row.kind,
+                resource_id=row.path,
+                region=region,
+                summary=summary,
+                monthly=size * rate,
+                approximate=True,
+                uid=f"{row.datastore.uid}:{row.path}",
             )
         )
     return out
@@ -606,10 +690,21 @@ class _Gap:
     explained: Decimal = Decimal(0)
     volumes: int = 0
     sources: tuple[str, ...] = ()
+    listed: Decimal = Decimal(0)  # what gc named file by file
+    rows: int = 0
 
     @property
     def unexplained(self) -> Decimal:
-        return self.raw - self.explained
+        return self.raw - self.explained - self.listed
+
+    @property
+    def listed_credit(self) -> str:
+        if self.listed <= 0:
+            return ""
+        return (
+            f". another {_gib(self.listed)} GiB is listed file by file in {self.rows} "
+            "orphaned-vmdk / unregistered-vm finding(s) and is not counted here"
+        )
 
     @property
     def credit(self) -> str:
@@ -625,7 +720,10 @@ class _Gap:
 
 
 def _unaccounted_gib(
-    site: SiteInventory, tuning: FinOpsTuning, guests: Iterable[GuestStorage] = ()
+    site: SiteInventory,
+    tuning: FinOpsTuning,
+    guests: Iterable[GuestStorage] = (),
+    swept: gc.Sweep | None = None,
 ) -> _Gap | None:
     """Used datastore space minus what every vm claims, once both thresholds are passed.
 
@@ -644,6 +742,9 @@ def _unaccounted_gib(
     "orphaned vmdks". A cluster that admits to more than the gap holds leaves nothing to
     report rather than a negative one, and the thresholds are applied to what is left —
     the whole point is that the remainder is the part nobody has accounted for.
+
+    Same for what datastore gc listed: those GiB are their own findings now, so they come
+    off too, never below zero.
     """
     dead = {ds.uid for ds in site.unmounted_datastores}
     used = sum(
@@ -653,11 +754,17 @@ def _unaccounted_gib(
     claimed = sum((vm.committed_gib for vm in site.vms()), Decimal(0))
     raw = used - claimed
     owned = [guest for guest in guests if guest.detached_gib > 0]
+    explained = min(sum((g.detached_gib for g in owned), Decimal(0)), max(raw, Decimal(0)))
+    listed = Decimal(0)
+    if swept is not None:
+        listed = min(swept.size_gib, max(raw - explained, Decimal(0)))
     gap = _Gap(
         raw=raw,
-        explained=min(sum((g.detached_gib for g in owned), Decimal(0)), max(raw, Decimal(0))),
+        explained=explained,
         volumes=sum(g.volumes for g in owned),
         sources=tuple(sorted(g.source for g in owned)),
+        listed=listed,
+        rows=len(swept.garbage) if swept is not None else 0,
     )
     if used <= 0 or gap.unexplained < Decimal(str(tuning.onprem_unaccounted_min_gib)):
         return None

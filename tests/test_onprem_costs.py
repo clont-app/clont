@@ -20,7 +20,7 @@ from clont.finops.onprem.config import InventoryConfig, OnPremSite
 from clont.finops.onprem.costs import OnPremCostCollector
 from clont.providers.onprem.inventory import build_site
 from clont.providers.onprem.metrics import Usage
-from clont.providers.onprem.provider import OnPremProvider
+from clont.providers.onprem.provider import PASS_TTL_SECONDS, OnPremProvider
 
 GIB = 1024**3
 DAY = date(2026, 10, 4)
@@ -363,8 +363,9 @@ class FakeSession:
     def __exit__(self, *_exc):
         return None
 
-    def site(self, *, usage_window_days=0):
+    def site(self, *, usage_window_days=0, browse=False):
         self._windows.append(usage_window_days)
+        self.browsed = browse
         return self._site
 
 
@@ -374,8 +375,15 @@ def provider_with(session_site, clock_value=None, inventory=None, **site_kwargs)
     now = [0.0] if clock_value is None else clock_value
     site = OnPremSite(inventory=inventory or INVENTORY, **(site_kwargs or CARD))
     provider = OnPremProvider("dc1", site, clock=lambda: now[0])
-    provider._session = lambda: FakeSession(session_site, logins, windows)
+    sessions: list[FakeSession] = []
+
+    def session():
+        sessions.append(FakeSession(session_site, logins, windows))
+        return sessions[-1]
+
+    provider._session = session
     provider.windows = windows
+    provider.sessions = sessions
     return provider, logins, now
 
 
@@ -473,3 +481,44 @@ def test_the_password_env_is_read_at_use_time(monkeypatch):
         config.secret()
     monkeypatch.setenv("VC_PW", "later")
     assert config.secret() == "later"
+
+
+def test_only_the_waste_pass_asks_for_the_browse():
+    provider, logins, now = provider_with(site_inventory())
+    provider.inventory()
+    assert [s.browsed for s in provider.sessions] == [False]
+    # the cached plain pass has no file list, so the waste pass logs in for one
+    provider.browsed_inventory()
+    assert [s.browsed for s in provider.sessions] == [False, True]
+    # and that one is cached for both
+    provider.browsed_inventory()
+    provider.inventory()
+    assert len(logins) == 2
+    now[0] += PASS_TTL_SECONDS + 1
+    provider.browsed_inventory()
+    assert len(logins) == 3
+
+
+def test_browse_false_never_starts_a_browse():
+    provider, _, _ = provider_with(site_inventory(), inventory=INVENTORY | {"browse": False})
+    provider.browsed_inventory()
+    assert [s.browsed for s in provider.sessions] == [False]
+
+
+def test_a_failed_browse_is_a_warning_not_a_failed_pass(monkeypatch, caplog):
+    from clont.providers.onprem import vsphere
+
+    class _Vim:
+        def __getattr__(self, name):
+            return name
+
+    def boom():
+        raise RuntimeError("view gone")
+
+    session = vsphere.VsphereInventory("vc.lab", "ro", "x")
+    monkeypatch.setattr(session, "_require_vim", lambda: _Vim())
+    monkeypatch.setattr(session, "properties", lambda *_a: {})
+    monkeypatch.setattr(session, "browse", boom)
+    site = session.site(browse=True)
+    assert site.files == {}
+    assert any("browse failed, gc skipped" in r.getMessage() for r in caplog.records)

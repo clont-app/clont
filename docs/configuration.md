@@ -81,7 +81,10 @@ with the rest. it only gives up if *no* account authenticates.
   `password` / `password_env`, `port` (default `443`), `verify_ssl` (default
   `true`), `ca_bundle` (a private ca, instead of turning tls off) and
   `usage_window_days` (default `14`, max `30` — `0` reads no perf counters, and
-  then every vm is billed what it reserved with no idle / rightsize advice).
+  then every vm is billed what it reserved with no idle / rightsize advice) and
+  `browse` (default `true` — the daily waste pass lists vmdk/vmx files for
+  datastore gc, which needs `Datastore.Browse`; without the grant it warns and the
+  storage gap stays a size, `false` skips the browse tasks).
   leaving `inventory` out is fine: the site is priced and idle, which is the
   normal state while the read-only account is still being granted.
 
@@ -178,6 +181,12 @@ own iron:
   finding.
 - `onprem_snapshot_max_days` (float, default `3`) — a vm snapshot older than this
   is `old-vm-snapshot`. vmware's own advice is 72h. `0` flags every snapshot.
+- `onprem_gc_min_age_days` (float, default `7`) — a datastore file modified more
+  recently than this is live, never `orphaned-vmdk` or `unregistered-vm`. covers
+  vmotion, clones and backup hot-add in flight.
+- `onprem_gc_keep` (list, default `[]`) — datastore paths gc never calls garbage,
+  the on-prem `clont:keep`. `[san-01] golden/` pins one folder on one datastore,
+  `golden/` the same folder on any of them, globs work in the path (`tmpl-*/`).
 
 kubernetes:
 
