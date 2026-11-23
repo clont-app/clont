@@ -308,4 +308,5 @@ chart, another namespace, one config each.
 | storage counted twice | pvs/pvcs missing from the rbac — a cluster's own volumes are what nets off the site's storage gap |
 | `no Datastore.Browse` warning | expected under plain Read-Only — gc is off, snapshots still work. grant it as in step 2 for the file list |
 | no `orphaned-vmdk` on a shared san | on purpose: a datastore mounted by a host clont can't see may carry another vcenter's disks, so all of it counts as live |
+| a datastore skipped with `no layoutEx for <vm>` | that vm's host answered without its file layout (often disconnected), so any file there may be its. fix the host, the next run judges it |
 | pod restarting right after start | a config error, fatal on purpose — the log names the key |

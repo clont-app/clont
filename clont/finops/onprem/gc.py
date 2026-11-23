@@ -24,7 +24,8 @@ conservative all the way, a false "garbage" deletes someone's data:
 * a datastore a host outside this pass mounts is all-live, it may carry another vcenter's
   disks. so is one whose mount list never came back, and vsan / vvol, whose browse paths
   don't match what `layoutEx` names
-* a vm with no `layoutEx` could own any file, so gc doesn't run at all
+* a vm with no `layoutEx` could own any file on the datastores it uses, so those are
+  all-live. one that doesn't say which datastores it uses turns gc off for the site
 * unknown modification time is never old enough
 * a folder with a stray vmx and anything live in it is all-live, the vmx may name the rest
 
@@ -104,13 +105,23 @@ def sweep(
     if not site.files:
         return None
     vms = site.vms()
-    blind = [vm.name for vm in vms if not vm.files]
-    if blind:
+    lost = [vm.name for vm in vms if not vm.files and not vm.datastores]
+    if lost:
         log.warning(
-            "datastore gc skipped: no layoutEx for %s, their files could be anywhere",
-            _few(blind),
+            "datastore gc skipped: no layoutEx and no datastore list for %s, "
+            "their files could be anywhere",
+            _few(lost),
         )
         return None
+    # datastore moref -> vms with no layout on it, their files could be any of its files
+    by_name = {_key(ds.name): ds.uid for ds in site.datastores}
+    blind: dict[str, list[str]] = {}
+    for vm in vms:
+        if not vm.files:
+            # its vmx counts too, in case the datastore list is short
+            home = by_name.get(_key(_split(vm.vmx_path)[0])) if vm.vmx_path else None
+            for uid in {*vm.datastores, *([home] if home else [])}:
+                blind.setdefault(uid, []).append(vm.name)
 
     owned = {_norm(f.path) for vm in vms for f in vm.files}
     owned |= {_norm(vm.vmx_path) for vm in vms if vm.vmx_path}
@@ -127,6 +138,8 @@ def sweep(
         if ds.uid not in site.files:
             continue
         why = _not_judged(ds, dead)
+        if not why and ds.uid in blind:
+            why = f"no layoutEx for {_few(blind[ds.uid])}"
         if why:
             reasons[ds.name] = why
             log.warning("datastore gc: every file on %s counts as live, %s", ds.name, why)

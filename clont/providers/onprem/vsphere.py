@@ -91,6 +91,8 @@ VM_PATHS = (
     "layoutEx.disk",
     "runtime.consolidationNeeded",
     "config.files.vmPathName",
+    # the datastores a vm uses, so a vm with no layout blinds only those
+    "datastore",
 )
 FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)

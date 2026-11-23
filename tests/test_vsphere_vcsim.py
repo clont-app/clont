@@ -289,3 +289,10 @@ def test_a_full_pass_with_browse_stays_read_only(session):
     assert seen, "the spy recorded nothing, it is not wrapping the stub any more"
     assert seen <= READ_ONLY, f"non read-only calls: {sorted(seen - READ_ONLY)}"
     assert {"SearchDatastoreSubFolders_Task", "HasPrivilegeOnEntities"} <= seen
+
+
+def test_a_vm_names_the_datastores_it_uses(session):
+    # gc blinds only these when the layout is missing
+    props = _vm_props(session, SNAP_VM)
+    refs = props["datastore"]
+    assert refs and all("Datastore" in str(r) for r in refs)

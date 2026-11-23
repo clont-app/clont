@@ -18,6 +18,9 @@
   (`onprem_gc_min_age_days`, 7), `onprem_gc_keep` paths, `.fcd` / csi dirs,
   isos and datastores mounted outside the pass are live. what gc lists comes off
   `unaccounted-storage`, and a datastore that fails the parity check drops its rows
+- a vm with no `layoutEx` makes only its own datastores all-live, not the whole site
+- two or more orphaned disks under the savings floor on one datastore fold into one
+  `small-orphans` row
 - `inventory.browse` (default `true`) turns the browse off per site
 - preflight checks `Datastore.Browse` with `HasPrivilegeOnEntities` once per run;
   a datastore refused once is not browsed again that run

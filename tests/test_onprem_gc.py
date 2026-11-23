@@ -417,13 +417,89 @@ def test_no_browse_at_all_is_no_gc_and_the_old_gap():
     assert "cannot browse a datastore" in gap.summary
 
 
-def test_a_vm_with_no_layout_turns_gc_off(caplog):
+def test_a_vm_with_no_layout_and_no_datastore_list_turns_gc_off(caplog):
     vm = _vm("app-01", 60)
     del vm["layoutEx.file"]
     with caplog.at_level(logging.WARNING):
         result = swept([_file("[san-01] scratch/x.vmdk", 4)], vms=_vms(**{"vim.VirtualMachine:vm-10": vm}))
     assert result is None
     assert any("app-01" in r.getMessage() for r in caplog.records)
+
+
+DS2 = "vim.Datastore:ds-2"
+
+
+def _two_datastores():
+    return {
+        **_ds(),
+        DS2: {
+            "name": "san-02",
+            "summary.capacity": 100 * GIB,
+            "summary.freeSpace": 50 * GIB,
+            "host": [{"key": "vim.HostSystem:host-1"}],
+        },
+    }
+
+
+def test_a_vm_with_no_layout_blinds_only_its_own_datastores(caplog):
+    vm = _vm("app-01", 60)
+    del vm["layoutEx.file"]
+    vm["datastore"] = [DS2]
+    vm["config.files.vmPathName"] = "[san-02] app-01/app-01.vmx"
+    hosts = {"vim.HostSystem:host-1": {**HOSTS["vim.HostSystem:host-1"], "datastore": [DS, DS2]}}
+    built = site(vms=_vms(**{"vim.VirtualMachine:vm-10": vm}), datastores=_two_datastores(), hosts=hosts)
+    on_01 = [f for f in _live_files() if "app-01" not in f.path]
+    built = replace(
+        built,
+        files={
+            DS: (*on_01, _file("[san-01] scratch/x-flat.vmdk", 4)),
+            DS2: (_file("[san-02] app-01/app-01-flat.vmdk", 60), _file("[san-02] tmp/y-flat.vmdk", 2)),
+        },
+    )
+    with caplog.at_level(logging.WARNING):
+        result = gc.sweep(built, FinOpsTuning(), NOW)
+    # san-01 still judged, san-02 all-live
+    assert paths(result) == [("orphaned-vmdk", "[san-01] scratch/x.vmdk")]
+    assert result.judged == (DS,)
+    assert "app-01" in result.reasons["san-02"]
+    assert any("san-02" in r.getMessage() for r in caplog.records)
+
+
+def test_a_blind_vm_never_frees_its_own_vmx_folder():
+    # its vmx is on the blind datastore, so the folder can't come back as unregistered
+    vm = _vm("app-01", 60)
+    del vm["layoutEx.file"]
+    vm["datastore"] = [DS]
+    result = swept(_ghost(), vms=_vms(**{"vim.VirtualMachine:vm-10": vm}))
+    assert result.garbage == ()
+    assert result.judged == ()
+
+
+# small orphans fold into one row
+
+
+def test_small_orphans_on_one_datastore_are_one_finding():
+    # $1 floor at $0.73/gib: 1 gib each is under it, 10 gib is over
+    rows = [_file(f"[san-01] junk/d{i}-flat.vmdk", 1) for i in range(7)]
+    rows.append(_file("[san-01] scratch/big-flat.vmdk", 10))
+    found = by_kind(advise(site(rows)), "orphaned-vmdk")
+    assert len(found) == 2
+    [fold] = [r for r in found if r.resource.resource_id == "[san-01] small-orphans"]
+    assert "7 small disks on san-01" in fold.summary
+    assert "and 2 more" in fold.summary
+    assert float(fold.estimated_savings.amount) == pytest.approx(7 * STORAGE_RATE, abs=0.01)
+
+
+def test_one_small_orphan_stays_its_own_row():
+    found = by_kind(advise(site([_file("[san-01] junk/d0-flat.vmdk", 1)])), "orphaned-vmdk")
+    assert [r.resource.resource_id for r in found] == ["[san-01] junk/d0.vmdk"]
+
+
+def test_folded_orphans_still_come_off_the_gap():
+    rows = [_file(f"[san-01] junk/d{i}-flat.vmdk", 1) for i in range(7)]
+    recs = advise(site(rows))
+    [gap] = by_kind(recs, "unaccounted-storage")
+    assert float(gap.estimated_savings.amount) == pytest.approx(333 * STORAGE_RATE, abs=0.01)
 
 
 # parity, and the gap that is left

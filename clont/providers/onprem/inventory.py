@@ -144,6 +144,7 @@ class Vm:
     # every file it owns. empty when `layoutEx` never came back, and then gc can't know
     # what this vm holds
     files: tuple[VmFile, ...] = ()
+    datastores: tuple[str, ...] = ()  # morefs, every datastore it has a file on
 
     @property
     def running(self) -> bool:
@@ -513,6 +514,7 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
         consolidation_needed=props.get("runtime.consolidationNeeded") is True,
         vmx_path=_text(props.get("config.files.vmPathName")) or None,
         files=_vm_files(props.get("layoutEx.file")),
+        datastores=tuple(_refs(props.get("datastore"))),
     )
 
 

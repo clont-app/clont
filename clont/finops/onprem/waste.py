@@ -431,7 +431,7 @@ def site_findings(
 
     swept = gc.sweep(site, tuning, now, keep=[p for g in guests for p in g.paths])
     if swept is not None:
-        out.extend(gc_findings(swept, ds_rates or {}, storage_rate, now))
+        out.extend(gc_findings(swept, ds_rates or {}, storage_rate, now, floor=floor))
 
     gap = _unaccounted_gib(site, tuning, guests, swept)
     if gap is not None and gap.unexplained * storage_rate >= floor:
@@ -467,14 +467,48 @@ def gc_findings(
     ds_rates: dict[str, tuple[str, Decimal]],
     storage_rate: Decimal,
     now: datetime,
+    floor: Decimal = Decimal(0),
 ) -> list[Finding]:
     """One finding per unowned disk or unregistered folder, the path in the summary.
 
-    No savings floor: the win is freed disk, and the gap they come off is priced in full
-    either way.
+    Nothing is dropped under the savings floor, the gap they come off is priced in full
+    either way. two or more orphaned disks under it on one datastore fold into one
+    `small-orphans` row instead, so a pile of tiny leftovers is one line, not fifty.
     """
     out: list[Finding] = []
+    small: dict[str, list[gc.Garbage]] = {}
+    rows: list[gc.Garbage] = []
     for row in swept.garbage:
+        rate = ds_rates.get(row.datastore.uid, (_SITE, storage_rate))[1]
+        if row.kind == gc.ORPHANED_VMDK and row.size_gib * rate < floor:
+            small.setdefault(row.datastore.uid, []).append(row)
+        else:
+            rows.append(row)
+    for group in small.values():
+        if len(group) == 1:
+            rows.extend(group)
+            continue
+        ds = group[0].datastore
+        region, rate = ds_rates.get(ds.uid, (_SITE, storage_rate))
+        size = sum((g.size_gib for g in group), Decimal(0))
+        shown = ", ".join(g.path for g in group[:5])
+        more = f" and {len(group) - 5} more" if len(group) > 5 else ""
+        out.append(
+            Finding(
+                kind=gc.ORPHANED_VMDK,
+                resource_id=f"[{ds.name}] small-orphans",
+                region=region,
+                summary=(
+                    f"{len(group)} small disks on {ds.name} no vm lists in its layout, "
+                    f"~{_gib_fine(size)} GiB together: {shown}{more} — check nothing "
+                    "outside this vcenter uses them, then delete them in the datastore browser"
+                ),
+                monthly=size * rate,
+                approximate=True,
+                uid=f"{ds.uid}:small-orphans",
+            )
+        )
+    for row in rows:
         region, rate = ds_rates.get(row.datastore.uid, (_SITE, storage_rate))
         size = row.size_gib
         age = _age(now - row.modified)
