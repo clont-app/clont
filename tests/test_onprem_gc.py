@@ -262,6 +262,32 @@ def test_one_fresh_file_keeps_an_unregistered_folder():
     assert swept(rows).garbage == ()
 
 
+def test_a_live_disk_in_a_subfolder_keeps_an_unregistered_folder():
+    # "delete the folder" would take the subfolder, and app-01's second disk, with it
+    extra = {"key": 3, "name": "[san-01] ghost/data/app-01_1.vmdk", "type": "diskDescriptor"}
+    vms = _vms(**{"vim.VirtualMachine:vm-10": _vm("app-01", 60, extra_files=[extra])})
+    rows = [*_ghost(), _file("[san-01] ghost/data/app-01_1.vmdk", 5)]
+    assert swept(rows, vms=vms).garbage == ()
+
+
+def test_a_fresh_file_in_a_subfolder_keeps_an_unregistered_folder():
+    rows = [*_ghost(), _file("[san-01] ghost/new/x.vmdk", 1, modified=NOW - timedelta(hours=1))]
+    assert swept(rows).garbage == ()
+
+
+def test_a_dead_subfolder_does_not_save_its_unregistered_parent():
+    rows = [*_ghost(), _file("[san-01] ghost/old/x.vmdk", 1)]
+    assert paths(swept(rows)) == [
+        ("unregistered-vm", "[san-01] ghost"),
+        ("orphaned-vmdk", "[san-01] ghost/old/x.vmdk"),
+    ]
+
+
+def test_a_sibling_folder_with_a_shared_prefix_is_not_a_subfolder():
+    rows = [*_ghost(), _file("[san-01] ghost2/x.vmdk", 1, modified=NOW - timedelta(hours=1))]
+    assert paths(swept(rows)) == [("unregistered-vm", "[san-01] ghost")]
+
+
 def test_a_stray_vmx_in_the_datastore_root_is_never_the_whole_root():
     assert swept([_file("[san-01] lost.vmx"), _file("[san-01] lost.vmdk")]).garbage == ()
 

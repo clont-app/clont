@@ -175,6 +175,7 @@ def _sweep_one(
     pins: list[str],
     cutoff: datetime,
 ) -> list[Garbage]:
+    files = list(files)
     by_folder: dict[str, list[DatastoreFile]] = {}
     for f in files:
         by_folder.setdefault(_folder(f.path), []).append(f)
@@ -187,6 +188,13 @@ def _sweep_one(
             or f.modified > cutoff
         )
 
+    live_dirs = {_folder(f.path).lower() for f in files if live(f)}
+
+    def live_below(folder: str) -> bool:
+        # deleting the folder takes its subfolders with it
+        prefix = folder.lower() + "/"
+        return any(d.startswith(prefix) for d in live_dirs)
+
     out: list[Garbage] = []
     for folder, rows in sorted(by_folder.items()):
         stray = [
@@ -197,7 +205,7 @@ def _sweep_one(
             # the whole folder goes as one, or none of it does. never the datastore root
             if folder.endswith("]"):
                 continue
-            if not any(live(f) for f in rows):
+            if not any(live(f) for f in rows) and not live_below(folder):
                 out.append(Garbage(UNREGISTERED_VM, ds, folder, tuple(rows)))
             continue
         disks: dict[str, list[DatastoreFile]] = {}
