@@ -14,7 +14,8 @@ cannot serialize a whole `VirtualMachine.runtime` (pyvmomi 9 dies on an empty
 
 **Only read methods.** The whole pass is `CreateContainerView` / `RetrieveProperties` /
 `DestroyView` plus the login, which is what lets clont run under the vsphere Read-Only
-role. That claim is a test in `agents/cft/functests/vsphere` (test layer 1), not a
+role. The one exception is opt-in: `browse()` starts `SearchDatastoreSubFolders_Task`,
+a read that needs `Datastore.Browse` on top. That claim is a test in `agents/cft/functests/vsphere` (test layer 1), not a
 promise in a readme.
 
 An unset property is **absent** from the result rather than `None`, so the transform in
@@ -25,12 +26,20 @@ value that never came back.
 from __future__ import annotations
 
 import ssl
+import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
-from clont.providers.onprem.inventory import Props, SiteInventory, build_site
+from clont.providers.onprem.inventory import (
+    DatastoreFile,
+    Props,
+    SiteInventory,
+    build_site,
+    datastore_files,
+)
 from clont.providers.onprem.metrics import COUNTERS, Samples, usage_rows
 
 log = get_logger("clont.providers.onprem.vsphere")
@@ -86,6 +95,14 @@ FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)
 
 DEFAULT_PORT = 443
+
+# what gc lists. descriptor, flat/delta/sesparse extents and the vmx all match these two
+BROWSE_PATTERNS = ("*.vmdk", "*.vmx")
+# per pass, all datastores searched at once. a timed-out one is left out, i.e. all-live
+BROWSE_TIMEOUT_SECONDS = 300
+BROWSE_POLL_SECONDS = 2
+# the one privilege the browse needs beyond Read-Only
+BROWSE_GRANT = "Datastore.Browse"
 
 # 2-hour rollups, because vcenter keeps those 30 days by default and the 5-minute series
 # only an hour — a 14-day lookback has nothing to read in the fine one
@@ -175,7 +192,7 @@ class VsphereInventory:
             self._si = None
             self._content = None
 
-    def site(self, *, usage_window_days: int = 0) -> SiteInventory:
+    def site(self, *, usage_window_days: int = 0, browse: bool = False) -> SiteInventory:
         """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in.
 
         `usage_window_days` above zero adds the measured half — a `QueryPerf` over the
@@ -196,6 +213,8 @@ class VsphereInventory:
         site = build_site(clusters, hosts, datastores, vms, folders | compute, datacenters)
         if usage_window_days > 0:
             site.usage.update(usage_rows(site.vms(), self.samples(usage_window_days)))
+        if browse:
+            site = replace(site, files=self.browse())
         log.info(
             "%s: %d pools, %d hosts, %d vms, %d datastores, %d measured",
             self.endpoint,
@@ -257,6 +276,82 @@ class VsphereInventory:
                     for series in (result.value or [])
                     if series.id.counterId in by_id
                 }
+        return out
+
+    def browse(
+        self,
+        *,
+        timeout_seconds: float = BROWSE_TIMEOUT_SECONDS,
+        poll_seconds: float = BROWSE_POLL_SECONDS,
+    ) -> dict[str, tuple[DatastoreFile, ...]]:
+        """Every vmdk and vmx on every datastore, keyed by datastore moref.
+
+        `SearchDatastoreSubFolders_Task` is a task but only reads, and needs
+        `Datastore.Browse` on top of Read-Only. A datastore that faults, times out or
+        isn't accessible is left out of the result, which gc reads as "all live". A
+        missing grant is one warning naming it, never a failed pass.
+        """
+        vim = self._require_vim()
+        spec = vim.host.DatastoreBrowser.SearchSpec(
+            matchPattern=list(BROWSE_PATTERNS),
+            details=vim.host.DatastoreBrowser.FileInfo.Details(
+                fileType=True, fileSize=True, modification=True, fileOwner=False
+            ),
+        )
+        tasks: dict[str, tuple[str, Any]] = {}
+        denied: list[str] = []
+        for ds in self._entities(vim.Datastore):
+            ds_id, name = _moref(ds), ds.name
+            try:
+                if not ds.summary.accessible:
+                    log.warning("%s: datastore %s not accessible, not browsed", self.endpoint, name)
+                    continue
+                task = ds.browser.SearchDatastoreSubFolders_Task(
+                    datastorePath=f"[{name}]", searchSpec=spec
+                )
+            except vim.fault.NoPermission:
+                denied.append(name)
+                continue
+            except Exception as exc:  # noqa: BLE001 - one datastore is not the pass
+                log.warning("%s: datastore %s not browsed: %s", self.endpoint, name, exc)
+                continue
+            tasks[ds_id] = (name, task)
+
+        out: dict[str, tuple[DatastoreFile, ...]] = {}
+        deadline = time.monotonic() + timeout_seconds
+        pending = dict(tasks)
+        while pending:
+            for ds_id, (name, task) in list(pending.items()):
+                info = task.info
+                if info.state == vim.TaskInfo.State.success:
+                    out[ds_id] = datastore_files(ds_id, _plain(info.result))
+                    del pending[ds_id]
+                elif info.state == vim.TaskInfo.State.error:
+                    # the privilege check may happen inside the task, not at the call
+                    if isinstance(info.error, vim.fault.NoPermission):
+                        denied.append(name)
+                    else:
+                        log.warning(
+                            "%s: datastore %s not browsed: %s", self.endpoint, name, info.error
+                        )
+                    del pending[ds_id]
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                log.warning(
+                    "%s: browse timed out on %s, every file there counts as live",
+                    self.endpoint,
+                    ", ".join(sorted(name for name, _ in pending.values())),
+                )
+                break
+            time.sleep(poll_seconds)
+        if denied:
+            log.warning(
+                "%s: no %s on %s, file list skipped there — grant it to the clont role",
+                self.endpoint,
+                BROWSE_GRANT,
+                ", ".join(sorted(denied)),
+            )
         return out
 
     def _entities(self, managed_type: Any) -> list[Any]:

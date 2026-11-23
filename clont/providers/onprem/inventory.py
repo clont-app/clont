@@ -220,6 +220,22 @@ class Pool:
 
 
 @dataclass(frozen=True, slots=True)
+class DatastoreFile:
+    """One file the datastore browser listed. gc's raw material, judged elsewhere."""
+
+    datastore: str  # moref
+    # `[LocalDS_0] web-1/web-1-flat.vmdk`, the form `layoutEx.file` names it by
+    path: str
+    size_gib: Decimal
+    # none when the host didn't say. an unknown age is never old enough to be garbage
+    modified: datetime | None = None
+
+    @property
+    def folder(self) -> str:
+        return self.path.rsplit("/", 1)[0] if "/" in self.path else self.path
+
+
+@dataclass(frozen=True, slots=True)
 class SiteInventory:
     """One pass over one vcenter. The leftovers are findings, not errors."""
 
@@ -232,6 +248,9 @@ class SiteInventory:
     # moref -> measured usage, for the vms with enough perf history. empty when the pass
     # read no counters at all, which is not the same as every vm sitting at zero
     usage: dict[str, Usage] = field(default_factory=dict)
+    # datastore moref -> every vmdk/vmx on it. a datastore that wasn't browsed (no grant,
+    # timed out, failed) is absent, and absent means every file on it is live
+    files: dict[str, tuple[DatastoreFile, ...]] = field(default_factory=dict)
 
     def pool(self, key: str) -> Pool | None:
         return next((pool for pool in self.pools if pool.key == key or pool.name == key), None)
@@ -325,6 +344,37 @@ def build_site(
         ),
         datastores=tuple(ds_objects.values()),
     )
+
+
+def datastore_files(ds_id: str, results: object) -> tuple[DatastoreFile, ...]:
+    """`HostDatastoreBrowserSearchResults` (plain dicts) -> one row per file, path sorted."""
+    out = []
+    for folder in _items(results):
+        if not isinstance(folder, dict):
+            continue
+        base = _text(folder.get("folderPath"))
+        for info in _items(folder.get("file")):
+            if not isinstance(info, dict):
+                continue
+            name = _text(info.get("path"))
+            if not name:
+                continue
+            # the root comes back as `[ds]` or `[ds] `, a subfolder as `[ds] vm/`
+            if base.endswith("]"):
+                path = f"{base} {name}"
+            elif base.endswith(("/", "] ")):
+                path = f"{base}{name}"
+            else:
+                path = f"{base}/{name}"
+            out.append(
+                DatastoreFile(
+                    datastore=ds_id,
+                    path=path,
+                    size_gib=Decimal(_int(info.get("fileSize"))) / BYTES_PER_GIB,
+                    modified=_when(info.get("modification")),
+                )
+            )
+    return tuple(sorted(out, key=lambda row: row.path))
 
 
 def _group(

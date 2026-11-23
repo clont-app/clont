@@ -470,3 +470,102 @@ def test_the_wire_turns_data_objects_into_plain_dicts():
         )
     )
     assert layout["disk"][0]["chain"][0]["fileKey"] == [1, 2]
+
+
+def test_browse_results_become_one_row_per_file_with_its_full_path():
+    from clont.providers.onprem.inventory import datastore_files
+
+    when = datetime(2026, 11, 1, tzinfo=UTC)
+    results = [
+        {"folderPath": "[LocalDS_0]", "file": [{"path": "loose.vmdk", "fileSize": 1024**3}]},
+        {
+            "folderPath": "[LocalDS_0] web-1/",
+            "file": [
+                {"path": "web-1.vmx", "fileSize": 4096, "modification": when},
+                {"path": "web-1-flat.vmdk", "fileSize": 10 * 1024**3, "modification": when},
+            ],
+        },
+        {"folderPath": "[LocalDS_0] old", "file": [{"path": "old.vmdk"}, {"fileSize": 9}]},
+    ]
+    rows = datastore_files("vim.Datastore:ds-1", results)
+    assert [row.path for row in rows] == [
+        "[LocalDS_0] loose.vmdk",
+        "[LocalDS_0] old/old.vmdk",
+        "[LocalDS_0] web-1/web-1-flat.vmdk",
+        "[LocalDS_0] web-1/web-1.vmx",
+    ]
+    flat = rows[2]
+    assert flat.size_gib == Decimal(10) and flat.modified == when
+    assert flat.folder == "[LocalDS_0] web-1"
+    # no size and no time come back as zero and unknown, never a guess
+    assert rows[1].size_gib == 0 and rows[1].modified is None
+    assert datastore_files("vim.Datastore:ds-1", None) == ()
+
+
+class _Task:
+    def __init__(self, states):
+        self._states = list(states)
+
+    @property
+    def info(self):
+        state, result, error = self._states.pop(0) if len(self._states) > 1 else self._states[0]
+        return type("Info", (), {"state": state, "result": result, "error": error})()
+
+
+class _Ds:
+    def __init__(self, moid, name, task=None, raises=None, accessible=True):
+        self._moId, self.name = moid, name
+        self.summary = type("S", (), {"accessible": accessible})()
+        outer = self
+
+        class _Browser:
+            def SearchDatastoreSubFolders_Task(self, datastorePath, searchSpec):
+                outer.asked = (datastorePath, list(searchSpec.matchPattern))
+                if raises:
+                    raise raises
+                return task
+
+        self.browser = _Browser()
+
+
+def _browsing(monkeypatch, datastores):
+    vim = pytest.importorskip("pyVmomi").vim
+    from clont.providers.onprem import vsphere
+
+    session = vsphere.VsphereInventory("vc.lab", "ro", "x")
+    session._si, session._vim = object(), vim
+    monkeypatch.setattr(session, "_entities", lambda _type: datastores)
+    monkeypatch.setattr(vsphere, "_moref", lambda obj: f"vim.Datastore:{obj._moId}")
+    monkeypatch.setattr(vsphere.time, "sleep", lambda _s: None)
+    return vim, session
+
+
+def test_browse_lists_files_and_skips_what_it_cannot_read(monkeypatch, caplog):
+    vim = pytest.importorskip("pyVmomi").vim
+    state = vim.TaskInfo.State
+    folder = vim.host.DatastoreBrowser.SearchResults(
+        folderPath="[a] vm/",
+        file=[vim.host.DatastoreBrowser.FileInfo(path="vm.vmdk", fileSize=1024**3)],
+    )
+    good = _Ds("ds-1", "a", _Task([(state.running, None, None), (state.success, [folder], None)]))
+    denied = _Ds("ds-2", "b", raises=vim.fault.NoPermission(privilegeId="Datastore.Browse"))
+    denied_late = _Ds("ds-3", "c", _Task([(state.error, None, vim.fault.NoPermission())]))
+    broken = _Ds("ds-4", "d", _Task([(state.error, None, vim.fault.FileNotFound())]))
+    offline = _Ds("ds-5", "e", accessible=False)
+    _, session = _browsing(monkeypatch, [good, denied, denied_late, broken, offline])
+
+    files = session.browse()
+    assert list(files) == ["vim.Datastore:ds-1"]
+    assert [row.path for row in files["vim.Datastore:ds-1"]] == ["[a] vm/vm.vmdk"]
+    assert good.asked == ("[a]", ["*.vmdk", "*.vmx"])
+    # one warning names the grant and every datastore it cost
+    grant = [r.getMessage() for r in caplog.records if "Datastore.Browse" in r.getMessage()]
+    assert len(grant) == 1 and "b, c" in grant[0]
+
+
+def test_a_browse_that_never_finishes_leaves_the_datastore_out(monkeypatch, caplog):
+    vim = pytest.importorskip("pyVmomi").vim
+    slow = _Ds("ds-1", "slow", _Task([(vim.TaskInfo.State.running, None, None)]))
+    _, session = _browsing(monkeypatch, [slow])
+    assert session.browse(timeout_seconds=0) == {}
+    assert any("timed out on slow" in r.getMessage() for r in caplog.records)
