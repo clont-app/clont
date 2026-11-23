@@ -176,6 +176,8 @@ own iron:
 - `onprem_rightsize_target_pct` (float, default `70`) — headroom left over the
   p95 when shrinking. a vm already near that target yields nothing and emits no
   finding.
+- `onprem_snapshot_max_days` (float, default `3`) — a vm snapshot older than this
+  is `old-vm-snapshot`. vmware's own advice is 72h. `0` flags every snapshot.
 
 kubernetes:
 

@@ -224,6 +224,8 @@ the disk it **occupies**, never the thin promise.
 | `unmounted-datastore` | an array no host mounts, so none of it can be used |
 | `orphan-vm` | vcenter lists it on no host, usually a failed migration |
 | `thin-overcommit` | a risk, not a saving: reports $0 and what the promises add up to |
+| `old-vm-snapshot` | snapshots older than `onprem_snapshot_max_days` (3), priced on their deltas. names backup leftovers; fix is the snapshot manager, never the delta files |
+| `consolidation-needed` | a risk, $0: a snapshot delete left deltas behind, they grow and slow writes |
 
 two things that keep the numbers honest. **per-cluster findings are priced on
 your own card, so they're exact** (`approximate=False`, which no aws finding

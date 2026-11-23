@@ -58,6 +58,8 @@ DATASTORE_PATHS = (
     "summary.type",
     # `ds:///vmfs/volumes/<uuid>/` — what a vsphere csi pv names its datastore by
     "summary.url",
+    # every host that mounts it, seen or not — a mount we can't see makes it shared
+    "host",
 )
 VM_PATHS = (
     "name",
@@ -72,6 +74,13 @@ VM_PATHS = (
     # cloud provider wrote it, so both are read and either may match a node
     "config.instanceUuid",
     "config.uuid",
+    # the snapshot tree, and which files each snapshot and each disk chain owns
+    "snapshot",
+    "layoutEx.file",
+    "layoutEx.snapshot",
+    "layoutEx.disk",
+    "runtime.consolidationNeeded",
+    "config.files.vmPathName",
 )
 FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)
@@ -318,12 +327,26 @@ def _moref(obj: Any) -> str:
     return f"{type(obj).__name__}:{obj._moId}"
 
 
+_DATA_NOISE = ("dynamicType", "dynamicProperty")
+
+
 def _plain(value: Any) -> Any:
-    """Strip pyvmomi types down to str/int/bool, so `inventory.py` stays sdk-free."""
+    """Strip pyvmomi types down to str/int/bool/datetime, lists and dicts, so `inventory.py`
+    stays sdk-free."""
     if hasattr(value, "_moId"):
         return _moref(value)
     if isinstance(value, list | tuple):
         return [_plain(item) for item in value]
-    if isinstance(value, bool | int | float | str):
+    if isinstance(value, bool | int | float | str | datetime):
         return value
+    if hasattr(value, "_GetPropertyList"):
+        # a data object (snapshot tree, layoutEx) becomes a dict, unset fields left out
+        out = {}
+        for prop in value._GetPropertyList():
+            if prop.name in _DATA_NOISE:
+                continue
+            item = getattr(value, prop.name, None)
+            if item is not None:
+                out[prop.name] = _plain(item)
+        return out
     return str(value)

@@ -7,6 +7,7 @@ whole point of the transform is to produce that payload.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -304,3 +305,168 @@ def test_payload_feeds_the_allocator(site):
     assert result["overcommit"]["ram"] == pytest.approx(16 / 512)
     assert result["overcommit"]["storage"] == pytest.approx(260 / 10240)
     assert result["headroom"] > 0
+
+
+# a vm with two snapshots: before-upgrade, and a veeam leftover taken on top of it
+# file keys: 0 vmx, 1+2 base disk, 3+4 the delta before-upgrade started, 5+6 the live delta
+SNAP_VM = {
+    "name": "db-01",
+    "runtime.host": "vim.HostSystem:host-1",
+    "runtime.powerState": "poweredOn",
+    "config.hardware.numCPU": 2,
+    "config.hardware.memoryMB": 4096,
+    "summary.storage.committed": 60 * GIB,
+    "runtime.consolidationNeeded": True,
+    "config.files.vmPathName": "[local-01] db-01/db-01.vmx",
+    "snapshot": {
+        "currentSnapshot": "vim.vm.Snapshot:snapshot-2",
+        "rootSnapshotList": [
+            {
+                "snapshot": "vim.vm.Snapshot:snapshot-1",
+                "name": "before-upgrade",
+                "id": 1,
+                "createTime": "2026-10-01T08:00:00+00:00",
+                "quiesced": False,
+                "childSnapshotList": [
+                    {
+                        "snapshot": "vim.vm.Snapshot:snapshot-2",
+                        "name": "VEEAM BACKUP TEMPORARY SNAPSHOT",
+                        "id": 2,
+                        "createTime": "2026-11-01T02:00:00",
+                        "quiesced": True,
+                    }
+                ],
+            }
+        ],
+    },
+    "layoutEx.file": [
+        {"key": 0, "type": "config", "size": GIB},
+        {"key": 1, "type": "diskDescriptor", "size": 0},
+        {"key": 2, "type": "diskExtent", "size": 40 * GIB},
+        {"key": 3, "type": "diskDescriptor", "size": 0},
+        {"key": 4, "type": "diskExtent", "size": 8 * GIB},
+        {"key": 5, "type": "diskDescriptor", "size": 0},
+        {"key": 6, "type": "diskExtent", "size": 2 * GIB},
+        {"key": 10, "type": "snapshotData", "size": GIB},
+        {"key": 11, "type": "snapshotData", "size": 0},
+        {"key": 12, "type": "snapshotMemory", "size": 4 * GIB},
+    ],
+    "layoutEx.snapshot": [
+        {
+            "key": "vim.vm.Snapshot:snapshot-1",
+            "dataKey": 10,
+            # key 0 is the vmx, never a snapshot's memory
+            "memoryKey": 0,
+            "disk": [{"key": 2000, "chain": [{"fileKey": [1, 2]}]}],
+        },
+        {
+            "key": "vim.vm.Snapshot:snapshot-2",
+            "dataKey": 11,
+            "memoryKey": 12,
+            "disk": [{"key": 2000, "chain": [{"fileKey": [1, 2]}, {"fileKey": [3, 4]}]}],
+        },
+    ],
+    "layoutEx.disk": [
+        {
+            "key": 2000,
+            "chain": [{"fileKey": [1, 2]}, {"fileKey": [3, 4]}, {"fileKey": [5, 6]}],
+        }
+    ],
+}
+
+
+def _one_vm(props):
+    hosts = {"vim.HostSystem:host-1": {**HOSTS["vim.HostSystem:host-1"], "vm": ["vim.VirtualMachine:vm-50"]}}
+    site = build_site({}, hosts, DATASTORES, {"vim.VirtualMachine:vm-50": props})
+    return site.vms()[0]
+
+
+def test_snapshot_tree_is_flattened_root_first_with_its_path():
+    vm = _one_vm(SNAP_VM)
+    assert [snap.path for snap in vm.snapshots] == [
+        "before-upgrade",
+        "before-upgrade / VEEAM BACKUP TEMPORARY SNAPSHOT",
+    ]
+    first, second = vm.snapshots
+    assert first.uid == "vim.vm.Snapshot:snapshot-1"
+    assert first.created == datetime(2026, 10, 1, 8, tzinfo=UTC)
+    # a naive time is vcenter's utc
+    assert second.created == datetime(2026, 11, 1, 2, tzinfo=UTC)
+    assert (first.quiesced, second.quiesced) == (False, True)
+    assert vm.consolidation_needed is True
+    assert vm.vmx_path == "[local-01] db-01/db-01.vmx"
+
+
+def test_a_snapshot_is_sized_by_the_delta_it_started_plus_its_own_files():
+    first, second = _one_vm(SNAP_VM).snapshots
+    # the 8 gib delta after its chain + its 1 gib vmsn, the vmx behind memoryKey 0 is not it
+    assert first.size_gib == Decimal(9)
+    # the live 2 gib delta + 4 gib vmem
+    assert second.size_gib == Decimal(6)
+
+
+def test_a_snapshot_with_no_layout_is_kept_at_size_zero():
+    props = {k: v for k, v in SNAP_VM.items() if not k.startswith("layoutEx")}
+    vm = _one_vm(props)
+    assert len(vm.snapshots) == 2
+    assert all(snap.size_gib == 0 for snap in vm.snapshots)
+
+
+def test_missing_snapshot_paths_are_empty_not_errors(site):
+    vm = next(vm for vm in site.vms() if vm.name == "app-01")
+    assert vm.snapshots == ()
+    assert vm.consolidation_needed is False
+    assert vm.vmx_path is None
+    # an empty tree or a garbled create time is tolerated the same way
+    odd = {**SNAP_VM, "snapshot": {"rootSnapshotList": []}}
+    assert _one_vm(odd).snapshots == ()
+    garbled = {
+        **SNAP_VM,
+        "snapshot": {"rootSnapshotList": [{"name": "x", "createTime": "not a date"}]},
+    }
+    assert _one_vm(garbled).snapshots[0].created is None
+
+
+def test_datastore_carries_the_hosts_that_mount_it():
+    datastores = {
+        "vim.Datastore:ds-1": {
+            **DATASTORES["vim.Datastore:ds-1"],
+            "host": [
+                {"key": "vim.HostSystem:host-1", "mountInfo": {"path": "/vmfs/volumes/x"}},
+                {"key": "vim.HostSystem:host-77"},  # a host this pass never saw
+            ],
+        }
+    }
+    site = build_site({}, {}, datastores, {})
+    assert site.datastores[0].mount_hosts == ("vim.HostSystem:host-1", "vim.HostSystem:host-77")
+    plain = build_site({}, {}, DATASTORES, {})
+    assert all(ds.mount_hosts == () for ds in plain.datastores)
+
+
+def test_the_wire_turns_data_objects_into_plain_dicts():
+    vim = pytest.importorskip("pyVmomi").vim
+    from clont.providers.onprem.vsphere import _plain
+
+    created = datetime(2026, 10, 1, tzinfo=UTC)
+    tree = vim.vm.SnapshotTree(
+        snapshot=vim.vm.Snapshot("snapshot-1"),
+        name="before-upgrade",
+        id=1,
+        createTime=created,
+        quiesced=False,
+        childSnapshotList=[],
+    )
+    out = _plain(vim.vm.SnapshotInfo(rootSnapshotList=[tree]))
+    node = out["rootSnapshotList"][0]
+    assert node["snapshot"] == "vim.vm.Snapshot:snapshot-1"
+    assert node["createTime"] == created
+    assert (node["name"], node["id"], node["quiesced"]) == ("before-upgrade", 1, False)
+    assert "dynamicType" not in node
+    layout = _plain(
+        vim.vm.FileLayoutEx.SnapshotLayout(
+            key=vim.vm.Snapshot("snapshot-1"),
+            dataKey=3,
+            disk=[vim.vm.FileLayoutEx.DiskLayout(key=2000, chain=[vim.vm.FileLayoutEx.DiskUnit(fileKey=[1, 2])])],
+        )
+    )
+    assert layout["disk"][0]["chain"][0]["fileKey"] == [1, 2]

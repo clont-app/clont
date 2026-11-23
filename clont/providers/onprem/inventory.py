@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -81,10 +82,28 @@ class Datastore:
     # `ds:///vmfs/volumes/<uuid>/` — the id a vsphere csi volume names its datastore by;
     # the shown name is not one, two datacenters each have a "LocalDS_0"
     url: str | None = None
+    # morefs of every host that mounts it, including hosts outside this pass
+    mount_hosts: tuple[str, ...] = ()
 
     @property
     def overcommit(self) -> Decimal:
         return self.provisioned_gib / self.capacity_gib
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """One snapshot of a vm, flattened out of the tree.
+
+    `size_gib` is the delta it started plus its own vmsn / vmem, read off `layoutEx`. a
+    vm whose layout never came back has snapshots of size 0, not no snapshots.
+    """
+
+    uid: str          # the snapshot moref, or the vm-local id when that is missing
+    name: str
+    path: str         # "before-upgrade / nightly", root first
+    created: datetime | None
+    size_gib: Decimal = Decimal(0)
+    quiesced: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +126,10 @@ class Vm:
     # duplicate — both are kept because `vsphere://` in a providerID means either one
     instance_uuid: str | None = None
     bios_uuid: str | None = None
+    snapshots: tuple[Snapshot, ...] = ()
+    # vcenter's own flag that a delete left delta disks behind
+    consolidation_needed: bool = False
+    vmx_path: str | None = None  # "[san-01] app-01/app-01.vmx"
 
     @property
     def running(self) -> bool:
@@ -386,6 +409,7 @@ def _datastore(ds_id: str, props: dict[str, object]) -> Datastore:
         / BYTES_PER_GIB,
         kind=_text(props.get("summary.type")) or None,
         url=_text(props.get("summary.url")) or None,
+        mount_hosts=tuple(_mount_hosts(props.get("host"))),
     )
 
 
@@ -412,7 +436,129 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
         incomplete=vcpu <= 0 or ram_mib <= 0,
         instance_uuid=_text(props.get("config.instanceUuid")) or None,
         bios_uuid=_text(props.get("config.uuid")) or None,
+        snapshots=_snapshots(props),
+        consolidation_needed=props.get("runtime.consolidationNeeded") is True,
+        vmx_path=_text(props.get("config.files.vmPathName")) or None,
     )
+
+
+def _mount_hosts(value: object) -> list[str]:
+    """`DatastoreHostMount` list -> host morefs. a bare moref list is taken as-is."""
+    out = []
+    for mount in _items(value):
+        key = mount.get("key") if isinstance(mount, dict) else mount
+        if key:
+            out.append(str(key))
+    return out
+
+
+# file types that are a snapshot's own state, never a disk
+_SNAPSHOT_FILES = ("snapshotData", "snapshotMemory")
+
+
+def _snapshots(props: dict[str, object]) -> tuple[Snapshot, ...]:
+    """The snapshot tree flattened root first, each sized off `layoutEx`.
+
+    A snapshot freezes the disk chain it lists in `layoutEx.snapshot`, and the vm writes
+    to the next link from then on — so the delta a snapshot *started* is the unit right
+    after its own chain, in any chain that extends it (a child snapshot's, or the disk's
+    current one in `layoutEx.disk`). plus its vmsn and vmem. a missing layout is size 0
+    """
+    info = props.get("snapshot")
+    roots = _items(info.get("rootSnapshotList")) if isinstance(info, dict) else []
+    if not roots:
+        return ()
+    files = {
+        _int(item.get("key")): item
+        for item in _items(props.get("layoutEx.file"))
+        if isinstance(item, dict) and item.get("key") is not None
+    }
+    layouts = {
+        _text(item.get("key")): item
+        for item in _items(props.get("layoutEx.snapshot"))
+        if isinstance(item, dict)
+    }
+    # every chain we know of per disk, snapshot ones and the live one
+    chains: dict[int, list[list[tuple[int, ...]]]] = {}
+    for disks in [_items(layout.get("disk")) for layout in layouts.values()] + [
+        _items(props.get("layoutEx.disk"))
+    ]:
+        for disk in disks:
+            if isinstance(disk, dict):
+                chains.setdefault(_int(disk.get("key")), []).append(_chain(disk))
+
+    def size(layout: dict | None) -> Decimal:
+        if layout is None:
+            return Decimal(0)
+        own: set[int] = set()
+        for key in ("dataKey", "memoryKey"):
+            file_key = _int(layout.get(key)) if layout.get(key) is not None else None
+            # memoryKey is -1 or unset with no memory file, and key 0 is usually the vmx
+            if file_key in files and files[file_key].get("type") in _SNAPSHOT_FILES:
+                own.add(file_key)
+        for disk in _items(layout.get("disk")):
+            if not isinstance(disk, dict):
+                continue
+            frozen = _chain(disk)
+            for other in chains.get(_int(disk.get("key")), []):
+                if len(other) > len(frozen) and other[: len(frozen)] == frozen:
+                    own.update(other[len(frozen)])
+        return Decimal(sum(_int(files[k].get("size")) for k in own if k in files)) / BYTES_PER_GIB
+
+    out: list[Snapshot] = []
+
+    def walk(nodes: list, parent: str) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            name = _text(node.get("name"))
+            path = f"{parent} / {name}" if parent else name
+            ref = _text(node.get("snapshot"))
+            out.append(
+                Snapshot(
+                    uid=ref or _text(node.get("id")) or path,
+                    name=name,
+                    path=path,
+                    created=_when(node.get("createTime")),
+                    size_gib=size(layouts.get(ref)),
+                    quiesced=node.get("quiesced") is True,
+                )
+            )
+            walk(_items(node.get("childSnapshotList")), path)
+
+    walk(roots, "")
+    return tuple(out)
+
+
+def _chain(disk: dict) -> list[tuple[int, ...]]:
+    """One disk's chain as file-key tuples, base first. a unit is descriptor + extent."""
+    return [
+        tuple(_int(key) for key in _items(unit.get("fileKey")))
+        for unit in _items(disk.get("chain"))
+        if isinstance(unit, dict)
+    ]
+
+
+def _items(value: object) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list | tuple):
+        return list(value)
+    return [value]
+
+
+def _when(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            moment = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    # vcenter sends utc, a naive time is taken as that
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
 def _refs(value: object) -> list[str]:

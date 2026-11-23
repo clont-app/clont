@@ -1,5 +1,13 @@
 # changelog
 
+## unreleased
+
+### finops
+
+- on-prem: `old-vm-snapshot` (snapshots older than `onprem_snapshot_max_days`,
+  default 3, sized off `layoutEx`, backup leftovers named) and
+  `consolidation-needed` ($0, a risk). still under the Read-Only role
+
 ## 0.4.1
 
 ### finops

@@ -25,6 +25,11 @@ What the snapshot alone proves:
   reported against their claims instead
 * **thin overcommit** is a risk, not a saving: it reports $0 and says what the promises
   add up to
+* **an old vm snapshot** holds a delta that only grows, and slows every write. priced at
+  the pool's storage rate on the size of its deltas, approximate because `layoutEx` sizes
+  are what the files hold now. the advice is the snapshot manager, never the delta files:
+  removing those by hand breaks the chain
+* **consolidation needed** is vcenter saying a delete left deltas behind. a risk, $0
 
 And what the measured window adds:
 
@@ -56,6 +61,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
 from clont.core.errors import ConfigError
@@ -66,7 +72,7 @@ from clont.finops.base import FinOpsTuning
 from clont.finops.guests import GuestStorage
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.onprem.rates import allocate
-from clont.providers.onprem.inventory import Pool, SiteInventory, Vm
+from clont.providers.onprem.inventory import Pool, SiteInventory, Snapshot, Vm
 from clont.providers.onprem.metrics import Usage
 from clont.providers.onprem.provider import OnPremProvider
 
@@ -77,6 +83,20 @@ _SERVICE = "waste"
 _SITE = "site"  # the "region" of a finding that belongs to no pool
 _CENT = Decimal("0.01")
 _HUNDRED = Decimal(100)
+
+# what common backup tools name the snapshot they take, upper-cased. one left behind is a
+# job that failed to clean up, and the operator should hear which tool
+_BACKUP_SNAPSHOTS = (
+    ("VEEAM BACKUP TEMPORARY SNAPSHOT", "veeam"),
+    ("_VCB-BACKUP_", "vcb"),
+    ("__GX_BACKUP__", "commvault"),
+    ("NBU_SNAPSHOT", "netbackup"),
+    ("NAKIVO", "nakivo"),
+    ("RUBRIK", "rubrik"),
+    ("COHESITY", "cohesity"),
+    ("AVAMAR", "avamar"),
+    ("CONSOLIDATE HELPER", "a failed consolidation"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +132,7 @@ class OnPremWasteCollector:
 
     def recommendations(self, period: Period) -> list[Recommendation]:
         site = self._provider.inventory()
+        now = datetime.now(UTC)
         findings: list[Finding] = []
         priced: list[tuple[Pool, dict]] = []
         for pool in site.pools:
@@ -124,6 +145,16 @@ class OnPremWasteCollector:
             priced.append((pool, result))
             findings.extend(pool_findings(pool, result, self._tuning))
             findings.extend(usage_findings(pool, result, site.usage, self._tuning))
+            findings.extend(
+                snapshot_findings(
+                    pool.vms,
+                    pool.key,
+                    _handback_rate(result, "storage_gib_month", "storage"),
+                    self._tuning,
+                    now,
+                    pool.labels(),
+                )
+            )
 
         rate = site_storage_rate(priced)
         if rate is None:
@@ -133,7 +164,7 @@ class OnPremWasteCollector:
         else:
             # what the clusters on this iron own up to holding, so the storage gap is not
             # offered back twice — see `_unaccounted_gib`
-            findings.extend(site_findings(site, rate, self._tuning, self._guests()))
+            findings.extend(site_findings(site, rate, self._tuning, self._guests(), now=now))
         return [self._rec(finding) for finding in _once(findings)]
 
     def _guests(self) -> list[GuestStorage]:
@@ -323,10 +354,14 @@ def site_findings(
     storage_rate: Decimal,
     tuning: FinOpsTuning,
     guests: Iterable[GuestStorage] = (),
+    *,
+    now: datetime | None = None,
 ) -> list[Finding]:
     """The leftovers that belong to no pool, priced at the site's mean storage rate."""
     floor = Decimal(str(tuning.onprem_min_savings_usd))
-    out: list[Finding] = []
+    out: list[Finding] = snapshot_findings(
+        site.orphan_vms, _SITE, storage_rate, tuning, now or datetime.now(UTC)
+    )
 
     for vm in site.orphan_vms:
         monthly = vm.committed_gib * storage_rate
@@ -386,6 +421,97 @@ def site_findings(
             )
         )
     return out
+
+
+def snapshot_findings(
+    vms: Iterable[Vm],
+    region: str,
+    storage_rate: Decimal,
+    tuning: FinOpsTuning,
+    now: datetime,
+    labels: dict[str, str] | None = None,
+) -> list[Finding]:
+    """Old snapshots and pending consolidations, one finding of each kind per vm at most.
+
+    Both are risks before they are savings, so neither is held to the savings floor: a
+    two-week-old snapshot of a quiet vm is small and still the thing that breaks a restore.
+    A snapshot with no create time is never called old.
+    """
+    limit = timedelta(days=float(tuning.onprem_snapshot_max_days))
+    out: list[Finding] = []
+    for vm in vms:
+        label = (labels or {}).get(vm.uid, vm.name)
+        old = [
+            snap
+            for snap in vm.snapshots
+            if snap.created is not None and now - snap.created > limit
+        ]
+        if old:
+            size = sum((snap.size_gib for snap in old), Decimal(0))
+            out.append(
+                Finding(
+                    kind="old-vm-snapshot",
+                    resource_id=label,
+                    region=region,
+                    summary=_snapshot_summary(vm, old, size, now, tuning),
+                    monthly=size * storage_rate,
+                    approximate=True,
+                    uid=vm.uid,
+                )
+            )
+        if vm.consolidation_needed:
+            out.append(
+                Finding(
+                    kind="consolidation-needed",
+                    resource_id=label,
+                    region=region,
+                    summary=(
+                        f"{vm.name} needs its disks consolidated — a snapshot delete left "
+                        "delta files in the chain, they keep growing and every write is "
+                        "slower for it. run snapshots > consolidate on the vm"
+                    ),
+                    monthly=Decimal(0),
+                    uid=vm.uid,
+                )
+            )
+    return out
+
+
+def _snapshot_summary(
+    vm: Vm, old: list[Snapshot], size: Decimal, now: datetime, tuning: FinOpsTuning
+) -> str:
+    parts = []
+    for snap in old:
+        part = f"'{snap.path}' {_age(now - snap.created)}"
+        tool = _backup_tool(snap.name)
+        if tool:
+            part += f" (left behind by {tool}, the backup job did not clean up)"
+        parts.append(part)
+    held = f"~{_gib_fine(size)} GiB of delta" if size > 0 else "deltas of unknown size"
+    return (
+        f"{vm.name} has {len(old)} snapshot(s) older than "
+        f"{tuning.onprem_snapshot_max_days:g} days: {', '.join(parts)}, holding {held} — "
+        "delete them in the snapshot manager so vsphere consolidates the chain. never "
+        "remove the delta files by hand, that breaks the disk"
+    )
+
+
+def _backup_tool(name: str) -> str | None:
+    upper = name.upper()
+    return next((tool for mark, tool in _BACKUP_SNAPSHOTS if mark in upper), None)
+
+
+def _age(delta: timedelta) -> str:
+    days = int(delta.total_seconds() // 86400)
+    if days >= 1:
+        return f"{days} day{'s' if days != 1 else ''}"
+    hours = int(delta.total_seconds() // 3600)
+    return f"{hours} hour{'s' if hours != 1 else ''}"
+
+
+def _gib_fine(value: Decimal) -> str:
+    # a snapshot delta is often a few gib, where `_gib` rounds to nothing useful
+    return f"{float(value):,.1f}" if value < 10 else _gib(value)
 
 
 def site_storage_rate(priced: Iterable[tuple[Pool, dict]]) -> Decimal | None:

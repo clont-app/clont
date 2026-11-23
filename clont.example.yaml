@@ -161,6 +161,7 @@ finops:
   # cpu reuses idle_cpu_pct; a vm has to be quiet on both to count as idle
   onprem_idle_ram_pct: 20            # p95 ram below which a running vm is idle
   onprem_rightsize_target_pct: 70    # headroom left over the p95 when shrinking, 0 < x <= 100
+  onprem_snapshot_max_days: 3        # vm snapshots older than this are a finding (vmware: 72h)
 
   # Kubernetes: what a cluster holds and never asked for. Priced through the pool
   # under `onprem:`/`aws:` that already pays for the nodes — the rightsize headroom

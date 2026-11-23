@@ -8,7 +8,7 @@ threshold can actually silence a finding.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -16,7 +16,7 @@ import pytest
 from clont.core.models import Cloud, Period
 from clont.finops.base import FinOpsTuning
 from clont.finops.onprem.config import OnPremSite
-from clont.finops.onprem.waste import OnPremWasteCollector, site_storage_rate
+from clont.finops.onprem.waste import OnPremWasteCollector, site_storage_rate, snapshot_findings
 from clont.providers.onprem.inventory import Datastore, Pool, build_site
 from clont.providers.onprem.metrics import Usage
 
@@ -548,3 +548,115 @@ def _pool(ds_uid: str, gib: int) -> Pool:
         provisioned_gib=Decimal(gib),
     )
     return Pool(name="p", kind="cluster", datacenter=None, hosts=(), datastores=(store,), vms=())
+
+
+NOW = datetime(2026, 11, 20, 12, tzinfo=UTC)
+
+
+def _snapped(name="before-upgrade", age=timedelta(days=10), created=None, delta_gib=20, **extra):
+    """app-01 with one snapshot holding a `delta_gib` delta, created `age` ago."""
+    when = created or datetime.now(UTC) - age
+    return {
+        **VMS["vim.VirtualMachine:vm-10"],
+        "snapshot": {
+            "rootSnapshotList": [
+                {"snapshot": "vim.vm.Snapshot:snapshot-1", "name": name, "createTime": when}
+            ]
+        },
+        "layoutEx.file": [
+            {"key": 1, "type": "diskDescriptor", "size": 0},
+            {"key": 2, "type": "diskExtent", "size": 40 * GIB},
+            {"key": 3, "type": "diskDescriptor", "size": 0},
+            {"key": 4, "type": "diskExtent", "size": delta_gib * GIB},
+        ],
+        "layoutEx.snapshot": [
+            {
+                "key": "vim.vm.Snapshot:snapshot-1",
+                "disk": [{"key": 2000, "chain": [{"fileKey": [1, 2]}]}],
+            }
+        ],
+        "layoutEx.disk": [
+            {"key": 2000, "chain": [{"fileKey": [1, 2]}, {"fileKey": [3, 4]}]}
+        ],
+        **extra,
+    }
+
+
+def _with(vm_props):
+    return inventory(vms={**VMS, "vim.VirtualMachine:vm-10": vm_props})
+
+
+def test_an_old_snapshot_is_priced_on_its_delta_at_the_pool_rate():
+    found, _ = advise(_with(_snapped()))
+    snap = found["old-vm-snapshot"]
+    assert snap.resource.resource_id == "app-01"
+    assert snap.resource.region == "prod"
+    assert float(snap.estimated_savings.amount) == pytest.approx(20 * STORAGE_RATE, abs=0.01)
+    assert snap.approximate is True
+    assert "'before-upgrade' 10 days" in snap.summary
+    assert "~20 GiB" in snap.summary
+    # the chain breaks if someone removes the deltas by hand
+    assert "snapshot manager" in snap.summary
+    assert "never remove the delta files" in snap.summary
+
+
+def test_a_young_snapshot_is_no_finding():
+    found, _ = advise(_with(_snapped(age=timedelta(days=1))))
+    assert "old-vm-snapshot" not in found
+
+
+def test_the_snapshot_age_threshold_is_strictly_older_than():
+    vm = build_site({}, {}, {}, {"vm-1": _snapped(created=NOW - timedelta(days=3))}).vms()[0]
+    tuning = FinOpsTuning()
+    assert snapshot_findings([vm], "prod", Decimal(1), tuning, NOW) == []
+    later = NOW + timedelta(seconds=1)
+    [finding] = snapshot_findings([vm], "prod", Decimal(1), tuning, later)
+    assert finding.kind == "old-vm-snapshot"
+    assert finding.monthly == Decimal(20)
+
+
+def test_the_snapshot_age_threshold_is_configurable():
+    vm = build_site({}, {}, {}, {"vm-1": _snapped(created=NOW - timedelta(days=10))}).vms()[0]
+    assert snapshot_findings([vm], "p", Decimal(1), FinOpsTuning(onprem_snapshot_max_days=30), NOW) == []
+    # 0 is the seeded-run setting: every snapshot is old
+    young = build_site({}, {}, {}, {"vm-1": _snapped(created=NOW - timedelta(hours=2))}).vms()[0]
+    [finding] = snapshot_findings(
+        [young], "p", Decimal(1), FinOpsTuning(onprem_snapshot_max_days=0), NOW
+    )
+    assert "2 hours" in finding.summary
+
+
+def test_a_backup_leftover_says_which_tool_left_it():
+    found, _ = advise(_with(_snapped(name="VEEAM BACKUP TEMPORARY SNAPSHOT")))
+    assert "left behind by veeam" in found["old-vm-snapshot"].summary
+    found, _ = advise(_with(_snapped(name="_VCB-BACKUP_")))
+    assert "left behind by vcb" in found["old-vm-snapshot"].summary
+    found, _ = advise(_with(_snapped(name="before-upgrade")))
+    assert "left behind" not in found["old-vm-snapshot"].summary
+
+
+def test_a_snapshot_of_unknown_size_is_still_reported_as_a_risk():
+    props = {k: v for k, v in _snapped().items() if not k.startswith("layoutEx")}
+    found, _ = advise(_with(props), tuning=FinOpsTuning(onprem_min_savings_usd=10_000))
+    snap = found["old-vm-snapshot"]
+    assert snap.estimated_savings.amount == Decimal("0.00")
+    assert "unknown size" in snap.summary
+
+
+def test_consolidation_needed_is_a_risk_at_zero():
+    found, _ = advise(_with({**VMS["vim.VirtualMachine:vm-10"], "runtime.consolidationNeeded": True}))
+    risk = found["consolidation-needed"]
+    assert risk.estimated_savings.amount == Decimal("0.00")
+    assert risk.resource.resource_id == "app-01"
+    assert "consolidate" in risk.summary
+    assert "consolidation-needed" not in advise()[0]
+
+
+def test_an_orphan_vms_snapshot_lands_at_the_site():
+    vms = {**VMS, "vim.VirtualMachine:vm-99": {**_snapped(), "name": "lost-01"}}
+    vms["vim.VirtualMachine:vm-99"].pop("runtime.host")
+    _, recs = advise(inventory(vms=vms))
+    snaps = [rec for rec in recs if rec.kind == "old-vm-snapshot"]
+    assert [(rec.resource.resource_id, rec.resource.region) for rec in snaps] == [
+        ("lost-01", "site")
+    ]

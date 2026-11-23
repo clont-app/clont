@@ -12,7 +12,9 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from clont.agent.bootstrap import build_agent
 from clont.core.config import Config
+from clont.finops.base import FinOpsTuning
 from clont.finops.onprem.config import OnPremSite
 from clont.finops.onprem.rates import allocate, pool_monthly
 
@@ -170,3 +172,25 @@ def test_config_loads_the_alias_keyed_onprem_map(tmp_path, monkeypatch):
 
     assert list(config.onprem) == ["dc1"]
     assert pool_monthly(config.onprem["dc1"].pool("prod-gen11")["rate_card"]) == 13400
+
+
+def _config(tmp_path, monkeypatch, yaml: str) -> Config:
+    cfg_file = tmp_path / "clont.yaml"
+    cfg_file.write_text(yaml)
+    monkeypatch.setenv("CLONT_CONFIG", str(cfg_file))
+    return Config()
+
+
+def test_snapshot_max_days_defaults_to_vmwares_72_hours(tmp_path, monkeypatch):
+    assert _config(tmp_path, monkeypatch, "{}\n").finops.onprem_snapshot_max_days == 3
+    assert FinOpsTuning().onprem_snapshot_max_days == 3
+
+
+def test_snapshot_max_days_override_reaches_the_tuning(tmp_path, monkeypatch):
+    config = _config(tmp_path, monkeypatch, "finops:\n  onprem_snapshot_max_days: 7\n")
+    assert config.finops.onprem_snapshot_max_days == 7
+    assert build_agent(config)._finops_tuning.onprem_snapshot_max_days == 7
+    # 0 is legal, it flags every snapshot; a negative age is a typo
+    assert _config(tmp_path, monkeypatch, "finops:\n  onprem_snapshot_max_days: 0\n")
+    with pytest.raises(ValidationError):
+        _config(tmp_path, monkeypatch, "finops:\n  onprem_snapshot_max_days: -1\n")

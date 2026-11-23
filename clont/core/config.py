@@ -228,6 +228,8 @@ class FinOpsConfig(_Model):
     # the p95 is divided by it, so 0 took the whole waste pass down with a DivisionByZero
     # and anything over 100 advised a size *under* the measured peak
     onprem_rightsize_target_pct: float = Field(default=70.0, gt=0, le=100)
+    # vmware's own advice is 72h. 0 flags every snapshot, which is what a seeded run wants
+    onprem_snapshot_max_days: float = Field(default=3.0, ge=0)
 
     # Kubernetes: what a cluster holds and never asked for — the savings floor and the
     # rightsize headroom above are shared on purpose, a node is a vm in another spelling

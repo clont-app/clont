@@ -45,6 +45,7 @@ class FinOpsTuning:
     # ram, and "switch it off" is wrong advice for it
     onprem_idle_ram_pct: float = 20.0          # p95 ram below which a running vm is idle
     onprem_rightsize_target_pct: float = 70.0  # headroom left over the p95 when shrinking
+    onprem_snapshot_max_days: float = 3.0      # vm snapshot age that is a finding, vmware: 72h
     # kubernetes: the findings only a cluster view makes visible. the savings floor and the
     # headroom target are the on-prem ones on purpose — a node is a vm in another spelling
     k8s_pool_unrequested_pct: float = 25.0   # pool capacity no pod asked for before it is a finding
