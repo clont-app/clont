@@ -592,10 +592,13 @@ three things worth knowing:
   — a k8s `secretKeyRef`, systemd's `EnvironmentFile`. exactly one of the two, so
   a stale inline password can't shadow the env one.
 - **nothing is installed in a guest.** all of it comes from the hypervisor.
-- **Read-Only cannot browse a datastore, and that's on purpose.** so clont can
-  prove *how much* space nothing accounts for, but never list the files. don't
-  widen the role for it — a kubernetes cluster on that iron can name its own
-  volumes, which is the honest way to close the gap.
+- **Read-Only cannot browse a datastore.** so clont can prove *how much* space
+  nothing accounts for, but not list the files. one optional privilege,
+  `Datastore.Browse`, adds the file list (`orphaned-vmdk`, `unregistered-vm`) —
+  a clone of Read-Only with that box ticked, see
+  [setup-onprem.md](setup-onprem.md#optional-datastorebrowse-for-the-file-list).
+  the browse is `SearchDatastoreSubFolders_Task`, a read; preflight checks the
+  grant with `HasPrivilegeOnEntities` and a missing one is a warning, never fatal.
 - the sdk is an extra: `pip install clont[vsphere]` (pyvmomi). an aws-only
   install doesn't pull it.
 

@@ -376,13 +376,7 @@ def datastore_files(ds_id: str, results: object) -> tuple[DatastoreFile, ...]:
             name = _text(info.get("path"))
             if not name:
                 continue
-            # the root comes back as `[ds]` or `[ds] `, a subfolder as `[ds] vm/`
-            if base.endswith("]"):
-                path = f"{base} {name}"
-            elif base.endswith(("/", "] ")):
-                path = f"{base}{name}"
-            else:
-                path = f"{base}/{name}"
+            path = _ds_path(base, name)
             out.append(
                 DatastoreFile(
                     datastore=ds_id,
@@ -392,6 +386,18 @@ def datastore_files(ds_id: str, results: object) -> tuple[DatastoreFile, ...]:
                 )
             )
     return tuple(sorted(out, key=lambda row: row.path))
+
+
+def _ds_path(folder: str, name: str) -> str:
+    """`[ds] vm/` + `a.vmdk` -> `[ds] vm/a.vmdk`, the form `layoutEx.file` uses.
+
+    esxi answers `[ds]`, `[ds] ` or `[ds] vm/`, vcsim `[ds]/vm`. all land the same
+    """
+    if folder.startswith("[") and "]" in folder:
+        end = folder.index("]") + 1
+        ds, rest = folder[:end], folder[end:].strip().strip("/")
+        return f"{ds} {rest}/{name}" if rest else f"{ds} {name}"
+    return f"{folder.rstrip('/')}/{name}" if folder else name
 
 
 def _group(

@@ -226,6 +226,14 @@ the disk it **occupies**, never the thin promise.
 | `thin-overcommit` | a risk, not a saving: reports $0 and what the promises add up to |
 | `old-vm-snapshot` | snapshots older than `onprem_snapshot_max_days` (3), priced on their deltas. names backup leftovers; fix is the snapshot manager, never the delta files |
 | `consolidation-needed` | a risk, $0: a snapshot delete left deltas behind, they grow and slow writes |
+| `orphaned-vmdk` | a disk no vm lists in its layout, older than `onprem_gc_min_age_days` (7). descriptor and extents as one finding. needs `Datastore.Browse` |
+| `unregistered-vm` | a folder with a `.vmx` no inventory vm points at, the whole folder as one. re-register or delete. needs `Datastore.Browse` |
+
+gc stays conservative: a datastore mounted by a host outside the pass, vsan /
+vvol, `.fcd` / `catalog` / `kubevols` (csi owns those), isos and `onprem_gc_keep`
+paths are all live. whatever gc lists comes off `unaccounted-storage`, so a GiB
+is never priced twice, and if gc ever lists more than the gap on a datastore its
+rows are dropped as a clont bug.
 
 two things that keep the numbers honest. **per-cluster findings are priced on
 your own card, so they're exact** (`approximate=False`, which no aws finding

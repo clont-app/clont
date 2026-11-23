@@ -350,11 +350,20 @@ INVENTORY = {"endpoint": "vc1.dc1", "username": "clont-ro", "password": "s3cret"
 
 
 class FakeSession:
-    def __init__(self, site, counter, windows):
+    def __init__(self, site, counter, windows, grants=None, denied=()):
         self._site = site
         self._counter = counter
         self._windows = windows
         self.instance_uuid = "uuid-1"
+        self._grants = grants
+        self._denied = list(denied)
+        self.browse_denied: list[str] = []
+        self.grant_checks = 0
+        self.skipped: frozenset[str] = frozenset()
+
+    def browse_grants(self):
+        self.grant_checks += 1
+        return self._grants
 
     def __enter__(self):
         self._counter.append(1)
@@ -363,13 +372,18 @@ class FakeSession:
     def __exit__(self, *_exc):
         return None
 
-    def site(self, *, usage_window_days=0, browse=False):
+    def site(self, *, usage_window_days=0, browse=False, browse_skip=frozenset()):
         self._windows.append(usage_window_days)
         self.browsed = browse
+        self.skipped = browse_skip
+        if browse:
+            self.browse_denied = [name for name in self._denied if name not in browse_skip]
         return self._site
 
 
-def provider_with(session_site, clock_value=None, inventory=None, **site_kwargs):
+def provider_with(
+    session_site, clock_value=None, inventory=None, grants=None, denied=(), **site_kwargs
+):
     logins: list[int] = []
     windows: list[int] = []
     now = [0.0] if clock_value is None else clock_value
@@ -378,7 +392,7 @@ def provider_with(session_site, clock_value=None, inventory=None, **site_kwargs)
     sessions: list[FakeSession] = []
 
     def session():
-        sessions.append(FakeSession(session_site, logins, windows))
+        sessions.append(FakeSession(session_site, logins, windows, grants, denied))
         return sessions[-1]
 
     provider._session = session
@@ -522,3 +536,73 @@ def test_a_failed_browse_is_a_warning_not_a_failed_pass(monkeypatch, caplog):
     site = session.site(browse=True)
     assert site.files == {}
     assert any("browse failed, gc skipped" in r.getMessage() for r in caplog.records)
+
+
+def _ds_names(site):
+    return [ds.name for ds in site.datastores]
+
+
+def test_preflight_checks_the_browse_grant_once_and_names_it(caplog):
+    site = site_inventory()
+    names = _ds_names(site)
+    grants = {name: False for name in names}
+    provider, logins, now = provider_with(site, grants=grants)
+    missing = provider.preflight()
+    listed = ", ".join(sorted(names))
+    assert missing == [f"clont-ro: Datastore.Browse (optional, datastore gc) on {listed}"]
+    # a role with no grant anywhere turns browse off for the run, the passes never ask
+    for _ in range(3):
+        now[0] += PASS_TTL_SECONDS + 1
+        provider.browsed_inventory()
+    assert [s.browsed for s in provider.sessions] == [False, False, False, False]
+    assert sum(s.grant_checks for s in provider.sessions) == 1
+    warned = [r for r in caplog.records if "Datastore.Browse" in r.getMessage()]
+    assert len(warned) == 1 and "gc is off for this run" in warned[0].getMessage()
+    assert len(logins) == 4
+
+
+def test_without_preflight_the_first_browsed_pass_checks(caplog):
+    site = site_inventory()
+    grants = {name: False for name in _ds_names(site)}
+    provider, _, now = provider_with(site, grants=grants)
+    provider.browsed_inventory()
+    now[0] += PASS_TTL_SECONDS + 1
+    provider.browsed_inventory()
+    assert [s.grant_checks for s in provider.sessions] == [1, 0]
+    assert not any(s.browsed for s in provider.sessions)
+    assert len([r for r in caplog.records if "Datastore.Browse" in r.getMessage()]) == 1
+
+
+def test_a_partial_grant_skips_only_the_denied_datastores():
+    site = site_inventory()
+    names = _ds_names(site)
+    assert names, "the fixture site needs a datastore"
+    grants = {name: True for name in names} | {"other-ds": False}
+    provider, _, _ = provider_with(site, grants=grants)
+    provider.browsed_inventory()
+    session = provider.sessions[-1]
+    assert session.browsed is True and session.skipped == frozenset({"other-ds"})
+
+
+def test_a_denial_inside_the_task_is_skipped_on_the_next_pass():
+    site = site_inventory()
+    names = _ds_names(site)
+    # the host can't say up front, the task refuses every datastore
+    provider, _, now = provider_with(site, grants=None, denied=names)
+    provider.browsed_inventory()
+    assert provider.sessions[-1].browsed is True
+    now[0] += PASS_TTL_SECONDS + 1
+    provider.browsed_inventory()
+    # every datastore refused, so browse is off and nothing is asked again
+    assert provider.sessions[-1].browsed is False
+
+
+def test_preflight_is_quiet_about_browse_when_granted_or_turned_off():
+    site = site_inventory()
+    granted = {name: True for name in _ds_names(site)}
+    provider, _, _ = provider_with(site, grants=granted)
+    assert provider.preflight() == []
+    denied = {name: False for name in _ds_names(site)}
+    provider, _, _ = provider_with(site, grants=denied, inventory=INVENTORY | {"browse": False})
+    assert provider.preflight() == []
+    assert provider.sessions[-1].grant_checks == 0

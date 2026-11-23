@@ -15,8 +15,9 @@ cannot serialize a whole `VirtualMachine.runtime` (pyvmomi 9 dies on an empty
 **Only read methods.** The whole pass is `CreateContainerView` / `RetrieveProperties` /
 `DestroyView` plus the login, which is what lets clont run under the vsphere Read-Only
 role. The one exception is opt-in: `browse()` starts `SearchDatastoreSubFolders_Task`,
-a read that needs `Datastore.Browse` on top. That claim is a test in `agents/cft/functests/vsphere` (test layer 1), not a
-promise in a readme.
+a read that needs `Datastore.Browse` on top, and `browse_grants()` asks
+`HasPrivilegeOnEntities` whether that grant is there before the first one. That claim
+is a test (`tests/test_vsphere_vcsim.py`, against vcsim), not a promise in a readme.
 
 An unset property is **absent** from the result rather than `None`, so the transform in
 `inventory.py` reads every path with `.get()` — see its docstring for what it does with a
@@ -143,6 +144,8 @@ class VsphereInventory:
         self._vim: Any = None
         # this vcenter's own id, filled on connect — it survives a rename, the endpoint does not
         self.instance_uuid: str | None = None
+        # datastore names the last browse was refused on
+        self.browse_denied: list[str] = []
 
     def __enter__(self) -> VsphereInventory:
         self.connect()
@@ -192,7 +195,13 @@ class VsphereInventory:
             self._si = None
             self._content = None
 
-    def site(self, *, usage_window_days: int = 0, browse: bool = False) -> SiteInventory:
+    def site(
+        self,
+        *,
+        usage_window_days: int = 0,
+        browse: bool = False,
+        browse_skip: frozenset[str] = frozenset(),
+    ) -> SiteInventory:
         """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in.
 
         `usage_window_days` above zero adds the measured half — a `QueryPerf` over the
@@ -215,7 +224,7 @@ class VsphereInventory:
             site.usage.update(usage_rows(site.vms(), self.samples(usage_window_days)))
         if browse:
             try:
-                site = replace(site, files=self.browse())
+                site = replace(site, files=self.browse(skip=browse_skip))
             except Exception as exc:  # noqa: BLE001 - gc is extra, the pass is not
                 log.warning("%s: datastore browse failed, gc skipped: %s", self.endpoint, exc)
         log.info(
@@ -281,20 +290,52 @@ class VsphereInventory:
                 }
         return out
 
+    def browse_grants(self) -> dict[str, bool] | None:
+        """Datastore name -> whether this login holds `Datastore.Browse` on it.
+
+        One `HasPrivilegeOnEntities` call, a read under Read-Only. None when the host
+        can't say (older api, a fault), and then the browse finds out per datastore.
+        """
+        vim = self._require_vim()
+        content = self._content
+        try:
+            datastores = self._entities(vim.Datastore)
+            if not datastores:
+                return {}
+            names = {_moref(ds): ds.name for ds in datastores}
+            found = content.authorizationManager.HasPrivilegeOnEntities(
+                entity=vim.ManagedEntity.Array(datastores),
+                sessionId=content.sessionManager.currentSession.key,
+                privId=[BROWSE_GRANT],
+            )
+        except Exception as exc:  # noqa: BLE001 - a check is not worth failing a pass over
+            log.debug("%s: %s check unavailable: %s", self.endpoint, BROWSE_GRANT, exc)
+            return None
+        out: dict[str, bool] = {}
+        for row in found or []:
+            name = names.get(_moref(row.entity), _moref(row.entity))
+            out[name] = any(
+                p.privId == BROWSE_GRANT and p.isGranted for p in (row.privAvailability or [])
+            )
+        return out
+
     def browse(
         self,
         *,
         timeout_seconds: float = BROWSE_TIMEOUT_SECONDS,
         poll_seconds: float = BROWSE_POLL_SECONDS,
+        skip: frozenset[str] = frozenset(),
     ) -> dict[str, tuple[DatastoreFile, ...]]:
         """Every vmdk and vmx on every datastore, keyed by datastore moref.
 
         `SearchDatastoreSubFolders_Task` is a task but only reads, and needs
         `Datastore.Browse` on top of Read-Only. A datastore that faults, times out or
         isn't accessible is left out of the result, which gc reads as "all live". A
-        missing grant is one warning naming it, never a failed pass.
+        missing grant is one warning naming it, never a failed pass. `skip` names
+        datastores already known to be denied, so a run warns about them once.
         """
         vim = self._require_vim()
+        self.browse_denied = []
         spec = vim.host.DatastoreBrowser.SearchSpec(
             matchPattern=list(BROWSE_PATTERNS),
             details=vim.host.DatastoreBrowser.FileInfo.Details(
@@ -305,6 +346,8 @@ class VsphereInventory:
         denied: list[str] = []
         for ds in self._entities(vim.Datastore):
             ds_id, name = _moref(ds), ds.name
+            if name in skip:
+                continue
             try:
                 if not ds.summary.accessible:
                     log.warning("%s: datastore %s not accessible, not browsed", self.endpoint, name)
@@ -348,6 +391,7 @@ class VsphereInventory:
                 )
                 break
             time.sleep(poll_seconds)
+        self.browse_denied = sorted(denied)
         if denied:
             log.warning(
                 "%s: no %s on %s, file list skipped there — grant it to the clont role",

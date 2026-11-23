@@ -2,11 +2,33 @@
 
 ## unreleased
 
+### upgrading
+
+- optional: `Datastore.Browse` on the vsphere role turns on datastore gc. without
+  it clont warns once per run and `unaccounted-storage` stays a size, see
+  [docs/setup-onprem.md](docs/setup-onprem.md)
+
 ### finops
 
 - on-prem: `old-vm-snapshot` (snapshots older than `onprem_snapshot_max_days`,
   default 3, sized off `layoutEx`, backup leftovers named) and
   `consolidation-needed` ($0, a risk). still under the Read-Only role
+- on-prem datastore gc: `orphaned-vmdk` and `unregistered-vm`, from
+  `layoutEx` edges against the datastore file list. fresh files
+  (`onprem_gc_min_age_days`, 7), `onprem_gc_keep` paths, `.fcd` / csi dirs,
+  isos and datastores mounted outside the pass are live. what gc lists comes off
+  `unaccounted-storage`, and a datastore that fails the parity check drops its rows
+- `inventory.browse` (default `true`) turns the browse off per site
+- preflight checks `Datastore.Browse` with `HasPrivilegeOnEntities` once per run;
+  a datastore refused once is not browsed again that run
+- datastore browse paths come out in the `layoutEx` form whatever the host
+  answers (`[ds]/vm` from vcsim, `[ds] vm/` from esxi)
+
+### tests
+
+- `tests/test_vsphere_vcsim.py`, opt-in (`CLONT_VCSIM=1`): the real vsphere code
+  against vcsim — snapshot tree, `layoutEx`, the browse, gc end to end and the
+  read-only call list, which now includes `SearchDatastoreSubFolders_Task`
 
 ## 0.4.1
 

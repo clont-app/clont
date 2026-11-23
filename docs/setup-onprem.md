@@ -62,6 +62,36 @@ that's the whole requirement. what it reads, and why root rather than per-cluste
 the password never goes on a command line. you either put it in the yaml (file
 mode 600) or name an env var with `password_env` — exactly one of the two.
 
+### optional: `Datastore.Browse`, for the file list
+
+Read-Only proves *how much* datastore space no vm accounts for
+(`unaccounted-storage`), never *which files*. add one privilege and the daily
+waste pass lists every `.vmdk` / `.vmx` and says which ones nothing owns:
+
+1. vcenter → administration → roles → clone **Read-Only**, call it `clont-ro`
+2. tick **Datastore → Browse datastore** (`Datastore.Browse`), nothing else
+3. in permissions, swap the user's Read-Only for `clont-ro`, same place (the
+   root, propagated). a standalone esxi: host client → host → permissions
+
+the browse is `SearchDatastoreSubFolders_Task` — a task, but it only reads.
+clont starts no other task and changes nothing.
+
+| | with the grant | without |
+|---|---|---|
+| `old-vm-snapshot`, `consolidation-needed` | yes | yes |
+| `unaccounted-storage` | the rest after gc | the whole gap, as a size |
+| `orphaned-vmdk`, `unregistered-vm` | yes | no |
+| file list in the findings | yes | no |
+
+without it clont checks once at start, logs one warning naming the grant and
+doesn't try again that run. a role granted on some datastores only is browsed
+there and nowhere else. to skip the browse on purpose: `inventory.browse: false`.
+
+two knobs, both under `finops:` ([configuration.md](configuration.md)):
+`onprem_gc_min_age_days` (7) — a file touched more recently is never garbage, it
+may be a vmotion, clone or backup in flight; `onprem_gc_keep` — paths gc never
+judges, e.g. `["[san-01] golden/", "isos/"]`.
+
 ## 3. write the rate card
 
 **a pool is a cluster, not a site.** a 2016 box and a 2024 box don't cost the
@@ -276,4 +306,6 @@ chart, another namespace, one config each.
 | site total under your real bill | the card is missing a cluster — you pay for the whole pool whether it's full or not, so every cluster needs covering |
 | cluster priced, nodes unmapped | node names don't match the vm names: set `match_by_name: true` or fix the naming |
 | storage counted twice | pvs/pvcs missing from the rbac — a cluster's own volumes are what nets off the site's storage gap |
+| `no Datastore.Browse` warning | expected under plain Read-Only — gc is off, snapshots still work. grant it as in step 2 for the file list |
+| no `orphaned-vmdk` on a shared san | on purpose: a datastore mounted by a host clont can't see may carry another vcenter's disks, so all of it counts as live |
 | pod restarting right after start | a config error, fatal on purpose — the log names the key |

@@ -42,7 +42,7 @@ from clont.core.models import Cloud
 from clont.finops.guests import GuestStorage
 from clont.finops.onprem.config import InventoryConfig, OnPremSite
 from clont.providers.onprem.inventory import SiteInventory
-from clont.providers.onprem.vsphere import VsphereInventory
+from clont.providers.onprem.vsphere import BROWSE_GRANT, VsphereInventory
 
 log = get_logger("clont.providers.onprem")
 
@@ -72,6 +72,11 @@ class OnPremProvider:
         self._last: tuple[float, SiteInventory] | None = None
         self._browsed: tuple[float, SiteInventory] | None = None
         self._guests: list[tuple[str, Callable[[], GuestStorage]]] = []
+        # Datastore.Browse, checked once per run: datastores never to browse again, and
+        # whether that is all of them
+        self._browse_checked = False
+        self._browse_skip: frozenset[str] = frozenset()
+        self._browse_off = False
 
     @property
     def site(self) -> OnPremSite:
@@ -106,16 +111,61 @@ class OnPremProvider:
         Its own cache: the hourly cost pass has no use for a browse task per datastore,
         and must not wait on one. `inventory.browse: false` makes this `inventory()`.
         """
-        if not self._config.browse:
+        if not self._config.browse or self._browse_off:
             return self.inventory()
         if self._browsed is not None and self._clock() - self._browsed[0] < self._ttl:
             return self._browsed[1]
         with self._session() as session:
-            site = session.site(usage_window_days=self._config.usage_window_days, browse=True)
+            self._check_browse(session)
+            site = session.site(
+                usage_window_days=self._config.usage_window_days,
+                browse=not self._browse_off,
+                browse_skip=self._browse_skip,
+            )
+            # refused inside the task: browse() warned this once, never ask again
+            self._skip_browse(session.browse_denied, site)
         now = self._clock()
         self._browsed = (now, site)
         self._last = (now, site)
         return site
+
+    def _check_browse(self, session: VsphereInventory) -> None:
+        """Ask once per run whether the login may browse, warn once if not."""
+        if self._browse_checked:
+            return
+        self._browse_checked = True
+        grants = session.browse_grants()
+        if not grants:
+            # the host can't say, the first browse finds out per datastore
+            return
+        denied = sorted(name for name, ok in grants.items() if not ok)
+        if not denied:
+            return
+        self._browse_skip = frozenset(denied)
+        if len(denied) == len(grants):
+            self._browse_off = True
+            log.warning(
+                "%s: %s has no %s, datastore gc is off for this run — grant it to the "
+                "clont role for the file list, snapshots still work",
+                self.alias,
+                self._config.username,
+                BROWSE_GRANT,
+            )
+        else:
+            log.warning(
+                "%s: no %s on %s, those datastores are not browsed this run",
+                self.alias,
+                BROWSE_GRANT,
+                ", ".join(denied),
+            )
+
+    def _skip_browse(self, denied: list[str], site: SiteInventory) -> None:
+        if not denied:
+            return
+        self._browse_skip = self._browse_skip | frozenset(denied)
+        names = {ds.name for ds in site.datastores}
+        if names and names <= self._browse_skip:
+            self._browse_off = True
 
     def attach_guest(self, name: str, reader: Callable[[], GuestStorage]) -> None:
         """Register a guest platform that holds space on this site's datastores.
@@ -154,7 +204,11 @@ class OnPremProvider:
     def preflight(self) -> list[str]:
         """What the read-only account still cannot see (empty == it has what clont needs)."""
         try:
-            site = self.inventory(refresh=True)
+            with self._session() as session:
+                site = session.site(usage_window_days=self._config.usage_window_days)
+                self._last = (self._clock(), site)
+                if self._config.browse and site.pools:
+                    self._check_browse(session)
         except ConfigError:
             raise
         except Exception as exc:  # noqa: BLE001 - pyvmomi faults are only importable with the extra
@@ -165,6 +219,12 @@ class OnPremProvider:
             # the login worked and nothing came back, so the role is granted on some child
             # object instead of the root folder — propagating it is the fix
             return [f"{self._config.username}: no cluster or host is visible"]
+        if self._browse_skip:
+            # optional, gc only. the rest of the pass is whole without it
+            return [
+                f"{self._config.username}: {BROWSE_GRANT} (optional, datastore gc) on "
+                + ", ".join(sorted(self._browse_skip))
+            ]
         return []
 
     def _session(self) -> VsphereInventory:

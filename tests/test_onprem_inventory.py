@@ -1,6 +1,6 @@
 """The inventory transform: pools, capacity, and what a vm is charged for.
 
-The wire itself is test layer 1 in the cft functests (vcsim). What is here is the pure
+The wire itself is `test_vsphere_vcsim.py` (opt-in) and test layer 1 in the cft functests. What is here is the pure
 half — property dicts in, pools out — plus the handoff into `allocate()`, because the
 whole point of the transform is to produce that payload.
 """
@@ -486,15 +486,18 @@ def test_browse_results_become_one_row_per_file_with_its_full_path():
             ],
         },
         {"folderPath": "[LocalDS_0] old", "file": [{"path": "old.vmdk"}, {"fileSize": 9}]},
+        # vcsim's shape, no space and no trailing slash
+        {"folderPath": "[LocalDS_0]/sim", "file": [{"path": "sim.vmx"}]},
     ]
     rows = datastore_files("vim.Datastore:ds-1", results)
     assert [row.path for row in rows] == [
         "[LocalDS_0] loose.vmdk",
         "[LocalDS_0] old/old.vmdk",
+        "[LocalDS_0] sim/sim.vmx",
         "[LocalDS_0] web-1/web-1-flat.vmdk",
         "[LocalDS_0] web-1/web-1.vmx",
     ]
-    flat = rows[2]
+    flat = rows[3]
     assert flat.size_gib == Decimal(10) and flat.modified == when
     assert flat.folder == "[LocalDS_0] web-1"
     # no size and no time come back as zero and unknown, never a guess
@@ -569,6 +572,67 @@ def test_a_browse_that_never_finishes_leaves_the_datastore_out(monkeypatch, capl
     _, session = _browsing(monkeypatch, [slow])
     assert session.browse(timeout_seconds=0) == {}
     assert any("timed out on slow" in r.getMessage() for r in caplog.records)
+
+
+def test_known_denied_datastores_are_not_asked_again(monkeypatch, caplog):
+    vim = pytest.importorskip("pyVmomi").vim
+    denied = _Ds("ds-2", "b", raises=vim.fault.NoPermission(privilegeId="Datastore.Browse"))
+    _, session = _browsing(monkeypatch, [denied])
+    assert session.browse() == {} and session.browse_denied == ["b"]
+    caplog.clear()
+    del denied.asked
+    assert session.browse(skip=frozenset({"b"})) == {}
+    # skipped, so no task, no warning and nothing newly denied
+    assert not hasattr(denied, "asked")
+    assert session.browse_denied == []
+    assert not [r for r in caplog.records if "Datastore.Browse" in r.getMessage()]
+
+
+def _granting(monkeypatch, datastores, answer):
+    vim, session = _browsing(monkeypatch, datastores)
+    asked = {}
+
+    class _Auth:
+        def HasPrivilegeOnEntities(self, entity, sessionId, privId):
+            asked.update(entity=[e.name for e in entity], session=sessionId, priv=privId)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+    session._content = type(
+        "C",
+        (),
+        {
+            "authorizationManager": _Auth(),
+            "sessionManager": type(
+                "S", (), {"currentSession": type("K", (), {"key": "s-1"})()}
+            )(),
+        },
+    )()
+    monkeypatch.setattr(vim.ManagedEntity, "Array", lambda items: list(items))
+    return vim, session, asked
+
+
+def test_browse_grants_ask_once_for_every_datastore(monkeypatch):
+    vim = pytest.importorskip("pyVmomi").vim
+    a, b = _Ds("ds-1", "a"), _Ds("ds-2", "b")
+    avail = vim.AuthorizationManager.PrivilegeAvailability
+
+    def row(ds, granted):
+        grant = avail(privId="Datastore.Browse", isGranted=granted)
+        return type("R", (), {"entity": ds, "privAvailability": [grant]})()
+
+    _, session, asked = _granting(monkeypatch, [a, b], [row(a, True), row(b, False)])
+    assert session.browse_grants() == {"a": True, "b": False}
+    assert asked == {"entity": ["a", "b"], "session": "s-1", "priv": ["Datastore.Browse"]}
+
+
+def test_browse_grants_say_none_when_the_host_cannot_answer(monkeypatch):
+    vmodl = pytest.importorskip("pyVmomi").vmodl
+    _, session, _ = _granting(monkeypatch, [_Ds("ds-1", "a")], vmodl.fault.NotSupported())
+    assert session.browse_grants() is None
+    _, session, _ = _granting(monkeypatch, [], [])
+    assert session.browse_grants() == {}
 
 
 def test_layout_files_are_the_edges_and_unseen_mounts_are_named():
