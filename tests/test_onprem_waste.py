@@ -8,6 +8,7 @@ threshold can actually silence a finding.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -17,7 +18,7 @@ from clont.core.models import Cloud, Period
 from clont.finops.base import FinOpsTuning
 from clont.finops.onprem.config import OnPremSite
 from clont.finops.onprem.waste import OnPremWasteCollector, site_storage_rate, snapshot_findings
-from clont.providers.onprem.inventory import Datastore, Pool, build_site
+from clont.providers.onprem.inventory import CloneHistory, Datastore, Pool, build_site
 from clont.providers.onprem.metrics import Usage
 
 GIB = 1024**3
@@ -305,6 +306,72 @@ def test_a_template_is_its_own_kind_so_it_can_be_ignored_wholesale():
     assert float(found["template-disk"].estimated_savings.amount) == pytest.approx(
         40 * STORAGE_RATE, abs=0.01
     )
+
+
+TEMPLATE = "vim.VirtualMachine:vm-12"
+TODAY = datetime(2026, 11, 24, tzinfo=UTC)
+
+
+def _template_summary(clones):
+    vms = {
+        **VMS,
+        TEMPLATE: {
+            "name": "golden-ubuntu",
+            "runtime.host": "vim.HostSystem:host-1",
+            "runtime.powerState": "poweredOff",
+            "config.template": True,
+            "config.hardware.numCPU": 2,
+            "config.hardware.memoryMB": 4096,
+            "summary.storage.committed": 40 * GIB,
+            "summary.storage.uncommitted": 0,
+        },
+    }
+    hosts = {
+        key: ({**props, "vm": [*props["vm"], TEMPLATE]} if "vm" in props else props)
+        for key, props in HOSTS.items()
+    }
+    inv = replace(inventory(hosts=hosts, vms=vms), clones=clones)
+    found, _ = advise(inv)
+    rec = found["template-disk"]
+    # the verdict is a note, never a price change
+    assert float(rec.estimated_savings.amount) == pytest.approx(40 * STORAGE_RATE, abs=0.01)
+    return rec.summary
+
+
+def _history(days=30, **kwargs):
+    return CloneHistory(since=TODAY - timedelta(days=days), read_at=TODAY, **kwargs)
+
+
+def test_a_template_with_no_clone_in_the_history_is_never_cloned():
+    summary = _template_summary(_history())
+    assert summary.endswith(". never cloned in the last 30 days of event history")
+
+
+def test_a_cloned_template_names_its_last_clone():
+    clones = _history(last_cloned={TEMPLATE: datetime(2026, 11, 20, 13, 5, tzinfo=UTC)})
+    summary = _template_summary(clones)
+    assert summary.endswith(". last cloned 2026-11-20") and "never" not in summary
+
+
+def test_a_template_younger_than_the_history_gets_no_verdict():
+    plain = _template_summary(None)
+    assert "cloned" not in plain
+    assert _template_summary(_history(too_young=frozenset({TEMPLATE}))) == plain
+    # a week of history is too little to call anything never used
+    assert _template_summary(_history(days=3)) == plain
+
+
+def test_no_history_leaves_the_template_finding_as_it_was():
+    # a host agent or a failed read: `clones` stays none, the summary is today's
+    assert _template_summary(None) == (
+        "golden-ubuntu is a template, still occupying 40 GiB. its ram is back in the "
+        "pool, its disk is not"
+    )
+
+
+def test_the_clone_note_is_only_ever_on_templates():
+    found, _ = advise(replace(inventory(), clones=_history()))
+    assert "cloned" not in found["stopped-vm"].summary
 
 
 def test_storage_no_vm_accounts_for_is_sized_not_listed():

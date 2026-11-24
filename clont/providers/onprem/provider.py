@@ -77,6 +77,8 @@ class OnPremProvider:
         self._browse_checked = False
         self._browse_skip: frozenset[str] = frozenset()
         self._browse_off = False
+        # the clone events failed once, warned, not asked again this run
+        self._clones_off = False
 
     @property
     def site(self) -> OnPremSite:
@@ -101,7 +103,10 @@ class OnPremProvider:
             if age < self._ttl:
                 return self._last[1]
         with self._session() as session:
-            site = session.site(usage_window_days=self._config.usage_window_days)
+            site = session.site(
+                usage_window_days=self._config.usage_window_days, clones=not self._clones_off
+            )
+            self._clones_off = self._clones_off or session.clones_failed
         self._last = (self._clock(), site)
         return site
 
@@ -121,7 +126,9 @@ class OnPremProvider:
                 usage_window_days=self._config.usage_window_days,
                 browse=not self._browse_off,
                 browse_skip=self._browse_skip,
+                clones=not self._clones_off,
             )
+            self._clones_off = self._clones_off or session.clones_failed
             # refused inside the task: browse() warned this once, never ask again
             self._skip_browse(session.browse_denied, site)
         now = self._clock()

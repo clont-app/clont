@@ -255,6 +255,94 @@ class DatastoreFile:
         return self.path.rsplit("/", 1)[0] if "/" in self.path else self.path
 
 
+# a template was used: cloned or deployed from, failed attempts included. -> the field
+# naming the source, on the "being cloned" one that is `vm` itself
+CLONE_SOURCES = {
+    "VmClonedEvent": "sourceVm",
+    "VmBeingClonedEvent": "vm",
+    "VmDeployedEvent": "srcTemplate",
+    "VmBeingDeployedEvent": "srcTemplate",
+}
+# a vm turned up inside the window, so the window says nothing about its past. a clone
+# or a deploy names the new vm in `vm`
+ARRIVALS = (
+    "VmCreatedEvent",
+    "VmRegisteredEvent",
+    "VmDiscoveredEvent",
+    "VmClonedEvent",
+    "VmDeployedEvent",
+)
+CLONE_EVENTS = tuple(sorted(set(CLONE_SOURCES) | set(ARRIVALS)))
+
+
+@dataclass(frozen=True, slots=True)
+class CloneHistory:
+    """What vcenter's event log says about the templates, over the history it still holds.
+
+    `since` is the oldest event the server has at all, not the oldest clone. vcenter
+    prunes by age (30 days by default), so that is how far back "never" can reach.
+    """
+
+    since: datetime
+    read_at: datetime
+    # template moref -> the newest clone or deploy from it
+    last_cloned: dict[str, datetime] = field(default_factory=dict)
+    # created, registered or discovered inside the window, too young to judge
+    too_young: frozenset[str] = frozenset()
+
+    @property
+    def days(self) -> int:
+        return max(0, (self.read_at - self.since).days)
+
+
+def clone_history(
+    events: list[dict],
+    since: datetime,
+    templates: dict[str, str],
+    *,
+    created: dict[str, datetime] | None = None,
+    now: datetime | None = None,
+) -> CloneHistory:
+    """Plain event dicts (`type` plus the event's own fields) into a per-template answer.
+
+    An event names a vm by moref and by name. The moref wins, the name is used only when
+    the moref is missing, and then it may match two templates. Both count as cloned,
+    which can only ever take a "never" away.
+    """
+    by_name: dict[str, set[str]] = {}
+    for uid, name in templates.items():
+        by_name.setdefault(name, set()).add(uid)
+
+    def match(arg: object) -> set[str]:
+        if not isinstance(arg, dict):
+            return set()
+        ref = _text(arg.get("vm"))
+        if ref:
+            return {ref} if ref in templates else set()
+        return set(by_name.get(_text(arg.get("name")), ()))
+
+    last: dict[str, datetime] = {}
+    young: set[str] = set()
+    for event in events:
+        kind = _text(event.get("type")).rsplit(".", 1)[-1]
+        source = CLONE_SOURCES.get(kind)
+        when = _when(event.get("createdTime"))
+        if source and when is not None:
+            for uid in match(event.get(source)):
+                last[uid] = max(when, last.get(uid, when))
+        if kind in ARRIVALS:
+            young |= match(event.get("vm"))
+    for uid, moment in (created or {}).items():
+        if uid in templates and moment > since:
+            young.add(uid)
+    return CloneHistory(
+        since=since,
+        read_at=now or datetime.now(UTC),
+        last_cloned=last,
+        too_young=frozenset(young),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SiteInventory:
     """One pass over one vcenter. The leftovers are findings, not errors."""
@@ -271,6 +359,9 @@ class SiteInventory:
     # datastore moref -> every vmdk/vmx on it. a datastore that wasn't browsed (no grant,
     # timed out, failed) is absent, and absent means every file on it is live
     files: dict[str, tuple[DatastoreFile, ...]] = field(default_factory=dict)
+    # vcenter's clone events for the templates. none on a host agent, which keeps no
+    # such history, or when the read failed, and then a template gets no verdict
+    clones: CloneHistory | None = None
 
     def pool(self, key: str) -> Pool | None:
         return next((pool for pool in self.pools if pool.key == key or pool.name == key), None)

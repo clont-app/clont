@@ -56,7 +56,9 @@ no custom role needed:
 2. in vcenter → permissions, assign it the built-in **Read-Only** role
 3. assign it **at the vcenter root**, with "propagate to children" ticked
 
-that's the whole requirement. what it reads, and why root rather than per-cluster:
+that's the whole requirement — it also covers the event log (`System.View`), which
+is where `template-disk` reads when a template was last cloned. what it reads, and
+why root rather than per-cluster:
 [iam.md](iam.md#own-iron-a-vsphere-read-only-account).
 
 the password never goes on a command line. you either put it in the yaml (file
@@ -308,5 +310,6 @@ chart, another namespace, one config each.
 | storage counted twice | pvs/pvcs missing from the rbac — a cluster's own volumes are what nets off the site's storage gap |
 | `no Datastore.Browse` warning | expected under plain Read-Only — gc is off, snapshots still work. grant it as in step 2 for the file list |
 | no `orphaned-vmdk` on a shared san | on purpose: a datastore mounted by a host clont can't see may carry another vcenter's disks, so all of it counts as live |
+| `templates get no clone verdict` warning | the event log couldn't be read (or holds over 50k clone events) — `template-disk` still shows, just without "last cloned" / "never cloned" |
 | a datastore skipped with `no layoutEx for <vm>` | that vm's host answered without its file layout (often disconnected), so any file there may be its. fix the host, the next run judges it |
 | pod restarting right after start | a config error, fatal on purpose — the log names the key |

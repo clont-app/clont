@@ -682,3 +682,183 @@ def test_layout_files_are_the_edges_and_unseen_mounts_are_named():
     assert [f.path for f in vm.files] == ["[san-01] web-1/web-1.vmx", "[san-01] web-1/web-1-flat.vmdk"]
     assert vm.files[1].size_gib == 2
     assert site.datastores[0].unseen_hosts == ("h-other",)
+
+
+# template clone history: vcenter's events, plain dicts in, a per-template answer out
+
+NOW = datetime(2026, 11, 24, tzinfo=UTC)
+SINCE = datetime(2026, 10, 25, tzinfo=UTC)  # 30 days of history
+GOLDEN, SPARE = "vim.VirtualMachine:vm-20", "vim.VirtualMachine:vm-21"
+TEMPLATES = {GOLDEN: "golden-ubuntu", SPARE: "spare-win"}
+
+
+def _event(kind, day, **args):
+    return {"type": f"vim.event.{kind}", "createdTime": datetime(2026, 11, day, tzinfo=UTC), **args}
+
+
+def test_a_clone_or_deploy_from_a_template_is_its_last_use():
+    from clont.providers.onprem.inventory import clone_history
+
+    events = [
+        _event("VmClonedEvent", 3, vm={"vm": "vim.VirtualMachine:vm-30", "name": "web-1"},
+               sourceVm={"vm": GOLDEN, "name": "golden-ubuntu"}),
+        _event("VmDeployedEvent", 9, vm={"vm": "vim.VirtualMachine:vm-31", "name": "web-2"},
+               srcTemplate={"vm": GOLDEN, "name": "golden-ubuntu"}),
+        # a clone of something else entirely
+        _event("VmClonedEvent", 10, sourceVm={"vm": "vim.VirtualMachine:vm-99", "name": "x"}),
+    ]
+    found = clone_history(events, SINCE, TEMPLATES, now=NOW)
+    assert found.days == 30
+    assert found.last_cloned == {GOLDEN: datetime(2026, 11, 9, tzinfo=UTC)}
+    assert found.too_young == frozenset()
+
+
+def test_a_template_that_arrived_inside_the_window_is_too_young():
+    from clont.providers.onprem.inventory import clone_history
+
+    events = [
+        _event("VmRegisteredEvent", 2, vm={"vm": SPARE, "name": "spare-win"}),
+        # cloned into a template: the new one is the `vm`, the source is not new
+        _event("VmClonedEvent", 4, vm={"vm": GOLDEN, "name": "golden-ubuntu"},
+               sourceVm={"vm": "vim.VirtualMachine:vm-5", "name": "base"}),
+    ]
+    found = clone_history(events, SINCE, TEMPLATES, now=NOW)
+    assert found.too_young == {GOLDEN, SPARE}
+    assert found.last_cloned == {}
+    # a create date inside the window says the same, with no event at all
+    late = {SPARE: datetime(2026, 11, 1, tzinfo=UTC), GOLDEN: datetime(2025, 1, 1, tzinfo=UTC)}
+    assert clone_history([], SINCE, TEMPLATES, created=late, now=NOW).too_young == {SPARE}
+
+
+def test_an_event_with_no_moref_matches_by_name_and_only_then():
+    from clont.providers.onprem.inventory import clone_history
+
+    twins = {GOLDEN: "golden", SPARE: "golden"}
+    events = [_event("VmBeingClonedEvent", 5, vm={"name": "golden"})]
+    # a name may be two templates, both lose the "never", never the other way round
+    assert set(clone_history(events, SINCE, twins, now=NOW).last_cloned) == {GOLDEN, SPARE}
+    # a moref that is not a template is not rescued by a matching name
+    events = [_event("VmClonedEvent", 5, sourceVm={"vm": "vim.VirtualMachine:vm-9", "name": "golden"})]
+    assert clone_history(events, SINCE, twins, now=NOW).last_cloned == {}
+
+
+class _Collector:
+    def __init__(self, events, page_log):
+        self._events, self._pos, self._log = list(events), 0, page_log
+        self.destroyed = False
+
+    def RewindCollector(self):
+        self._pos = 0
+
+    def ReadNextEvents(self, maxCount):
+        page = self._events[self._pos : self._pos + maxCount]
+        self._pos += len(page)
+        self._log.append(maxCount)
+        return page
+
+    def DestroyCollector(self):
+        self.destroyed = True
+
+
+class _VimEvent:
+    def __init__(self, day, vm=None, source=None):
+        self.createdTime = datetime(2026, 11, day, tzinfo=UTC)
+        self.vm, self.sourceVm = vm, source
+
+
+class _Arg:
+    def __init__(self, moref, name):
+        self.vm = type("VirtualMachine", (), {"_moId": moref})()
+        self.name = name
+
+
+_arg = _Arg
+
+
+class VmClonedEvent(_VimEvent):
+    pass
+
+
+class DvsCreatedEvent(_VimEvent):
+    pass
+
+
+def _eventing(monkeypatch, *, api="VirtualCenter", events=(), fails=None):
+    vim = pytest.importorskip("pyVmomi").vim
+    from clont.providers.onprem import vsphere
+
+    session = vsphere.VsphereInventory("vc.lab", "ro", "x")
+    session._si, session._vim, session.api_type = object(), vim, api
+    collectors: list[_Collector] = []
+    pages: list[int] = []
+
+    class _Manager:
+        def CreateCollectorForEvents(self, filter):
+            if fails is not None:
+                raise fails
+            # the empty filter is "every event", the oldest of them is the window start
+            wanted = filter.eventTypeId or []
+            rows = [e for e in events if not wanted or type(e).__name__ in wanted]
+            collectors.append(_Collector(rows, pages))
+            return collectors[-1]
+
+    session._content = type("C", (), {"eventManager": _Manager()})()
+    monkeypatch.setattr(session, "_created", lambda _templates: {})
+    monkeypatch.setattr(vsphere, "_plain", _plain_stub)
+    return session, collectors, pages
+
+
+def _plain_stub(value):
+    if hasattr(value, "_moId"):
+        return f"vim.VirtualMachine:{value._moId}"
+    if isinstance(value, datetime | str) or value is None:
+        return value
+    return {k: _plain_stub(v) for k, v in vars(value).items() if v is not None}
+
+
+def test_the_wire_reads_the_window_and_the_clones_oldest_first(monkeypatch):
+    events = [
+        DvsCreatedEvent(1),
+        VmClonedEvent(4, vm=_arg("vm-30", "web-1"), source=_arg("vm-20", "golden-ubuntu")),
+    ]
+    session, collectors, pages = _eventing(monkeypatch, events=events)
+    found = session.clone_events({GOLDEN: "golden-ubuntu"})
+    assert found is not None and found.since == datetime(2026, 11, 1, tzinfo=UTC)
+    assert found.last_cloned == {GOLDEN: datetime(2026, 11, 4, tzinfo=UTC)}
+    # one event for the window, then pages of clones, and every collector is gone after
+    assert pages[0] == 1 and len(collectors) == 2
+    assert all(c.destroyed for c in collectors)
+    assert not session.clones_failed
+
+
+def test_a_host_agent_has_no_history_and_gets_no_verdict(monkeypatch, caplog):
+    session, collectors, _ = _eventing(monkeypatch, api="HostAgent", events=[DvsCreatedEvent(1)])
+    assert session.clone_events({GOLDEN: "golden-ubuntu"}) is None
+    assert collectors == [] and not caplog.records and not session.clones_failed
+
+
+def test_a_failed_event_read_is_one_warning_and_no_verdict(monkeypatch, caplog):
+    vim = pytest.importorskip("pyVmomi").vim
+    session, _, _ = _eventing(monkeypatch, fails=vim.fault.NoPermission(privilegeId="System.View"))
+    assert session.clone_events({GOLDEN: "golden-ubuntu"}) is None
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warned) == 1 and "no clone verdict" in warned[0]
+    assert session.clones_failed
+
+
+def test_too_many_clone_events_is_no_verdict_rather_than_half_of_one(monkeypatch, caplog):
+    from clont.providers.onprem import vsphere
+
+    monkeypatch.setattr(vsphere, "EVENT_LIMIT", 3)
+    events = [DvsCreatedEvent(1)] + [
+        VmClonedEvent(d, source=_arg("vm-20", "golden-ubuntu")) for d in range(2, 6)
+    ]
+    session, collectors, _ = _eventing(monkeypatch, events=events)
+    assert session.clone_events({GOLDEN: "golden-ubuntu"}) is None
+    assert session.clones_failed and all(c.destroyed for c in collectors)
+    assert any("more than 3 clone events" in r.getMessage() for r in caplog.records)
+
+
+def test_no_template_means_no_event_read(monkeypatch):
+    session, collectors, _ = _eventing(monkeypatch, events=[DvsCreatedEvent(1)])
+    assert session.clone_events({}) is None and collectors == []

@@ -360,6 +360,8 @@ class FakeSession:
         self.browse_denied: list[str] = []
         self.grant_checks = 0
         self.skipped: frozenset[str] = frozenset()
+        self.clones_failed = False
+        self.clones_asked: bool | None = None
 
     def browse_grants(self):
         self.grant_checks += 1
@@ -372,8 +374,10 @@ class FakeSession:
     def __exit__(self, *_exc):
         return None
 
-    def site(self, *, usage_window_days=0, browse=False, browse_skip=frozenset()):
+    def site(self, *, usage_window_days=0, browse=False, browse_skip=frozenset(), clones=False):
         self._windows.append(usage_window_days)
+        self.clones_asked = clones
+        self.clones_failed = clones and getattr(self, "fail_clones", False)
         self.browsed = browse
         self.skipped = browse_skip
         if browse:
@@ -511,6 +515,17 @@ def test_only_the_waste_pass_asks_for_the_browse():
     now[0] += PASS_TTL_SECONDS + 1
     provider.browsed_inventory()
     assert len(logins) == 3
+
+
+def test_a_failed_clone_read_is_not_asked_again_this_run(monkeypatch):
+    monkeypatch.setattr(FakeSession, "fail_clones", True, raising=False)
+    provider, _, now = provider_with(site_inventory())
+    provider.inventory()
+    now[0] += PASS_TTL_SECONDS + 1
+    provider.browsed_inventory()
+    provider.inventory(refresh=True)
+    # it warned once inside the first session, the next ones don't ask
+    assert [s.clones_asked for s in provider.sessions] == [True, False, False]
 
 
 def test_browse_false_never_starts_a_browse():

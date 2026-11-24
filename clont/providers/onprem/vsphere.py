@@ -16,8 +16,11 @@ cannot serialize a whole `VirtualMachine.runtime` (pyvmomi 9 dies on an empty
 `DestroyView` plus the login, which is what lets clont run under the vsphere Read-Only
 role. The one exception is opt-in: `browse()` starts `SearchDatastoreSubFolders_Task`,
 a read that needs `Datastore.Browse` on top, and `browse_grants()` asks
-`HasPrivilegeOnEntities` whether that grant is there before the first one. That claim
-is a test (`tests/test_vsphere_vcsim.py`, against vcsim), not a promise in a readme.
+`HasPrivilegeOnEntities` whether that grant is there before the first one. On a vcenter
+`clone_events()` also reads the event log through a history collector
+(`CreateCollectorForEvents` / `RewindCollector` / `ReadNextEvents` / `DestroyCollector`),
+a read under Read-Only too. That claim is a test (`tests/test_vsphere_vcsim.py`, against
+vcsim), not a promise in a readme.
 
 An unset property is **absent** from the result rather than `None`, so the transform in
 `inventory.py` reads every path with `.get()` — see its docstring for what it does with a
@@ -35,10 +38,13 @@ from typing import Any
 from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.providers.onprem.inventory import (
+    CLONE_EVENTS,
+    CloneHistory,
     DatastoreFile,
     Props,
     SiteInventory,
     build_site,
+    clone_history,
     datastore_files,
 )
 from clont.providers.onprem.metrics import COUNTERS, Samples, usage_rows
@@ -118,6 +124,14 @@ PERF_INTERVAL_SECONDS = 7200
 # builds in memory before it sends it, and the usual advice is batches of tens
 PERF_BATCH = 50
 
+# `about.apiType` of a vcenter. a host agent says "HostAgent" and keeps no event history
+# worth judging a template by
+VCENTER = "VirtualCenter"
+EVENT_PAGE = 1000
+# clone events read before giving up. a cut-off read could miss the one clone that
+# matters, so past this there is no verdict at all
+EVENT_LIMIT = 50_000
+
 
 class VsphereInventory:
     """A read-only inventory session against one vcenter.
@@ -152,6 +166,9 @@ class VsphereInventory:
         self.instance_uuid: str | None = None
         # datastore names the last browse was refused on
         self.browse_denied: list[str] = []
+        self.api_type: str | None = None
+        # the last clone read failed, already warned about
+        self.clones_failed = False
 
     def __enter__(self) -> VsphereInventory:
         self.connect()
@@ -173,6 +190,7 @@ class VsphereInventory:
         # another round trip (one `Fetch` per property call, for a value that never changes)
         self._content = self._si.RetrieveContent()
         about = self._content.about
+        self.api_type = getattr(about, "apiType", None) or None
         self.instance_uuid = getattr(about, "instanceUuid", None) or None
         if self.instance_uuid is None:
             # `instanceUuid` is the vcenter's, and a host agent has no vcenter: on a
@@ -207,6 +225,7 @@ class VsphereInventory:
         usage_window_days: int = 0,
         browse: bool = False,
         browse_skip: frozenset[str] = frozenset(),
+        clones: bool = False,
     ) -> SiteInventory:
         """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in.
 
@@ -214,6 +233,8 @@ class VsphereInventory:
         trailing window per vm. Zero skips it, and then every vm is charged what it
         reserved; a failed perf read does the same rather than failing the pass, because
         a site with no counter history still has a bill to report.
+
+        `clones` reads vcenter's clone events for the templates, see `clone_events()`.
         """
         vim = self._require_vim()
         compute = self.properties(vim.ComputeResource, COMPUTE_PATHS)
@@ -233,6 +254,10 @@ class VsphereInventory:
                 site = replace(site, files=self.browse(skip=browse_skip))
             except Exception as exc:  # noqa: BLE001 - gc is extra, the pass is not
                 log.warning("%s: datastore browse failed, gc skipped: %s", self.endpoint, exc)
+        if clones:
+            templates = {vm.uid: vm.name for vm in site.vms() if vm.template}
+            if templates:
+                site = replace(site, clones=self.clone_events(templates))
         log.info(
             "%s: %d pools, %d hosts, %d vms, %d datastores, %d measured",
             self.endpoint,
@@ -405,6 +430,82 @@ class VsphereInventory:
                 BROWSE_GRANT,
                 ", ".join(sorted(denied)),
             )
+        return out
+
+    def clone_events(self, templates: dict[str, str]) -> CloneHistory | None:
+        """When each template (moref -> name) was last cloned, over vcenter's event history.
+
+        Only a vcenter answers: a host agent keeps no such history, so it gets None and no
+        warning, the template finding stays as it is. A fault, a missing privilege or more
+        events than `EVENT_LIMIT` is None plus one warning, never a failed pass.
+        """
+        self.clones_failed = False
+        if self.api_type != VCENTER or not templates:
+            return None
+        vim = self._require_vim()
+        manager = self._content.eventManager
+        try:
+            oldest = self._read_events(manager, vim.event.EventFilterSpec(), most=1)
+            found = self._read_events(
+                manager, vim.event.EventFilterSpec(eventTypeId=list(CLONE_EVENTS))
+            )
+        except Exception as exc:  # noqa: BLE001 - a verdict is not worth failing a pass over
+            self.clones_failed = True
+            log.warning(
+                "%s: event history unreadable, templates get no clone verdict: %s",
+                self.endpoint,
+                exc,
+            )
+            return None
+        if found is None:
+            self.clones_failed = True
+            log.warning(
+                "%s: more than %d clone events, templates get no clone verdict",
+                self.endpoint,
+                EVENT_LIMIT,
+            )
+            return None
+        since = _plain(oldest[0].createdTime) if oldest else None
+        if not isinstance(since, datetime):
+            return None
+        events = [{"type": type(e).__name__, **_plain(e)} for e in found]
+        return clone_history(
+            events,
+            since if since.tzinfo else since.replace(tzinfo=UTC),
+            templates,
+            created=self._created(templates),
+        )
+
+    def _read_events(self, manager: Any, spec: Any, *, most: int | None = None) -> list | None:
+        """Oldest first, at most `most`. None when there were more and `most` > 1."""
+        most = EVENT_LIMIT if most is None else most
+        collector = manager.CreateCollectorForEvents(filter=spec)
+        try:
+            collector.RewindCollector()
+            out: list = []
+            while True:
+                page = collector.ReadNextEvents(maxCount=min(EVENT_PAGE, most))
+                if not page:
+                    return out
+                out.extend(page)
+                if len(out) >= most:
+                    return out[:most] if most == 1 else None
+        finally:
+            collector.DestroyCollector()
+
+    def _created(self, templates: dict[str, str]) -> dict[str, datetime]:
+        """`config.createDate` per template. its own call, a pre-6.7 vcenter faults on it."""
+        vim = self._require_vim()
+        try:
+            found = self.properties(vim.VirtualMachine, ("config.createDate",))
+        except Exception as exc:  # noqa: BLE001 - the arrival events still judge age
+            log.debug("%s: no create dates: %s", self.endpoint, exc)
+            return {}
+        out: dict[str, datetime] = {}
+        for uid, props in found.items():
+            moment = props.get("config.createDate")
+            if uid in templates and isinstance(moment, datetime):
+                out[uid] = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
         return out
 
     def _entities(self, managed_type: Any) -> list[Any]:

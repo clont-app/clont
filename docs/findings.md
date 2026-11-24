@@ -215,7 +215,7 @@ the disk it **occupies**, never the thin promise.
 | finding | what it is |
 |---|---|
 | `stopped-vm` | powered off, still holding its disk blocks |
-| `template-disk` | same, for a golden image nobody is going to boot |
+| `template-disk` | same, for a golden image nobody is going to boot. on a vcenter it adds `last cloned <date>` or `never cloned in the last N days of event history` (N = how far back vcenter still holds events) — none for a template younger than that, or on a standalone esxi |
 | `idle-vm` | powered on, ran at nothing all window — on cpu **and** ram |
 | `rightsize-vm` | busy enough to keep, more vcpu / ram than its p95 ever needed |
 | `zombie-host` | powered on, in the cluster, carrying no load |

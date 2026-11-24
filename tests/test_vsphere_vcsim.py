@@ -30,8 +30,12 @@ DS = "LocalDS_0"
 SNAP_VM = "DC0_H0_VM0"
 GONE_VM = "DC0_C0_RP0_VM1"  # unregistered, its folder stays
 LOOSE = f"[{DS}] loose/loose.vmdk"
+USED_TPL = "DC0_H0_VM1"         # a template, cloned once
+IDLE_TPL = "DC0_C0_RP0_VM0"     # a template nobody cloned, but vcsim made it just now
+FROM_TPL = "from-template"
 
-# everything a pass may call. the one task is the browse, a read, added on purpose
+# everything a pass may call. the one task is the browse, a read, added on purpose, and
+# so are the event collector calls the template clone history needs
 READ_ONLY = {
     "RetrieveServiceContent",
     "Login",
@@ -46,6 +50,10 @@ READ_ONLY = {
     "QueryPerfCounter",
     "HasPrivilegeOnEntities",
     "SearchDatastoreSubFolders_Task",
+    "CreateCollectorForEvents",
+    "RewindCollector",
+    "ReadNextEvents",
+    "DestroyCollector",
 }
 
 pytestmark = pytest.mark.skipif(
@@ -143,6 +151,20 @@ def _plant(port: int) -> None:
         )
         _wait(content.virtualDiskManager.CreateVirtualDisk_Task(
             name=LOOSE, datacenter=dc, spec=spec
+        ))
+        for name in (USED_TPL, IDLE_TPL):
+            _wait(vms[name].PowerOffVM_Task())
+            vms[name].MarkAsTemplate()
+        used = vms[USED_TPL]
+        # a template has no pool of its own, the clone needs one. its host's, by name
+        # (`used.runtime` is the whole object vcsim can't serialize)
+        pool = next(c for c in dc.hostFolder.childEntity if c.name == "DC0_H0").resourcePool
+        _wait(used.CloneVM_Task(
+            folder=used.parent,
+            name=FROM_TPL,
+            spec=vim.vm.CloneSpec(
+                location=vim.vm.RelocateSpec(pool=pool), powerOn=False, template=False
+            ),
         ))
     finally:
         connect.Disconnect(si)
@@ -284,11 +306,26 @@ def test_a_missing_grant_is_seen_before_the_browse(session):
 def test_a_full_pass_with_browse_stays_read_only(session):
     with _soap_spy(session) as called:
         session.browse_grants()
-        session.site(usage_window_days=1, browse=True)
+        session.site(usage_window_days=1, browse=True, clones=True)
     seen = set(called)
     assert seen, "the spy recorded nothing, it is not wrapping the stub any more"
     assert seen <= READ_ONLY, f"non read-only calls: {sorted(seen - READ_ONLY)}"
     assert {"SearchDatastoreSubFolders_Task", "HasPrivilegeOnEntities"} <= seen
+    assert {"CreateCollectorForEvents", "ReadNextEvents", "DestroyCollector"} <= seen
+
+
+def test_template_clone_events_come_back_in_the_shape_we_read(session):
+    assert session.api_type == "VirtualCenter"
+    site = session.site(clones=True)
+    templates = {vm.name: vm.uid for vm in site.vms() if vm.template}
+    assert set(templates) == {USED_TPL, IDLE_TPL}
+    clones = site.clones
+    assert clones is not None and clones.since <= clones.read_at
+    # the clone names its source by moref, the join `clone_history` makes
+    assert set(clones.last_cloned) == {templates[USED_TPL]}
+    # vcsim created both just now, inside the window, so neither may be called never
+    assert templates[IDLE_TPL] in clones.too_young
+    assert not session.clones_failed
 
 
 def test_a_vm_names_the_datastores_it_uses(session):

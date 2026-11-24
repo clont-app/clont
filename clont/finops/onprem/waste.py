@@ -11,7 +11,10 @@ What the snapshot alone proves:
   pool. the saving is the space it *occupies* — deleting a thin disk gives back the blocks
   it wrote, not the size it was promised
 * **a template** is a powered-off vm nobody is going to boot, so it is its own line — an
-  operator who keeps a golden image on purpose can ignore the kind wholesale
+  operator who keeps a golden image on purpose can ignore the kind wholesale. on a
+  vcenter the clone events add when it was last cloned, or that it never was over the
+  history the server still holds. a template younger than that history, a host agent
+  (no history) or a failed read get no verdict at all
 * **a zombie host** is powered on, in the cluster, running nothing. its share of the pool
   is what the operator pays for iron that carries no load
 * **a powered-off host** is the same bill minus the power, and it is *not* a discount:
@@ -77,7 +80,13 @@ from clont.finops.guests import GuestStorage
 from clont.finops.models import CostRecord, Recommendation
 from clont.finops.onprem import gc
 from clont.finops.onprem.rates import allocate
-from clont.providers.onprem.inventory import Pool, SiteInventory, Snapshot, Vm
+from clont.providers.onprem.inventory import (
+    CloneHistory,
+    Pool,
+    SiteInventory,
+    Snapshot,
+    Vm,
+)
 from clont.providers.onprem.metrics import Usage
 from clont.providers.onprem.provider import OnPremProvider
 
@@ -88,6 +97,8 @@ _SERVICE = "waste"
 _SITE = "site"  # the "region" of a finding that belongs to no pool
 _CENT = Decimal("0.01")
 _HUNDRED = Decimal(100)
+# less event history than this proves nothing about a template, so no "never cloned"
+CLONE_MIN_WINDOW_DAYS = 7
 
 # what common backup tools name the snapshot they take, upper-cased. one left behind is a
 # job that failed to clean up, and the operator should hear which tool
@@ -155,7 +166,7 @@ class OnPremWasteCollector:
                     datastore.uid,
                     (pool.key, _handback_rate(result, "storage_gib_month", "storage")),
                 )
-            findings.extend(pool_findings(pool, result, self._tuning))
+            findings.extend(pool_findings(pool, result, self._tuning, site.clones))
             findings.extend(usage_findings(pool, result, site.usage, self._tuning))
             findings.extend(
                 snapshot_findings(
@@ -241,7 +252,9 @@ def _once(findings: Iterable[Finding]) -> list[Finding]:
     return out
 
 
-def pool_findings(pool: Pool, priced: dict, tuning: FinOpsTuning) -> list[Finding]:
+def pool_findings(
+    pool: Pool, priced: dict, tuning: FinOpsTuning, clones: CloneHistory | None = None
+) -> list[Finding]:
     """What one priced pool is paying for and not using. `priced` is `allocate()`'s answer."""
     storage_rate = _handback_rate(priced, "storage_gib_month", "storage")
     floor = Decimal(str(tuning.onprem_min_savings_usd))
@@ -260,7 +273,7 @@ def pool_findings(pool: Pool, priced: dict, tuning: FinOpsTuning) -> list[Findin
                 kind="template-disk" if vm.template else "stopped-vm",
                 resource_id=labels[vm.uid],
                 region=pool.key,
-                summary=_disk_summary(vm),
+                summary=_disk_summary(vm, clones),
                 monthly=monthly,
                 uid=vm.uid,
             )
@@ -862,17 +875,31 @@ def _names(names: tuple[str, ...], limit: int = 5) -> str:
     return shown if len(names) <= limit else f"{shown} and {len(names) - limit} more"
 
 
-def _disk_summary(vm: Vm) -> str:
+def _disk_summary(vm: Vm, clones: CloneHistory | None = None) -> str:
     what = "a template" if vm.template else "powered off"
     # vcenter carries no power-off timestamp as a property, only as an event, so the
     # pass cannot say for how long — do not imply it can
     promised = (
         f", {_gib(vm.disk_gib)} GiB promised" if vm.disk_gib > vm.committed_gib else ""
     )
+    note = _clone_note(vm, clones) if vm.template else None
     return (
         f"{vm.name} is {what}, still occupying {_gib(vm.committed_gib)} GiB"
         f"{promised}. its ram is back in the pool, its disk is not"
+        + (f". {note}" if note else "")
     )
+
+
+def _clone_note(vm: Vm, clones: CloneHistory | None) -> str | None:
+    """What the event log says about this template, or nothing when it can't say."""
+    if clones is None:
+        return None
+    last = clones.last_cloned.get(vm.uid)
+    if last is not None:
+        return f"last cloned {last:%Y-%m-%d}"
+    if vm.uid in clones.too_young or clones.days < CLONE_MIN_WINDOW_DAYS:
+        return None
+    return f"never cloned in the last {clones.days} days of event history"
 
 
 def _gib(value: Decimal) -> str:

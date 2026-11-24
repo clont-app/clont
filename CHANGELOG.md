@@ -28,6 +28,8 @@
   a datastore refused once is not browsed again that run
 - datastore browse paths come out in the `layoutEx` form whatever the host
   answers (`[ds]/vm` from vcsim, `[ds] vm/` from esxi)
+- `template-disk` on a vcenter says when the template was last cloned, or that it
+  wasn't over the event history vcenter still holds. no verdict on esxi or a failed read
 
 ### fixes
 
