@@ -86,6 +86,8 @@ class Datastore:
     mount_hosts: tuple[str, ...] = ()
     # the ones of those this pass never saw: a second vcenter, a standalone host
     unseen_hosts: tuple[str, ...] = ()
+    # `info.timestamp`, when hostd last refreshed free space
+    free_at: datetime | None = None
 
     @property
     def overcommit(self) -> Decimal:
@@ -145,6 +147,9 @@ class Vm:
     # what this vm holds
     files: tuple[VmFile, ...] = ()
     datastores: tuple[str, ...] = ()  # morefs, every datastore it has a file on
+    # when `layoutEx` / `summary.storage` were last refreshed, the older of the two,
+    # a running vm's lags its datastores' free space by minutes, sometimes far more
+    layout_at: datetime | None = None
 
     @property
     def running(self) -> bool:
@@ -484,6 +489,7 @@ def _datastore(ds_id: str, props: dict[str, object]) -> Datastore:
         kind=_text(props.get("summary.type")) or None,
         url=_text(props.get("summary.url")) or None,
         mount_hosts=tuple(_mount_hosts(props.get("host"))),
+        free_at=_when(props.get("info.timestamp")),
     )
 
 
@@ -515,6 +521,10 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
         vmx_path=_text(props.get("config.files.vmPathName")) or None,
         files=_vm_files(props.get("layoutEx.file")),
         datastores=tuple(_refs(props.get("datastore"))),
+        layout_at=_oldest(
+            _when(props.get("layoutEx.timestamp")),
+            _when(props.get("summary.storage.timestamp")),
+        ),
     )
 
 
@@ -657,6 +667,11 @@ def _when(value: object) -> datetime | None:
         return None
     # vcenter sends utc, a naive time is taken as that
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def _oldest(*moments: datetime | None) -> datetime | None:
+    known = [m for m in moments if m is not None]
+    return min(known) if known else None
 
 
 def _refs(value: object) -> list[str]:

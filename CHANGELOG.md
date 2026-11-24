@@ -29,6 +29,12 @@
 - datastore browse paths come out in the `layoutEx` form whatever the host
   answers (`[ds]/vm` from vcsim, `[ds] vm/` from esxi)
 
+### fixes
+
+- on-prem: a running vm whose `layoutEx` is over `onprem_layout_max_lag_minutes` (10)
+  older than its datastore's free space no longer reads as `unaccounted-storage`, and
+  gc treats that datastore as all-live
+
 ### tests
 
 - `tests/test_vsphere_vcsim.py`, opt-in (`CLONT_VCSIM=1`): the real vsphere code

@@ -40,6 +40,7 @@ class FinOpsTuning:
     onprem_min_savings_usd: float = 1.0        # per finding per month, below it is noise
     onprem_unaccounted_min_gib: float = 100.0  # datastore space no vm claims
     onprem_unaccounted_min_pct: float = 10.0   # ...and as a share of used space, both must pass
+    onprem_layout_max_lag_minutes: float = 10.0  # running vm's layoutEx behind free space, stale
     onprem_thin_overcommit_ratio: float = 1.5  # thin promises over capacity before it is a risk
     # idle takes `idle_cpu_pct` from the aws side and adds ram: a cache runs 2% cpu at 90%
     # ram, and "switch it off" is wrong advice for it

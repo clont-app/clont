@@ -233,7 +233,12 @@ gc stays conservative: a datastore mounted by a host outside the pass, vsan /
 vvol, `.fcd` / `catalog` / `kubevols` (csi owns those), isos and `onprem_gc_keep`
 paths are all live. whatever gc lists comes off `unaccounted-storage`, so a GiB
 is never priced twice, and if gc ever lists more than the gap on a datastore its
-rows are dropped as a clont bug.
+rows are dropped as a clont bug. esxi refreshes a running vm's layout minutes
+after the datastore's free space, so a vm that just grew would read as space
+nobody holds: when the layout is more than `onprem_layout_max_lag_minutes` (10)
+behind, that datastore is all-live for gc and left out of `unaccounted-storage`,
+and the summary says so. rerun after a few minutes, or
+`vim-cmd hostsvc/datastore/refresh`.
 
 two things that keep the numbers honest. **per-cluster findings are priced on
 your own card, so they're exact** (`approximate=False`, which no aws finding

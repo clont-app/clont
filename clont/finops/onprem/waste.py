@@ -453,7 +453,7 @@ def site_findings(
                 region=_SITE,
                 summary=(
                     f"{_gib(gap.unexplained)} GiB of datastore space no vm accounts for "
-                    f"{what}{gap.credit}{gap.listed_credit}"
+                    f"{what}{gap.credit}{gap.listed_credit}{gap.skipped_note}"
                 ),
                 monthly=gap.unexplained * storage_rate,
                 approximate=True,
@@ -726,6 +726,7 @@ class _Gap:
     sources: tuple[str, ...] = ()
     listed: Decimal = Decimal(0)  # what gc named file by file
     rows: int = 0
+    skipped: tuple[str, ...] = ()  # datastore names left out, a running vm's layout lags
 
     @property
     def unexplained(self) -> Decimal:
@@ -738,6 +739,15 @@ class _Gap:
         return (
             f". another {_gib(self.listed)} GiB is listed file by file in {self.rows} "
             "orphaned-vmdk / unregistered-vm finding(s) and is not counted here"
+        )
+
+    @property
+    def skipped_note(self) -> str:
+        if not self.skipped:
+            return ""
+        return (
+            f". {_names(self.skipped)} left out: a running vm's layout there is older "
+            "than the free-space reading, so its growth would read as nobody's"
         )
 
     @property
@@ -779,32 +789,77 @@ def _unaccounted_gib(
 
     Same for what datastore gc listed: those GiB are their own findings now, so they come
     off too, never below zero.
+
+    **A running vm's committed can lag the datastore's free space** by many minutes (seen
+    live: 25 GiB grown, `summary.storage` 25 minutes behind), and the difference reads as
+    space nobody holds. so the datastores of such a vm are left out of the gap — their
+    used space and every claim on them, see `_lagging` — and the summary says which.
     """
     dead = {ds.uid for ds in site.unmounted_datastores}
-    used = sum(
-        (ds.capacity_gib - ds.free_gib for ds in site.datastores if ds.uid not in dead),
-        Decimal(0),
-    )
-    claimed = sum((vm.committed_gib for vm in site.vms()), Decimal(0))
+    left_out, vms = _lagging(site, tuning)
+    live = [ds for ds in site.datastores if ds.uid not in dead and ds.uid not in left_out]
+    skipped = tuple(sorted(ds.name for ds in site.datastores if ds.uid in left_out - dead))
+    if skipped:
+        log.warning(
+            "unaccounted storage: %s left out of the gap, a running vm's layout is older "
+            "than the free-space reading — refresh the datastore "
+            "(`vim-cmd hostsvc/datastore/refresh`) or wait a few minutes and rerun",
+            _names(skipped),
+        )
+        if not live:
+            return None
+    used = sum((ds.capacity_gib - ds.free_gib for ds in live), Decimal(0))
+    claimed = sum((vm.committed_gib for vm in vms), Decimal(0))
     raw = used - claimed
     owned = [guest for guest in guests if guest.detached_gib > 0]
     explained = min(sum((g.detached_gib for g in owned), Decimal(0)), max(raw, Decimal(0)))
     listed = Decimal(0)
+    garbage = [] if swept is None else [g for g in swept.garbage if g.datastore.uid not in left_out]
     if swept is not None:
-        listed = min(swept.size_gib, max(raw - explained, Decimal(0)))
+        listed = min(
+            sum((g.size_gib for g in garbage), Decimal(0)), max(raw - explained, Decimal(0))
+        )
     gap = _Gap(
         raw=raw,
         explained=explained,
         volumes=sum(g.volumes for g in owned),
         sources=tuple(sorted(g.source for g in owned)),
         listed=listed,
-        rows=len(swept.garbage) if swept is not None else 0,
+        rows=len(garbage),
+        skipped=skipped,
     )
     if used <= 0 or gap.unexplained < Decimal(str(tuning.onprem_unaccounted_min_gib)):
         return None
     if gap.unexplained / used * _HUNDRED < Decimal(str(tuning.onprem_unaccounted_min_pct)):
         return None
     return gap
+
+
+def _lagging(site: SiteInventory, tuning: FinOpsTuning) -> tuple[set[str], list[Vm]]:
+    """datastores to leave out of the gap, and the vms whose claims still count.
+
+    a vm's committed isn't split per datastore, so one that touches a left-out datastore
+    takes all of its datastores out with it, until nothing changes
+    """
+    out = set(gc.stale(site, tuning))
+    vms = site.vms()
+    if not out:
+        return out, vms
+    by_name = {ds.name.strip().lower(): ds.uid for ds in site.datastores}
+    spans = {vm.uid: gc.uses(vm, by_name) for vm in vms}
+    grew = True
+    while grew:
+        grew = False
+        for vm in vms:
+            if spans[vm.uid] & out and not spans[vm.uid] <= out:
+                out |= spans[vm.uid]
+                grew = True
+    return out, [vm for vm in vms if not spans[vm.uid] & out]
+
+
+def _names(names: tuple[str, ...], limit: int = 5) -> str:
+    shown = ", ".join(names[:limit])
+    return shown if len(names) <= limit else f"{shown} and {len(names) - limit} more"
 
 
 def _disk_summary(vm: Vm) -> str:

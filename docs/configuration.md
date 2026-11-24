@@ -172,6 +172,9 @@ own iron:
 - `onprem_unaccounted_min_gib` (float, default `100`) and
   `onprem_unaccounted_min_pct` (float, default `10`) — datastore space no vm
   claims. both have to pass, so a big busy site doesn't flag on rounding.
+- `onprem_layout_max_lag_minutes` (float, default `10`) — a running vm whose
+  `layoutEx` is this much older than its datastore's free-space reading is stale:
+  gc treats that datastore as all-live and the storage gap leaves it out.
 - `onprem_thin_overcommit_ratio` (float, default `1.5`) — thin promises over
   capacity before it's a risk line.
 - `onprem_idle_ram_pct` (float, default `20`) — p95 ram below which a running vm

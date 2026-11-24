@@ -70,6 +70,8 @@ DATASTORE_PATHS = (
     "summary.url",
     # every host that mounts it, seen or not — a mount we can't see makes it shared
     "host",
+    # when free space was last refreshed, a running vm's layout is judged against it
+    "info.timestamp",
 )
 VM_PATHS = (
     "name",
@@ -80,6 +82,7 @@ VM_PATHS = (
     "config.hardware.memoryMB",
     "summary.storage.committed",
     "summary.storage.uncommitted",
+    "summary.storage.timestamp",
     # a kubernetes node's providerID is `vsphere://` one of these two, depending on which
     # cloud provider wrote it, so both are read and either may match a node
     "config.instanceUuid",
@@ -89,6 +92,7 @@ VM_PATHS = (
     "layoutEx.file",
     "layoutEx.snapshot",
     "layoutEx.disk",
+    "layoutEx.timestamp",
     "runtime.consolidationNeeded",
     "config.files.vmPathName",
     # the datastores a vm uses, so a vm with no layout blinds only those

@@ -443,6 +443,18 @@ def test_datastore_carries_the_hosts_that_mount_it():
     assert all(ds.mount_hosts == () for ds in plain.datastores)
 
 
+def test_layout_and_free_space_timestamps_are_read():
+    at = datetime(2026, 11, 20, 10, tzinfo=UTC)
+    vm = _one_vm({**SNAP_VM, "layoutEx.timestamp": at, "summary.storage.timestamp": "2026-11-20T09:50:00"})
+    # the older of the two, a naive time is utc
+    assert vm.layout_at == datetime(2026, 11, 20, 9, 50, tzinfo=UTC)
+    assert _one_vm({**SNAP_VM, "layoutEx.timestamp": at}).layout_at == at
+    assert _one_vm(SNAP_VM).layout_at is None
+    datastores = {"vim.Datastore:ds-1": {**DATASTORES["vim.Datastore:ds-1"], "info.timestamp": at}}
+    assert build_site({}, {}, datastores, {}).datastores[0].free_at == at
+    assert build_site({}, {}, DATASTORES, {}).datastores[0].free_at is None
+
+
 def test_the_wire_turns_data_objects_into_plain_dicts():
     vim = pytest.importorskip("pyVmomi").vim
     from clont.providers.onprem.vsphere import _plain

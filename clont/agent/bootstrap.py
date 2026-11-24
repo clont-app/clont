@@ -140,6 +140,7 @@ def _tuning(config: Config) -> FinOpsTuning:
         onprem_min_savings_usd=config.finops.onprem_min_savings_usd,
         onprem_unaccounted_min_gib=config.finops.onprem_unaccounted_min_gib,
         onprem_unaccounted_min_pct=config.finops.onprem_unaccounted_min_pct,
+        onprem_layout_max_lag_minutes=config.finops.onprem_layout_max_lag_minutes,
         onprem_thin_overcommit_ratio=config.finops.onprem_thin_overcommit_ratio,
         onprem_idle_ram_pct=config.finops.onprem_idle_ram_pct,
         onprem_rightsize_target_pct=config.finops.onprem_rightsize_target_pct,

@@ -26,6 +26,9 @@ conservative all the way, a false "garbage" deletes someone's data:
   don't match what `layoutEx` names
 * a vm with no `layoutEx` could own any file on the datastores it uses, so those are
   all-live. one that doesn't say which datastores it uses turns gc off for the site
+* so is a running vm whose layout is older than the free-space reading of a datastore it
+  uses (`onprem_layout_max_lag_minutes`): it has grown since, and its new blocks would
+  read as nobody's
 * unknown modification time is never old enough
 * a folder with a stray vmx and anything live in it is all-live, the vmx may name the rest
 
@@ -44,7 +47,7 @@ from decimal import Decimal
 
 from clont.core.logging import get_logger
 from clont.finops.base import FinOpsTuning
-from clont.providers.onprem.inventory import Datastore, DatastoreFile, SiteInventory
+from clont.providers.onprem.inventory import Datastore, DatastoreFile, SiteInventory, Vm
 
 log = get_logger("clont.finops.onprem.gc")
 
@@ -134,12 +137,15 @@ def sweep(
     reasons: dict[str, str] = {}
     dead = {ds.uid for ds in site.unmounted_datastores}
     claimed = _claimed(site)
+    lagging = stale(site, tuning)
     for ds in site.datastores:
         if ds.uid not in site.files:
             continue
         why = _not_judged(ds, dead)
         if not why and ds.uid in blind:
             why = f"no layoutEx for {_few(blind[ds.uid])}"
+        if not why and ds.uid in lagging:
+            why = lag_reason(lagging[ds.uid])
         if why:
             reasons[ds.name] = why
             log.warning("datastore gc: every file on %s counts as live, %s", ds.name, why)
@@ -177,6 +183,50 @@ def sweep(
         dropped=tuple(dropped),
         reasons=reasons,
     )
+
+
+def stale(site: SiteInventory, tuning: FinOpsTuning) -> dict[str, list[tuple[str, float]]]:
+    """datastore moref -> (vm, minutes) for running vms whose layout lags its free space.
+
+    a powered-off vm doesn't grow, an old layout on it is fine. no timestamp on either
+    side is never stale
+    """
+    limit = float(tuning.onprem_layout_max_lag_minutes)
+    by_uid = {ds.uid: ds for ds in site.datastores}
+    by_name = {_key(ds.name): ds.uid for ds in site.datastores}
+    out: dict[str, list[tuple[str, float]]] = {}
+    for vm in site.vms():
+        if not vm.powered_on or vm.layout_at is None:
+            continue
+        for uid in sorted(uses(vm, by_name)):
+            ds = by_uid.get(uid)
+            if ds is None or ds.free_at is None:
+                continue
+            lag = (ds.free_at - vm.layout_at).total_seconds() / 60
+            if lag > limit:
+                out.setdefault(uid, []).append((vm.name, lag))
+    return out
+
+
+def lag_reason(rows: list[tuple[str, float]]) -> str:
+    names = [name for name, _ in rows]
+    worst = max(lag for _, lag in rows)
+    return (
+        f"layout of {_few(names)} is {worst:.0f} min older than the free-space reading — "
+        "refresh the datastore (`vim-cmd hostsvc/datastore/refresh`) or wait a few "
+        "minutes and rerun"
+    )
+
+
+def uses(vm: Vm, by_name: dict[str, str]) -> set[str]:
+    """datastore morefs a vm has anything on: its list, its layout and its vmx"""
+    out = set(vm.datastores)
+    paths = [f.path for f in vm.files] + ([vm.vmx_path] if vm.vmx_path else [])
+    for path in paths:
+        uid = by_name.get(_key(_split(path)[0]))
+        if uid:
+            out.add(uid)
+    return out
 
 
 def _not_judged(ds: Datastore, dead: set[str]) -> str:

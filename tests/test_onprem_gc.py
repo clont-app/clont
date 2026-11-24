@@ -532,6 +532,91 @@ def test_a_stale_summary_is_all_live_not_a_parity_bug(caplog):
     assert not any("parity failed" in r.getMessage() for r in caplog.records)
 
 
+# a running vm's layout that lags the free-space reading
+
+FREE_AT = NOW - timedelta(minutes=1)
+
+
+def _lagging_vms(minutes, powered="poweredOn", vm=None):
+    vm = vm or _vm("app-01", 60, powered=powered)
+    return _vms(**{"vim.VirtualMachine:vm-10": {**vm, "layoutEx.timestamp": FREE_AT - timedelta(minutes=minutes)}})
+
+
+def _fresh_ds(**extra):
+    return _ds(**{"info.timestamp": FREE_AT, **extra})
+
+
+def test_a_lagging_running_vm_is_no_phantom_gap_and_blinds_its_datastore(caplog):
+    # vcsa-1 on lab1: grew 25 gib, layout 25 min behind. 100 more gib used than claimed
+    grown = _fresh_ds(**{"summary.freeSpace": 1400 * GIB})
+    built = site([_file("[san-01] scratch/loose-flat.vmdk", 4)], datastores=grown, vms=_lagging_vms(25))
+    with caplog.at_level(logging.WARNING):
+        result = gc.sweep(built, FinOpsTuning(), NOW)
+        recs = advise(built)
+    assert result.garbage == ()
+    assert result.judged == ()
+    assert "layout of app-01 is 25 min older than the free-space reading" in result.reasons["san-01"]
+    assert by_kind(recs, "unaccounted-storage") == []
+    assert by_kind(recs, "orphaned-vmdk") == []
+    assert any(
+        "san-01 left out of the gap" in r.getMessage() and "hostsvc/datastore/refresh" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_lagging_vm_leaves_its_datastores_out_and_the_rest_is_still_priced():
+    # app-01 lags on san-02 only, san-01 keeps old-01's 100 gib claim against 500 used
+    vm = {**_vm("app-01", 60), "datastore": [DS2], "config.files.vmPathName": "[san-02] app-01/app-01.vmx"}
+    vm["layoutEx.file"] = [{**f, "name": f["name"].replace("san-01", "san-02")} for f in vm["layoutEx.file"]]
+    datastores = {**_fresh_ds(), DS2: {**_two_datastores()[DS2], "info.timestamp": FREE_AT}}
+    hosts = {"vim.HostSystem:host-1": {**HOSTS["vim.HostSystem:host-1"], "datastore": [DS, DS2]}}
+    built = site(datastores=datastores, vms=_lagging_vms(25, vm=vm), hosts=hosts, browsed=False)
+    [gap] = by_kind(advise(built), "unaccounted-storage")
+    # the rate is spread over 2100 gib now
+    assert float(gap.estimated_savings.amount) == pytest.approx(400 * 7300 * 0.2 / 2100, abs=0.01)
+    assert "san-02 left out" in gap.summary
+
+
+def test_a_vm_spanning_a_left_out_datastore_takes_its_others_with_it():
+    # old-01 has a disk on the lagging san-02 too, its committed can't be split, so both go
+    vm = {**_vm("app-01", 60), "datastore": [DS2], "config.files.vmPathName": "[san-02] app-01/app-01.vmx"}
+    vm["layoutEx.file"] = [{**f, "name": f["name"].replace("san-01", "san-02")} for f in vm["layoutEx.file"]]
+    vms = _lagging_vms(25, vm=vm)
+    vms["vim.VirtualMachine:vm-11"]["datastore"] = [DS, DS2]
+    datastores = {**_fresh_ds(), DS2: {**_two_datastores()[DS2], "info.timestamp": FREE_AT}}
+    hosts = {"vim.HostSystem:host-1": {**HOSTS["vim.HostSystem:host-1"], "datastore": [DS, DS2]}}
+    built = site(datastores=datastores, vms=vms, hosts=hosts, browsed=False)
+    assert by_kind(advise(built), "unaccounted-storage") == []
+
+
+def test_the_same_lag_on_a_powered_off_vm_is_not_stale():
+    built = site(datastores=_fresh_ds(), vms=_lagging_vms(25, powered="poweredOff"))
+    assert gc.stale(built, FinOpsTuning()) == {}
+    result = gc.sweep(built, FinOpsTuning(), NOW)
+    assert result.judged == (DS,)
+    [gap] = by_kind(advise(built), "unaccounted-storage")
+    assert "left out" not in gap.summary
+
+
+def test_a_lag_under_the_threshold_is_not_stale():
+    built = site(datastores=_fresh_ds(), vms=_lagging_vms(9))
+    assert gc.stale(built, FinOpsTuning()) == {}
+    assert gc.sweep(built, FinOpsTuning(), NOW).judged == (DS,)
+    # and the knob moves it
+    assert DS in gc.stale(built, FinOpsTuning(onprem_layout_max_lag_minutes=5))
+
+
+@pytest.mark.parametrize("which", ["vm", "datastore", "both"])
+def test_a_missing_timestamp_is_never_stale(which):
+    vms = _vms() if which in ("vm", "both") else _lagging_vms(25)
+    datastores = _ds() if which in ("datastore", "both") else _fresh_ds()
+    built = site(datastores=datastores, vms=vms)
+    assert gc.stale(built, FinOpsTuning()) == {}
+    assert gc.sweep(built, FinOpsTuning(), NOW).judged == (DS,)
+    [gap] = by_kind(advise(built), "unaccounted-storage")
+    assert float(gap.estimated_savings.amount) == pytest.approx(340 * STORAGE_RATE, abs=0.01)
+
+
 def test_exactly_the_gap_passes_parity():
     assert len(swept([_file("[san-01] scratch/all-flat.vmdk", 340)]).garbage) == 1
 
