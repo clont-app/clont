@@ -10,6 +10,8 @@
 
 ### finops
 
+- k8s: `rightsize-workload` no longer prices replicas on nodes that take no pods
+  (tainted masters, cordoned). control-plane static pods stop showing up as savings
 - on-prem: `old-vm-snapshot` (snapshots older than `onprem_snapshot_max_days`,
   default 3, sized off `layoutEx`, backup leftovers named) and
   `consolidation-needed` ($0, a risk). still under the Read-Only role

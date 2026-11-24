@@ -40,8 +40,9 @@ PER_VCPU = Decimal("91.25")
 PER_GIB = Decimal("13.6875")
 
 
-def node(name: str = "kube-1", *, cap=(4, 16)) -> Node:
+def node(name: str = "kube-1", *, cap=(4, 16), taints=()) -> Node:
     return Node(
+        hard_taints=tuple(taints),
         name=name,
         uid=f"uid-{name}",
         vcpu=Decimal(cap[0]),
@@ -204,6 +205,28 @@ def test_each_replica_is_priced_on_the_node_it_sits_on():
     # kube-9 maps to nothing priced, so only the one replica's handback is money
     assert report.findings[0].monthly == Decimal("45.63")  # 0.5 vcpu + 0 ram, one replica
     assert report.unpriced_replicas == 1
+
+
+def test_a_static_pod_on_a_tainted_master_hands_back_nothing():
+    master = node(taints=("node-role.kubernetes.io/control-plane",))
+    pods = [pod("etcd-1", cpu="1", ram="1")]
+    report = advise(
+        match("lab", [master], [target()]), pods, {WEB: used("0.1", "0.1", replicas=1)}, records()
+    )
+    assert (report.findings, report.pinned_replicas) == ((), 1)
+    assert "take no pods" in report.summary()
+
+
+def test_a_daemonset_spanning_masters_is_priced_on_the_workers_only():
+    master = node("kube-9", taints=("node-role.kubernetes.io/control-plane",))
+    pods = [pod("web-1", cpu="1", ram="1"), pod("web-2", cpu="1", ram="1", node_name="kube-9")]
+    targets = [target(), target(uid="vm-9", name="kube-9")]
+    recs = records() + [vm_record(moref="vm-9")]
+    report = advise(
+        match("lab", [node(), master], targets), pods, {WEB: used("0.35", "0.7")}, recs
+    )
+    assert report.findings[0].monthly == Decimal("45.63")  # one replica, as if alone
+    assert report.pinned_replicas == 1
 
 
 def test_a_saving_under_the_floor_is_noise():

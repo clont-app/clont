@@ -23,6 +23,9 @@ Decisions worth keeping:
   have two rate cards, and a workload spread over both hands back different money per pod.
   A replica on an unpriced node contributes nothing and is counted, same rule as the
   namespace split.
+* **a replica on a node that takes no pods hands back nothing.** A control plane's static
+  pods sit on tainted masters the cluster can never drop, so shrinking etcd's request frees
+  room no ordinary pod may use and no node can go. Counted, never priced.
 * **a dimension that asks for nothing is left alone.** A pod with no cpu request cannot
   hand cpu back, and advising a *new* request here would be inventing a number the
   scheduler never used — that is a different finding, not this one.
@@ -86,6 +89,7 @@ class WorkloadReport:
     unmeasured: int = 0      # live workloads with no usable usage row
     norequest: int = 0       # ...and workloads that reserve nothing, so nothing to shrink
     unpriced_replicas: int = 0
+    pinned_replicas: int = 0  # on nodes that take no pods, so nothing to hand back
 
     def summary(self) -> str:
         head = (
@@ -98,6 +102,8 @@ class WorkloadReport:
             head += f", {self.norequest} requesting nothing"
         if self.unpriced_replicas:
             head += f", {self.unpriced_replicas} replica(s) on unpriced nodes"
+        if self.pinned_replicas:
+            head += f", {self.pinned_replicas} replica(s) on nodes that take no pods"
         return head
 
 
@@ -115,10 +121,11 @@ def advise(
     target = Decimal(str(tune.onprem_rightsize_target_pct)) / _HUNDRED
     floor = Decimal(str(tune.onprem_min_savings_usd))
     rates = _rates_by_node(mapping, records)
+    closed = _closed_nodes(mapping)
     pool = ", ".join(mapping.pools) or "unmapped"
 
     findings: list[WorkloadFinding] = []
-    measured = unmeasured = norequest = unpriced = 0
+    measured = unmeasured = norequest = unpriced = pinned = 0
     for key, group in _by_workload(pods).items():
         row = usage.get(key)
         if row is None:
@@ -128,6 +135,7 @@ def advise(
         ask_cpu = max((pod.vcpu for pod in group), default=Decimal(0))
         ask_ram = max((pod.ram_gib for pod in group), default=Decimal(0))
         unpriced += sum(1 for pod in group if rates.get(pod.node) is None)
+        pinned += sum(1 for pod in group if pod.node in closed)
         if ask_cpu <= 0 and ask_ram <= 0:
             norequest += 1
             continue
@@ -138,7 +146,8 @@ def advise(
         if fit is None:
             continue
         cpu, ram = fit
-        monthly, currency = _handback(group, rates, cpu, ram)
+        open_pods = [pod for pod in group if pod.node not in closed]
+        monthly, currency = _handback(open_pods, rates, cpu, ram)
         if monthly < floor:
             continue
         findings.append(
@@ -160,6 +169,7 @@ def advise(
         unmeasured=unmeasured,
         norequest=norequest,
         unpriced_replicas=unpriced,
+        pinned_replicas=pinned,
     )
     log.debug("%s", report.summary())
     return report
@@ -253,6 +263,18 @@ def _rates_by_node(
             if name:
                 out.setdefault(name, None)
     return out
+
+
+def _closed_nodes(mapping: ClusterMapping) -> frozenset[str]:
+    """names of nodes an ordinary pod cannot land on, both spellings."""
+    nodes = [m.node for m in mapping.matched] + [m.node for m in mapping.unmapped]
+    return frozenset(
+        name
+        for node in nodes
+        if not node.takes_pods
+        for name in (node.name, node.short_name)
+        if name
+    )
 
 
 def _by_workload(pods: Iterable[Pod]) -> dict[WorkloadRef, list[Pod]]:
