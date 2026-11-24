@@ -77,6 +77,8 @@ class KubernetesNodes:
         self._api: Any = None
         self._custom: Any = None
         self._client: Any = None
+        # the last pv list failed and came back empty, so empty proves nothing
+        self.volumes_failed = False
         # the apiserver this session talks to, filled on connect — for the log line
         self.endpoint: str | None = None
 
@@ -150,12 +152,14 @@ class KubernetesNodes:
         the pv there is no way to tell a volume on a datastore from one inside a node's own
         disk, so the on-prem gap stays as large as it was.
         """
+        self.volumes_failed = False
         try:
             items = self._list(
                 "persistentvolumes", lambda: self._api.list_persistent_volume
             )
         except Exception as exc:  # noqa: BLE001 - optional read, see the module docstring
             log.info("%s: persistent volumes unavailable: %s", self.endpoint, exc)
+            self.volumes_failed = True
             return []
         return build_volumes(items)
 

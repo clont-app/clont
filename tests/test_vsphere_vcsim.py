@@ -35,7 +35,7 @@ IDLE_TPL = "DC0_C0_RP0_VM0"     # a template nobody cloned, but vcsim made it ju
 FROM_TPL = "from-template"
 
 # everything a pass may call. the one task is the browse, a read, added on purpose, and
-# so are the event collector calls the template clone history needs
+# so are the event collector calls the template clone history needs and the cns query
 READ_ONLY = {
     "RetrieveServiceContent",
     "Login",
@@ -54,6 +54,7 @@ READ_ONLY = {
     "RewindCollector",
     "ReadNextEvents",
     "DestroyCollector",
+    "CnsQueryVolume",
 }
 
 pytestmark = pytest.mark.skipif(
@@ -306,12 +307,27 @@ def test_a_missing_grant_is_seen_before_the_browse(session):
 def test_a_full_pass_with_browse_stays_read_only(session):
     with _soap_spy(session) as called:
         session.browse_grants()
-        session.site(usage_window_days=1, browse=True, clones=True)
+        session.site(usage_window_days=1, browse=True, clones=True, cns=True)
     seen = set(called)
     assert seen, "the spy recorded nothing, it is not wrapping the stub any more"
     assert seen <= READ_ONLY, f"non read-only calls: {sorted(seen - READ_ONLY)}"
     assert {"SearchDatastoreSubFolders_Task", "HasPrivilegeOnEntities"} <= seen
     assert {"CreateCollectorForEvents", "ReadNextEvents", "DestroyCollector"} <= seen
+    assert "CnsQueryVolume" in seen
+
+
+def test_cns_answers_on_the_vsan_endpoint_with_our_cookie(session):
+    # the stub, the path, the version and the moref: an empty list, not a fault
+    found = session.cns()
+    assert found is not None and found.volumes == () and not session.cns_failed
+
+
+def test_a_cns_volume_comes_back_in_the_shape_we_read(session):
+    pytest.skip(
+        "vcsim's cns can't decode a CnsQueryFilter without xsi:type (pyvmomi leaves it "
+        "off the declared type) once a volume exists, and sends block backing without "
+        "xsi:type either, so pyvmomi can't parse it. check it on a real vcenter"
+    )
 
 
 def test_template_clone_events_come_back_in_the_shape_we_read(session):

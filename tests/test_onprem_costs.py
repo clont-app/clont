@@ -362,6 +362,8 @@ class FakeSession:
         self.skipped: frozenset[str] = frozenset()
         self.clones_failed = False
         self.clones_asked: bool | None = None
+        self.cns_failed = False
+        self.cns_asked: bool | None = None
 
     def browse_grants(self):
         self.grant_checks += 1
@@ -374,9 +376,19 @@ class FakeSession:
     def __exit__(self, *_exc):
         return None
 
-    def site(self, *, usage_window_days=0, browse=False, browse_skip=frozenset(), clones=False):
+    def site(
+        self,
+        *,
+        usage_window_days=0,
+        browse=False,
+        browse_skip=frozenset(),
+        clones=False,
+        cns=False,
+    ):
         self._windows.append(usage_window_days)
         self.clones_asked = clones
+        self.cns_asked = cns
+        self.cns_failed = cns and getattr(self, "fail_cns", False)
         self.clones_failed = clones and getattr(self, "fail_clones", False)
         self.browsed = browse
         self.skipped = browse_skip
@@ -526,6 +538,24 @@ def test_a_failed_clone_read_is_not_asked_again_this_run(monkeypatch):
     provider.inventory(refresh=True)
     # it warned once inside the first session, the next ones don't ask
     assert [s.clones_asked for s in provider.sessions] == [True, False, False]
+
+
+def test_cns_is_read_only_with_a_cluster_attached_and_not_again_after_a_fault(monkeypatch):
+    from clont.finops.guests import GuestStorage
+
+    monkeypatch.setattr(FakeSession, "fail_cns", True, raising=False)
+    provider, _, now = provider_with(site_inventory())
+    provider.browsed_inventory()
+    # no kubernetes cluster, nothing to judge a cns volume against
+    assert [s.cns_asked for s in provider.sessions] == [False]
+    provider.attach_guest("lab", lambda: GuestStorage(source="lab"))
+    now[0] += PASS_TTL_SECONDS + 1
+    provider.browsed_inventory()
+    now[0] += PASS_TTL_SECONDS + 1
+    provider.browsed_inventory()
+    # the hourly pass never asks, and a fault is not asked again this run
+    provider.inventory(refresh=True)
+    assert [s.cns_asked for s in provider.sessions] == [False, True, False, False]
 
 
 def test_browse_false_never_starts_a_browse():

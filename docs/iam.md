@@ -599,6 +599,9 @@ three things worth knowing:
   [setup-onprem.md](setup-onprem.md#optional-datastorebrowse-for-the-file-list).
   the browse is `SearchDatastoreSubFolders_Task`, a read; preflight checks the
   grant with `HasPrivilegeOnEntities` and a missing one is a warning, never fatal.
+- **`Cns.Searchable` is optional too**, vcenter only: `cns-leftover` lists csi
+  volumes with `CnsQueryVolume` (a read, `/vsanHealth` endpoint, same session).
+  without it one warning, no verdict.
 - the sdk is an extra: `pip install clont[vsphere]` (pyvmomi). an aws-only
   install doesn't pull it.
 

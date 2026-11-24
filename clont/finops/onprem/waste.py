@@ -37,6 +37,10 @@ What the snapshot alone proves:
   gap, when the role has `Datastore.Browse` (`gc.py`). priced at the datastore's pool
   storage rate, approximate. whatever gc lists comes off `unaccounted-storage`, so the
   same GiB is never priced twice, and the gap that's left is logs, isos and other files
+* **a cns leftover** is a vsphere csi volume whose cluster clont reads and whose pv is
+  gone (`cns.py`), vcenter only. priced like an orphaned vmdk off its on-disk size, and
+  it comes off `unaccounted-storage` the same way: a detached volume no pv claims is in
+  that gap and in no cluster's claim, so without it the GiB would be priced twice
 
 And what the measured window adds:
 
@@ -78,7 +82,7 @@ from clont.core.registry import register
 from clont.finops.base import FinOpsTuning
 from clont.finops.guests import GuestStorage
 from clont.finops.models import CostRecord, Recommendation
-from clont.finops.onprem import gc
+from clont.finops.onprem import cns, gc
 from clont.finops.onprem.rates import allocate
 from clont.providers.onprem.inventory import (
     CloneHistory,
@@ -189,7 +193,13 @@ class OnPremWasteCollector:
             # offered back twice — see `_unaccounted_gib`
             findings.extend(
                 site_findings(
-                    site, rate, self._tuning, self._guests(), now=now, ds_rates=ds_rates
+                    site,
+                    rate,
+                    self._tuning,
+                    self._guests(),
+                    now=now,
+                    ds_rates=ds_rates,
+                    cns_clusters=self._cns_clusters(),
                 )
             )
         return [self._rec(finding) for finding in _once(findings)]
@@ -207,6 +217,10 @@ class OnPremWasteCollector:
         """
         ask = getattr(self._provider, "guest_storage", None)
         return list(ask()) if callable(ask) else []
+
+    def _cns_clusters(self) -> dict[str, str]:
+        inventory = getattr(self._provider.site, "inventory", None)
+        return dict(getattr(inventory, "cns_clusters", None) or {})
 
     def _card(self, pool: Pool) -> dict:
         return self._provider.site.card_for(pool.key, pool.name)
@@ -391,11 +405,13 @@ def site_findings(
     *,
     now: datetime | None = None,
     ds_rates: dict[str, tuple[str, Decimal]] | None = None,
+    cns_clusters: dict[str, str] | None = None,
 ) -> list[Finding]:
     """The leftovers that belong to no pool, priced at the site's mean storage rate.
 
-    `ds_rates` is datastore moref -> (pool key, $/GiB-month) for the gc rows; a datastore
-    no priced pool mounts falls back to the site rate.
+    `ds_rates` is datastore moref -> (pool key, $/GiB-month) for the gc and cns rows; a
+    datastore no priced pool mounts falls back to the site rate. `cns_clusters` is
+    `inventory.cns_clusters`.
     """
     floor = Decimal(str(tuning.onprem_min_savings_usd))
     now = now or datetime.now(UTC)
@@ -446,7 +462,12 @@ def site_findings(
     if swept is not None:
         out.extend(gc_findings(swept, ds_rates or {}, storage_rate, now, floor=floor))
 
-    gap = _unaccounted_gib(site, tuning, guests, swept)
+    verdict = cns.judge(site, guests, tuning, now, mapping=cns_clusters, swept=swept)
+    if verdict is not None:
+        _cns_log(verdict)
+        out.extend(cns_findings(verdict, ds_rates or {}, storage_rate, now))
+
+    gap = _unaccounted_gib(site, tuning, guests, swept, verdict)
     if gap is not None and gap.unexplained * storage_rate >= floor:
         if swept is None:
             what = (
@@ -552,6 +573,70 @@ def gc_findings(
             )
         )
     return out
+
+
+def cns_findings(
+    verdict: cns.Verdict,
+    ds_rates: dict[str, tuple[str, Decimal]],
+    storage_rate: Decimal,
+    now: datetime,
+) -> list[Finding]:
+    """One finding per cns volume a known cluster dropped. no savings floor: the gap
+    they come off is priced in full either way, and each one is someone's data."""
+    out: list[Finding] = []
+    for row in verdict.leftovers:
+        volume = row.volume
+        region, rate = ds_rates.get(row.datastore.uid, (_SITE, storage_rate))
+        how = "learned from its pvs" if row.learned else "mapped in inventory.cns_clusters"
+        recorded = [
+            f"pv {', '.join(volume.named(cns.PV))}" if volume.named(cns.PV) else "",
+            f"pvc {', '.join(volume.named(cns.PVC))}" if volume.named(cns.PVC) else "",
+        ]
+        said = " and ".join(part for part in recorded if part) or "no pv or pvc"
+        name = f" ({volume.name})" if volume.name and volume.name != volume.id else ""
+        out.append(
+            Finding(
+                kind=cns.CNS_LEFTOVER,
+                resource_id=volume.id,
+                region=region,
+                summary=(
+                    f"cns volume {volume.id}{name} on {row.datastore.name}, "
+                    f"~{_gib_fine(row.size_gib)} GiB on disk of "
+                    f"{_gib_fine(volume.capacity_gib)} GiB, belongs to container cluster "
+                    f"{row.cluster} ({', '.join(row.owners)}, {how}) and no pv there "
+                    f"points at it any more — cns still records {said}. last written "
+                    f"{_age(now - row.modified)} ago. check nothing else uses it, then "
+                    "delete it through the cluster or in the vsphere client (cloud native "
+                    "storage > container volumes). never remove the vmdk by hand, cns "
+                    "keeps its own record of it"
+                ),
+                monthly=row.size_gib * rate,
+                approximate=True,
+                uid=f"cns:{volume.id}",
+            )
+        )
+    return out
+
+
+def _cns_log(verdict: cns.Verdict) -> None:
+    """At most two lines: the cluster ids nobody owns, and why the rest got no verdict."""
+    if verdict.unmapped:
+        ids = sorted(verdict.unmapped)
+        count = sum(n for n, _ in verdict.unmapped.values())
+        gib = sum((g for _, g in verdict.unmapped.values()), Decimal(0))
+        log.warning(
+            "cns: %d volume(s), %s GiB, of container cluster id(s) %s no kubernetes "
+            "cluster clont reads owns — not judged. map them in inventory.cns_clusters "
+            "if they are yours",
+            count,
+            _gib(gib),
+            _names(tuple(ids)),
+        )
+    if verdict.skipped:
+        log.info(
+            "cns: no verdict for %s",
+            ", ".join(f"{n} ({why})" for why, n in sorted(verdict.skipped.items())),
+        )
 
 
 def snapshot_findings(
@@ -751,7 +836,8 @@ class _Gap:
             return ""
         return (
             f". another {_gib(self.listed)} GiB is listed file by file in {self.rows} "
-            "orphaned-vmdk / unregistered-vm finding(s) and is not counted here"
+            "orphaned-vmdk / unregistered-vm / cns-leftover finding(s) and is not "
+            "counted here"
         )
 
     @property
@@ -781,6 +867,7 @@ def _unaccounted_gib(
     tuning: FinOpsTuning,
     guests: Iterable[GuestStorage] = (),
     swept: gc.Sweep | None = None,
+    verdict: cns.Verdict | None = None,
 ) -> _Gap | None:
     """Used datastore space minus what every vm claims, once both thresholds are passed.
 
@@ -800,8 +887,9 @@ def _unaccounted_gib(
     report rather than a negative one, and the thresholds are applied to what is left —
     the whole point is that the remainder is the part nobody has accounted for.
 
-    Same for what datastore gc listed: those GiB are their own findings now, so they come
-    off too, never below zero.
+    Same for what datastore gc listed and the cns leftovers: those GiB are their own
+    findings now, so they come off too, never below zero. a cns leftover is detached (not
+    in any vm layout) and in no cluster's claim, so it sits in exactly this gap.
 
     **A running vm's committed can lag the datastore's free space** by many minutes (seen
     live: 25 GiB grown, `summary.storage` 25 minutes behind), and the difference reads as
@@ -828,17 +916,22 @@ def _unaccounted_gib(
     explained = min(sum((g.detached_gib for g in owned), Decimal(0)), max(raw, Decimal(0)))
     listed = Decimal(0)
     garbage = [] if swept is None else [g for g in swept.garbage if g.datastore.uid not in left_out]
-    if swept is not None:
-        listed = min(
-            sum((g.size_gib for g in garbage), Decimal(0)), max(raw - explained, Decimal(0))
+    leftovers = [] if verdict is None else [
+        row for row in verdict.leftovers
+        if row.datastore.uid not in left_out and row.datastore.uid not in dead
+    ]
+    if garbage or leftovers:
+        held = sum((g.size_gib for g in garbage), Decimal(0)) + sum(
+            (row.size_gib for row in leftovers), Decimal(0)
         )
+        listed = min(held, max(raw - explained, Decimal(0)))
     gap = _Gap(
         raw=raw,
         explained=explained,
         volumes=sum(g.volumes for g in owned),
         sources=tuple(sorted(g.source for g in owned)),
         listed=listed,
-        rows=len(garbage),
+        rows=len(garbage) + len(leftovers),
         skipped=skipped,
     )
     if used <= 0 or gap.unexplained < Decimal(str(tuning.onprem_unaccounted_min_gib)):

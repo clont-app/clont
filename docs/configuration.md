@@ -84,7 +84,9 @@ with the rest. it only gives up if *no* account authenticates.
   then every vm is billed what it reserved with no idle / rightsize advice) and
   `browse` (default `true` — the daily waste pass lists vmdk/vmx files for
   datastore gc, which needs `Datastore.Browse`; without the grant it warns and the
-  storage gap stays a size, `false` skips the browse tasks).
+  storage gap stays a size, `false` skips the browse tasks) and `cns_clusters`
+  (cns container cluster id -> `kubernetes:` cluster name, for `cns-leftover`
+  when clont can't learn the id from the cluster's own pvs).
   leaving `inventory` out is fine: the site is priced and idle, which is the
   normal state while the read-only account is still being granted.
 

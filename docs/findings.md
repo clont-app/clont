@@ -228,6 +228,7 @@ the disk it **occupies**, never the thin promise.
 | `consolidation-needed` | a risk, $0: a snapshot delete left deltas behind, they grow and slow writes |
 | `orphaned-vmdk` | a disk no vm lists in its layout, older than `onprem_gc_min_age_days` (7). descriptor and extents as one finding. small ones under the savings floor fold into one `small-orphans` row per datastore. needs `Datastore.Browse` |
 | `unregistered-vm` | a folder with a `.vmx` no inventory vm points at, the whole folder as one. re-register or delete. needs `Datastore.Browse` |
+| `cns-leftover` | vcenter only: a vsphere csi volume (cns container volume, under `fcd/`) whose container cluster clont reads and holds no pv for it any more — the on-prem `eks-leftover`. names the volume id, name, datastore, cluster id and the pv / pvc cns still records. priced off its on-disk size, comes off `unaccounted-storage`. delete it through the cluster or vsphere client → cloud native storage → container volumes, never the vmdk. needs `Cns.Searchable` and `Datastore.Browse` (its age) |
 
 gc stays conservative: a datastore mounted by a host outside the pass, vsan /
 vvol, `.fcd` / `catalog` / `kubevols` (csi owns those), isos and `onprem_gc_keep`
@@ -239,6 +240,15 @@ nobody holds: when the layout is more than `onprem_layout_max_lag_minutes` (10)
 behind, that datastore is all-live for gc and left out of `unaccounted-storage`,
 and the summary says so. rerun after a few minutes, or
 `vim-cmd hostsvc/datastore/refresh`.
+
+`cns-leftover` is just as careful. a cluster id belongs to a cluster clont reads
+when `inventory.cns_clusters` maps it, or when that cluster's pvs point at at
+least half of its volumes. live, no verdict: any pv of any cluster points at the
+volume (handle, in-tree path or the pv name cns recorded), a cluster id nobody
+owns (one warning with the count, GiB and ids), no cluster recorded, supervisor /
+guest cluster flavors, a cluster whose pv list wasn't read, file volumes,
+anything attached to a vm, a disk the browse didn't date or touched inside
+`onprem_gc_min_age_days`, and datastores gc wouldn't judge either.
 
 two things that keep the numbers honest. **per-cluster findings are priced on
 your own card, so they're exact** (`approximate=False`, which no aws finding

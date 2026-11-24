@@ -33,6 +33,10 @@ class GuestStorage:
     elsewhere_gib: Decimal = Decimal(0)   # nfs, ceph, a cloud disk, another site's array
     # `[ds1] kubevols/x.vmdk` paths it owns, so datastore gc never calls them garbage
     paths: tuple[str, ...] = ()
+    # vsphere csi volume handles (cns volume ids) of every pv, so a cns volume can be
+    # called nobody's. none: the pv list wasn't read, and then no verdict against it
+    handles: frozenset[str] | None = None
+    pv_names: frozenset[str] = frozenset()  # every pv name, a loose second match
 
     def line(self) -> str:
         """One line for the log: what was reconciled, and what was left out of it."""

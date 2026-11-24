@@ -28,6 +28,9 @@
   a datastore refused once is not browsed again that run
 - datastore browse paths come out in the `layoutEx` form whatever the host
   answers (`[ds]/vm` from vcsim, `[ds] vm/` from esxi)
+- on-prem `cns-leftover` (vcenter only, `Cns.Searchable`): csi volumes whose cluster
+  clont reads and holds no pv for them, cluster ids learned or mapped in
+  `inventory.cns_clusters`
 - `template-disk` on a vcenter says when the template was last cloned, or that it
   wasn't over the event history vcenter still holds. no verdict on esxi or a failed read
 

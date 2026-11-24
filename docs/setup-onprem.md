@@ -83,6 +83,7 @@ clont starts no other task and changes nothing.
 | `old-vm-snapshot`, `consolidation-needed` | yes | yes |
 | `unaccounted-storage` | the rest after gc | the whole gap, as a size |
 | `orphaned-vmdk`, `unregistered-vm` | yes | no |
+| `cns-leftover` (plus `Cns.Searchable`) | yes | no |
 | file list in the findings | yes | no |
 
 without it clont checks once at start, logs one warning naming the grant and
@@ -93,6 +94,27 @@ two knobs, both under `finops:` ([configuration.md](configuration.md)):
 `onprem_gc_min_age_days` (7) — a file touched more recently is never garbage, it
 may be a vmotion, clone or backup in flight; `onprem_gc_keep` — paths gc never
 judges, e.g. `["[san-01] golden/", "isos/"]`.
+
+### optional: `Cns.Searchable`, for csi volumes nobody owns
+
+vcenter only, and only when a `kubernetes:` cluster is priced by this site. clont
+lists cns container volumes (`CnsQueryVolume`, a read on the `/vsanHealth`
+endpoint) and flags the ones whose pv is gone from a cluster it reads
+(`cns-leftover`). add **Cloud Native Storage → Searchable** (`Cns.Searchable`) to
+the same `clont-ro` role, on the vcenter root. the age comes off the browse, so
+`Datastore.Browse` is needed too. without it: one warning, no verdict.
+
+clont learns which cns cluster id is which cluster from the pvs. a cluster whose
+pvs are mostly gone teaches nothing, so map it by hand (cluster id is the csi
+config's `cluster-id`, or what vsphere client → cloud native storage shows):
+
+```yaml
+onprem:
+  dc1:
+    inventory:
+      cns_clusters:
+        prod-k8s-cluster-id: prod   # a `kubernetes:` name, not a context
+```
 
 ## 3. write the rate card
 

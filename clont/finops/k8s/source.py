@@ -90,6 +90,8 @@ class ClusterRead:
     usage: list[PodUsage] = field(default_factory=list)  # per pod, as the source gives it
     claims: list[Claim] = field(default_factory=list)
     pvs: list[Volume] = field(default_factory=list)  # the volumes behind the claims
+    # whether the pv list was read at all. none: unknown, a non-empty list says yes
+    pvs_read: bool | None = None
 
     @property
     def pending_pods(self) -> int:
@@ -189,7 +191,14 @@ class KubernetesSource:
         read = self.read(refresh=refresh)
         if getattr(self.provider, "cloud", None) is not Cloud.ONPREM:
             return Placements(cluster=self.name)
-        return place(self.name, read.claims, read.pvs, read.pods, self.provider.inventory())
+        return place(
+            self.name,
+            read.claims,
+            read.pvs,
+            read.pods,
+            self.provider.inventory(),
+            pvs_read=read.pvs_read,
+        )
 
     def guest_storage(self) -> GuestStorage:
         """What this cluster admits to holding on the site's datastores.
@@ -324,6 +333,7 @@ class KubernetesSource:
             labels = session.labels()
             claims = session.claims()
             pvs = session.volumes()
+            pvs_read = not getattr(session, "volumes_failed", False)
             # the metrics api is on the same connection; prometheus is not, and is read
             # outside the session because it is not the cluster's api at all
             usage = session.usage() if self.config.usage == METRICS_SERVER else []
@@ -347,6 +357,7 @@ class KubernetesSource:
             usage=usage,
             claims=claims,
             pvs=pvs,
+            pvs_read=pvs_read,
         )
 
     def _prometheus(self) -> Prometheus:

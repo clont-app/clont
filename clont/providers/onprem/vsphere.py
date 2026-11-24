@@ -19,8 +19,10 @@ a read that needs `Datastore.Browse` on top, and `browse_grants()` asks
 `HasPrivilegeOnEntities` whether that grant is there before the first one. On a vcenter
 `clone_events()` also reads the event log through a history collector
 (`CreateCollectorForEvents` / `RewindCollector` / `ReadNextEvents` / `DestroyCollector`),
-a read under Read-Only too. That claim is a test (`tests/test_vsphere_vcsim.py`, against
-vcsim), not a promise in a readme.
+a read under Read-Only too. And `cns()` asks vcenter's cns for its container volumes
+(`CnsQueryVolume` on the `/vsanHealth` endpoint, same session cookie), a read that needs
+`Cns.Searchable`. That claim is a test (`tests/test_vsphere_vcsim.py`, against vcsim),
+not a promise in a readme.
 
 An unset property is **absent** from the result rather than `None`, so the transform in
 `inventory.py` reads every path with `.get()` — see its docstring for what it does with a
@@ -40,11 +42,13 @@ from clont.core.logging import get_logger
 from clont.providers.onprem.inventory import (
     CLONE_EVENTS,
     CloneHistory,
+    CnsVolumes,
     DatastoreFile,
     Props,
     SiteInventory,
     build_site,
     clone_history,
+    cns_volumes,
     datastore_files,
 )
 from clont.providers.onprem.metrics import COUNTERS, Samples, usage_rows
@@ -132,6 +136,17 @@ EVENT_PAGE = 1000
 # matters, so past this there is no verdict at all
 EVENT_LIMIT = 50_000
 
+# vcenter's cns lives on the vsan health service, a soap endpoint of its own that takes
+# the vim session cookie. 7.0u2 is the oldest vsan api that sends `containerClusterArray`
+# and `backingDiskPath`, an older vcenter faults and gets no verdict
+CNS_PATH = "/vsanHealth"
+CNS_VERSION = "vsan.version.version16"
+CNS_MANAGER = "cns-volume-manager"
+CNS_GRANT = "Cns.Searchable"
+CNS_PAGE = 500
+# a cut-off list only loses findings, never adds one, so past this it stops and says so
+CNS_LIMIT = 100_000
+
 
 class VsphereInventory:
     """A read-only inventory session against one vcenter.
@@ -169,6 +184,9 @@ class VsphereInventory:
         self.api_type: str | None = None
         # the last clone read failed, already warned about
         self.clones_failed = False
+        # same for the cns read
+        self.cns_failed = False
+        self._ssl: ssl.SSLContext | None = None
 
     def __enter__(self) -> VsphereInventory:
         self.connect()
@@ -179,12 +197,14 @@ class VsphereInventory:
 
     def connect(self) -> None:
         connect, self._vim = _import_pyvmomi()
+        # kept, the cns stub is a second connection to the same server
+        self._ssl = self._ssl_context()
         self._si = connect.SmartConnect(
             host=self.endpoint,
             port=self.port,
             user=self._user,
             pwd=self._password,
-            sslContext=self._ssl_context(),
+            sslContext=self._ssl,
         )
         # fetched once and kept: `si.content` is a *managed property*, so every access is
         # another round trip (one `Fetch` per property call, for a value that never changes)
@@ -226,6 +246,7 @@ class VsphereInventory:
         browse: bool = False,
         browse_skip: frozenset[str] = frozenset(),
         clones: bool = False,
+        cns: bool = False,
     ) -> SiteInventory:
         """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in.
 
@@ -234,7 +255,8 @@ class VsphereInventory:
         reserved; a failed perf read does the same rather than failing the pass, because
         a site with no counter history still has a bill to report.
 
-        `clones` reads vcenter's clone events for the templates, see `clone_events()`.
+        `clones` reads vcenter's clone events for the templates, see `clone_events()`,
+        and `cns` its container volumes, see `cns()`.
         """
         vim = self._require_vim()
         compute = self.properties(vim.ComputeResource, COMPUTE_PATHS)
@@ -258,6 +280,8 @@ class VsphereInventory:
             templates = {vm.uid: vm.name for vm in site.vms() if vm.template}
             if templates:
                 site = replace(site, clones=self.clone_events(templates))
+        if cns:
+            site = replace(site, cns=self.cns())
         log.info(
             "%s: %d pools, %d hosts, %d vms, %d datastores, %d measured",
             self.endpoint,
@@ -475,6 +499,75 @@ class VsphereInventory:
             templates,
             created=self._created(templates),
         )
+
+    def cns(self) -> CnsVolumes | None:
+        """Every container volume vcenter's cns knows, paged.
+
+        Only a vcenter has cns: a host agent gets None and no warning. A fault, a missing
+        `Cns.Searchable` or no cns service at all is None plus one warning, never a failed
+        pass, and then no volume gets a verdict.
+        """
+        self.cns_failed = False
+        if self.api_type != VCENTER:
+            return None
+        vim = self._require_vim()
+        try:
+            found = self._query_cns(vim)
+        except Exception as exc:  # noqa: BLE001 - a verdict is not worth failing a pass over
+            self.cns_failed = True
+            if isinstance(exc, vim.fault.NoPermission):
+                log.warning(
+                    "%s: no %s, cns volumes not read — grant it to the clont role for "
+                    "cns-leftover",
+                    self.endpoint,
+                    CNS_GRANT,
+                )
+            else:
+                log.warning("%s: cns volumes unreadable, no verdict: %s", self.endpoint, exc)
+            return None
+        return CnsVolumes(volumes=cns_volumes(found), read_at=datetime.now(UTC))
+
+    def _cns_manager(self, vim: Any) -> Any:
+        """`cns-volume-manager` on the vsan health endpoint, logged in with our cookie."""
+        from pyVmomi import SoapStubAdapter
+
+        cookie = getattr(getattr(self._si, "_stub", None), "cookie", None)
+        if not cookie:
+            raise ConfigError("no session cookie to hand the cns endpoint")
+        stub = SoapStubAdapter(
+            host=self.endpoint,
+            port=self.port,
+            path=CNS_PATH,
+            version=CNS_VERSION,
+            sslContext=self._ssl,
+        )
+        stub.cookie = cookie
+        return vim.cns.VolumeManager(CNS_MANAGER, stub)
+
+    def _query_cns(self, vim: Any) -> list:
+        """`CnsQueryVolume` page by page, as plain dicts."""
+        manager = self._cns_manager(vim)
+        out: list = []
+        offset = 0
+        while True:
+            result = manager.CnsQueryVolume(
+                filter=vim.cns.QueryFilter(cursor=vim.cns.Cursor(offset=offset, limit=CNS_PAGE))
+            )
+            page = list(getattr(result, "volumes", None) or [])
+            out.extend(_plain(v) for v in page)
+            cursor = getattr(result, "cursor", None)
+            after = int(getattr(cursor, "offset", 0) or 0)
+            total = getattr(cursor, "totalRecords", None)
+            # the cursor's offset is where the next page starts. one that doesn't move
+            # (vcsim answers 0) or reached the total is the last page
+            if not page or after <= offset or (total is not None and after >= int(total)):
+                return out
+            if len(out) >= CNS_LIMIT:
+                log.warning(
+                    "%s: more than %d cns volumes, the rest not read", self.endpoint, CNS_LIMIT
+                )
+                return out
+            offset = after
 
     def _read_events(self, manager: Any, spec: Any, *, most: int | None = None) -> list | None:
         """Oldest first, at most `most`. None when there were more and `most` > 1."""

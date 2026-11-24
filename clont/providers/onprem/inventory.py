@@ -343,6 +343,114 @@ def clone_history(
     )
 
 
+BLOCK = "block"
+FILE = "file"
+# the flavor vanilla vsphere csi writes. supervisor and guest clusters hand volumes back
+# and forth by pvc name, so a handle there never matches a cns id and is not judged
+VANILLA = "VANILLA"
+
+
+@dataclass(frozen=True, slots=True)
+class CnsEntity:
+    """One kubernetes object cns still records against a volume."""
+
+    kind: str        # PERSISTENT_VOLUME / PERSISTENT_VOLUME_CLAIM / POD
+    name: str
+    namespace: str = ""
+    cluster: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CnsVolume:
+    """One container volume vcenter's cns knows about. judged in `finops/onprem/cns.py`."""
+
+    id: str
+    name: str = ""
+    datastore_url: str = ""
+    capacity_mib: int = 0
+    backing: str = BLOCK
+    # `[ds] fcd/<id>.vmdk`, the join onto the browse and the vm layouts. "" when not sent
+    disk_path: str = ""
+    clusters: tuple[str, ...] = ()  # container cluster ids, the array when there is one
+    flavor: str = ""
+    entities: tuple[CnsEntity, ...] = ()
+
+    @property
+    def capacity_gib(self) -> Decimal:
+        return Decimal(self.capacity_mib) / MIB_PER_GIB
+
+    def named(self, kind: str) -> tuple[str, ...]:
+        """`namespace/name` (or just the name) of every recorded entity of one kind."""
+        return tuple(
+            f"{e.namespace}/{e.name}" if e.namespace else e.name
+            for e in self.entities
+            if e.kind == kind and e.name
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CnsVolumes:
+    """What `CnsQueryVolume` returned, and when."""
+
+    volumes: tuple[CnsVolume, ...] = ()
+    read_at: datetime | None = None
+
+
+def cns_volumes(items: object) -> tuple[CnsVolume, ...]:
+    """Plain `CnsVolume` dicts (the wire's `_plain`) into `CnsVolume`s. no id, no volume."""
+    out: list[CnsVolume] = []
+    for item in _items(items):
+        if not isinstance(item, dict):
+            continue
+        ref = item.get("volumeId")
+        vid = _text(ref.get("id")) if isinstance(ref, dict) else _text(ref)
+        if not vid:
+            continue
+        meta = _dict(item.get("metadata"))
+        array = [c for c in _items(meta.get("containerClusterArray")) if isinstance(c, dict)]
+        rows = array or [_dict(meta.get("containerCluster"))]
+        clusters = [_text(c.get("clusterId")) for c in rows]
+        flavors = {_text(c.get("clusterFlavor")).upper() for c in rows} - {""}
+        backing = _dict(item.get("backingObjectDetails"))
+        kind = _text(item.get("volumeType")).lower()
+        if kind not in (BLOCK, FILE):
+            kind = FILE if "backingFileId" in backing else BLOCK
+        if len(flavors) > 1:
+            flavor = "mixed"  # two flavors on one volume is odd enough to not judge it
+        else:
+            flavor = next(iter(flavors), "")
+        out.append(
+            CnsVolume(
+                id=vid,
+                name=_text(item.get("name")),
+                datastore_url=_text(item.get("datastoreUrl")),
+                capacity_mib=_int(backing.get("capacityInMb")),
+                backing=kind,
+                disk_path=_text(backing.get("backingDiskPath")),
+                clusters=tuple(dict.fromkeys(c for c in clusters if c)),
+                flavor=flavor,
+                entities=tuple(
+                    _cns_entity(e) for e in _items(meta.get("entityMetadata"))
+                    if isinstance(e, dict)
+                ),
+            )
+        )
+    return tuple(out)
+
+
+def _cns_entity(item: dict) -> CnsEntity:
+    return CnsEntity(
+        kind=_text(item.get("entityType")).upper(),
+        name=_text(item.get("entityName")),
+        namespace=_text(item.get("namespace")),
+        cluster=_text(item.get("clusterId")),
+    )
+
+
+def _dict(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 @dataclass(frozen=True, slots=True)
 class SiteInventory:
     """One pass over one vcenter. The leftovers are findings, not errors."""
@@ -362,6 +470,9 @@ class SiteInventory:
     # vcenter's clone events for the templates. none on a host agent, which keeps no
     # such history, or when the read failed, and then a template gets no verdict
     clones: CloneHistory | None = None
+    # vcenter's cns volumes. none on a host agent (no cns), when not asked or the read
+    # failed, and then no volume gets a verdict
+    cns: CnsVolumes | None = None
 
     def pool(self, key: str) -> Pool | None:
         return next((pool for pool in self.pools if pool.key == key or pool.name == key), None)

@@ -79,6 +79,8 @@ class OnPremProvider:
         self._browse_off = False
         # the clone events failed once, warned, not asked again this run
         self._clones_off = False
+        # same for cns
+        self._cns_off = False
 
     @property
     def site(self) -> OnPremSite:
@@ -127,8 +129,11 @@ class OnPremProvider:
                 browse=not self._browse_off,
                 browse_skip=self._browse_skip,
                 clones=not self._clones_off,
+                # cns volumes are judged against the clusters' pvs, none attached -> no read
+                cns=bool(self._guests) and not self._cns_off,
             )
             self._clones_off = self._clones_off or session.clones_failed
+            self._cns_off = self._cns_off or session.cns_failed
             # refused inside the task: browse() warned this once, never ask again
             self._skip_browse(session.browse_denied, site)
         now = self._clock()

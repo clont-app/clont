@@ -45,7 +45,7 @@ from decimal import Decimal
 from clont.core.logging import get_logger
 from clont.finops.guests import GuestStorage
 from clont.providers.k8s.pods import Pod
-from clont.providers.k8s.pvs import IN_NODE, UNKNOWN, Volume
+from clont.providers.k8s.pvs import DATASTORE_DRIVERS, IN_NODE, UNKNOWN, Volume
 from clont.providers.k8s.volumes import Claim
 from clont.providers.onprem.inventory import Datastore, SiteInventory
 
@@ -88,8 +88,14 @@ def place(
     volumes: Iterable[Volume],
     pods: Iterable[Pod],
     site: SiteInventory,
+    *,
+    pvs_read: bool | None = None,
 ) -> Placements:
-    """Join claims to volumes to datastores, and total up what no vm is holding."""
+    """Join claims to volumes to datastores, and total up what no vm is holding.
+
+    `pvs_read` false means the pv list failed and came back empty: then the cluster
+    hands over no csi handles at all, so no cns volume is ever judged against it.
+    """
     index = _Datastores(site)
     # scheduled pods only: a pending pod holds nothing on any node, so the disk it is
     # waiting for is not attached to a vm and the gap does hold it
@@ -137,6 +143,8 @@ def place(
         if datastore is None:
             gib["unplaced"] += volume.gib
 
+    # unknown counts as read only when something came back
+    read = pvs_read if pvs_read is not None else bool(volumes)
     storage = GuestStorage(
         source=cluster,
         detached_gib=gib["detached"],
@@ -147,6 +155,8 @@ def place(
         unknown_gib=gib["unknown"],
         elsewhere_gib=gib["elsewhere"],
         paths=tuple(paths),
+        handles=_handles(volumes) if read else None,
+        pv_names=frozenset(v.name for v in volumes if v.name),
     )
     log.debug("%s", storage.line())
     missing = wanted - set(by_claim)
@@ -159,6 +169,11 @@ def place(
         released=tuple(released),
         storage=storage,
     )
+
+
+def _handles(volumes: list[Volume]) -> frozenset[str]:
+    """vsphere csi volume handles, i.e. cns volume ids, whatever the pv's phase."""
+    return frozenset(v.handle for v in volumes if v.driver in DATASTORE_DRIVERS and v.handle)
 
 
 def _bucket(volume: Volume) -> str:
