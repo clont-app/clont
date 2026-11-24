@@ -29,7 +29,7 @@ already run it and the read is free.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from clont.providers.k8s.usage import METRICS_SERVER, PROMETHEUS, USAGE_OFF
 
@@ -56,10 +56,19 @@ class KubernetesCluster(BaseModel):
     # is advised about — the same rule as a vm with too little vcenter history
     usage_min_samples: int = Field(default=24, ge=1)
     prometheus_url: str | None = None
+    # one cluster read is reused this long; metrics-server takes one sample per read,
+    # so a daemon looping faster than this gets no more samples unless it is lowered
+    pass_ttl_seconds: int = Field(default=300, ge=0, le=86400)
     prometheus_window_days: int = Field(default=14, gt=0, le=90)
     # the subquery step: 14 days at 5 minutes is ~4k points per series, and the cpu query
     # is the expensive one. widen it on a big cluster rather than shortening the window
     prometheus_step_minutes: int = Field(default=5, gt=0, le=60)
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _yaml_off(cls, value: object) -> object:
+        # yaml 1.1 reads a bare `off` as false
+        return USAGE_OFF if value is False else value
 
     @model_validator(mode="after")
     def _one_auth_source(self) -> KubernetesCluster:

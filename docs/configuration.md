@@ -103,6 +103,9 @@ with the rest. it only gives up if *no* account authenticates.
   `off`. it only buys sizing advice; the cluster is fully priced either way.
 - `usage_min_samples` (int, default `24`) — metrics-server keeps no history, so
   this many passes have to pile up before a workload is advised about.
+- `pass_ttl_seconds` (int, default `300`) — one cluster read is reused this
+  long, and metrics-server gives one sample per read. a daemon looping faster
+  gets no extra samples until this is lowered to `interval_seconds`.
 - `prometheus_url` (**required** for `usage: prometheus`),
   `prometheus_window_days` (default `14`) and `prometheus_step_minutes`
   (default `5` — widen it on a big cluster rather than shortening the window).

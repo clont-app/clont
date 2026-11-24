@@ -182,7 +182,9 @@ def _k8s_sources(
             # the alias is configured — the validator checked that — so it just did not come up
             log.warning("kubernetes %s: %s is not available, nothing prices it", name, cluster.priced_by)
             continue
-        source = KubernetesSource(name, cluster, provider, tuning=tuning)
+        source = KubernetesSource(
+            name, cluster, provider, tuning=tuning, pass_ttl_seconds=cluster.pass_ttl_seconds
+        )
         try:
             log.info("kubernetes %s", source.mapping().summary())
         except Exception as exc:  # noqa: BLE001 - isolate one bad cluster

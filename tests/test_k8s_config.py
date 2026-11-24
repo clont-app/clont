@@ -50,3 +50,15 @@ def test_in_cluster_takes_no_kubeconfig():
 def test_a_mistyped_key_is_rejected():
     with pytest.raises(ValidationError):
         KubernetesCluster(priced_by="dc1", kube_config="/tmp/kubeconfig")
+
+
+def test_a_bare_off_in_yaml_means_usage_off(tmp_path, monkeypatch):
+    # yaml 1.1 turns `off` into false
+    config = _load(tmp_path, monkeypatch, _YAML + "    usage: off\n")
+    assert config.kubernetes["lab"].usage == "off"
+
+
+def test_the_pass_ttl_is_configurable(tmp_path, monkeypatch):
+    config = _load(tmp_path, monkeypatch, _YAML + "    pass_ttl_seconds: 60\n")
+    assert config.kubernetes["lab"].pass_ttl_seconds == 60
+    assert KubernetesCluster(priced_by="dc1").pass_ttl_seconds == 300

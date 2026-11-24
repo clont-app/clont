@@ -271,7 +271,7 @@ def _oversized_summary(
 ) -> str:
     names = ", ".join(row.name for row in drop)
     head = (
-        f"{pool}: {len(rows)} node vm(s) carry pod requests for {_HUNDRED - unrequested}% "
+        f"{pool}: {_node_count(rows)} carry pod requests for {_HUNDRED - unrequested}% "
         f"of their capacity, so {len(drop)} of them ({names}) can go and the pods still "
         f"fit in {tune.onprem_rightsize_target_pct:.0f}% of what is left"
     )
@@ -292,11 +292,19 @@ def _double_summary(
 ) -> str:
     return (
         f"{pool}: the pool is {card.overcommit_vcpu}x oversubscribed on vcpu and its "
-        f"{len(rows)} node vm(s) have {unrequested}% of their capacity requested by no pod "
+        f"{_node_count(rows)} have {unrequested}% of their capacity requested by no pod "
         f"— the same cores are promised twice over and handed out once. no whole node can "
         f"go (the pods would not fit), so the move is to shrink the node vms themselves; "
         f"this is a risk and an explanation, not a saving"
     )
+
+
+def _node_count(rows: list[_Row]) -> str:
+    # the % is over the nodes that take pods, so the count has to be too
+    open_count = sum(1 for row in rows if row.takes_pods)
+    closed = len(rows) - open_count
+    text = f"{open_count} node vm(s) that take pods"
+    return f"{text} (plus {closed} control plane)" if closed else text
 
 
 def _pods_by_node(pods: list[Pod]) -> dict[str, list[Pod]]:

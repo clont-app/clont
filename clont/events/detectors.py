@@ -112,7 +112,7 @@ class SpendDigestDetector:
                     key=f"finops:spend:digest:{alias}",
                     severity=EventSeverity.INFO,
                     domain="finops",
-                    cloud=Cloud.AWS,
+                    cloud=_cloud_of(recs),
                     title=f"[{alias}] Daily spend: {total} {currency}",
                     message=f"{latest_day}: {total} {currency} — top: {breakdown}",
                     payload={
@@ -289,6 +289,7 @@ class SpendSpikeDetector:
                 series[rec.service][day] = series[rec.service].get(day, Decimal(0)) + rec.cost.amount
                 currency[rec.service] = rec.cost.currency
 
+            cloud = _cloud_of(recs)
             for service, by_day in series.items():
                 latest = by_day.get(anchor)
                 if latest is None:  # service had no spend on the anchor day
@@ -319,14 +320,14 @@ class SpendSpikeDetector:
                 cur = currency[service]
                 events.append(
                     Event(
-                        key=f"finops:spend:spike:{alias}:aws:{service}",
+                        key=f"finops:spend:spike:{alias}:{cloud}:{service}",
                         severity=EventSeverity.WARN,
                         domain="finops",
-                        cloud=Cloud.AWS,
+                        cloud=cloud,
                         title=f"[{alias}] Spend spike: {service}",
                         message=f"{latest} {cur} vs {baseline:.2f} {basis} (+{pct:.0f}%)",
                         resource=CloudResource(
-                            cloud=Cloud.AWS,
+                            cloud=cloud,
                             service=service,
                             resource_id=service,
                             alias=alias_key,
@@ -544,6 +545,7 @@ class _AccountMonth:
     currency: str
     account_daily: dict[date, Decimal]             # day -> account total
     service_daily: dict[str, dict[date, Decimal]]  # service -> {day -> total}
+    cloud: Cloud = Cloud.AWS
 
     def days_in_month(self) -> int:
         return calendar.monthrange(self.anchor.year, self.anchor.month)[1]
@@ -595,6 +597,7 @@ def _account_months(records: list[CostRecord]) -> list[_AccountMonth]:
                 currency=currency,
                 account_daily=dict(account_daily),
                 service_daily={s: dict(d) for s, d in service_daily.items()},
+                cloud=_cloud_of(recs),
             )
         )
     return out
@@ -674,7 +677,7 @@ class SpendForecastDetector:
                     key=f"finops:spend:forecast:{alias}",
                     severity=EventSeverity.INFO,
                     domain="finops",
-                    cloud=Cloud.AWS,
+                    cloud=acc.cloud,
                     title=f"[{alias}] Month-end forecast: ~{proj.total:.0f} {cur}",
                     message=(
                         f"{acc.anchor.year}-{acc.anchor.month:02d}: {mtd:.2f} {cur} "
@@ -767,7 +770,7 @@ class BudgetDetector:
             key=f"finops:budget:{alias}:{scope}",
             severity=severity,
             domain="finops",
-            cloud=Cloud.AWS,
+            cloud=acc.cloud,
             title=f"[{alias}] Budget {scope}: {state}",
             message=(
                 f"{scope}: {mtd:.2f} {rule.currency} MTD, "

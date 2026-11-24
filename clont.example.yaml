@@ -106,6 +106,8 @@ aws:
 #                                  # the cluster, it just advises on nothing
 #     usage_min_samples: 24        # metrics-server keeps no history, so this many passes
 #                                  # must accumulate before a workload is advised about
+#     pass_ttl_seconds: 300        # one read is reused this long, one usage sample per
+#                                  # read. set it to interval_seconds to sample every cycle
 #     # prometheus_url: http://prometheus.monitoring:9090  # required by usage: prometheus
 #     # prometheus_window_days: 14 # the window prometheus computes the p95 over
 #     # prometheus_step_minutes: 5 # subquery step; widen it on a big cluster

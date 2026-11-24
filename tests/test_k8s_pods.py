@@ -128,3 +128,19 @@ def test_junk_items_are_skipped_not_fatal():
     pods, pending = build_pods([None, "nope", pod("web")])  # type: ignore[list-item]
     assert len(pods) == 1
     assert pending == []
+
+
+def test_a_static_pod_is_its_own_workload_not_its_node():
+    # a real kubelet owns the mirror pod by its node, k3s leaves it unowned
+    items = []
+    for name in ("etcd-master-1", "kube-apiserver-master-1"):
+        item = pod(name, namespace="kube-system")
+        item["metadata"]["ownerReferences"] = [{"kind": "Node", "name": "master-1"}]
+        items.append(item)
+    pods, _ = build_pods(items)
+    refs = {p.workload for p in pods}
+    assert len(refs) == 2
+    assert {(r.kind, r.name) for r in refs} == {
+        ("Pod", "etcd-master-1"),
+        ("Pod", "kube-apiserver-master-1"),
+    }

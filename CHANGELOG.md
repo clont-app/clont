@@ -39,6 +39,13 @@
 - on-prem: a running vm whose `layoutEx` is over `onprem_layout_max_lag_minutes` (10)
   older than its datastore's free space no longer reads as `unaccounted-storage`, and
   gc treats that datastore as all-live
+- k8s: a static pod (owned by its `Node` on a real kubelet) is its own workload, no
+  longer one per-node "workload" holding the whole control plane
+- k8s: `usage: off` unquoted in yaml is read as `off`, not rejected as a bool
+- spend digest, spike, forecast and budget events carry the records' cloud, not
+  always `aws`
+- k8s pool findings count only the nodes that take pods, the ones the % is over
+- k8s: `pass_ttl_seconds` per cluster, so a faster loop can take more usage samples
 
 ### tests
 

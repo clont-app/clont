@@ -6,10 +6,13 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from clont.core.models import CloudResource, Cloud, Money, Period
+from clont.core.config import BudgetRule
 from clont.events.detectors import (
+    BudgetDetector,
     HealthDetector,
     RecommendationDetector,
     SpendDigestDetector,
+    SpendForecastDetector,
     SpendSpikeDetector,
 )
 from clont.events.models import EventSeverity
@@ -217,3 +220,28 @@ def test_health_key_includes_alias():
     [event] = HealthDetector().detect([check])
     assert event.key == "monitoring:health:prod:aws:ec2:i-9"
     assert event.title.startswith("[prod]")
+
+
+def test_onprem_spend_events_say_onprem_not_aws():
+    days = [date(2024, 1, d) for d in range(1, 9)]
+    records = [
+        CostRecord(
+            cloud="onprem",
+            service="vm",
+            period=Period(start=day, end=day),
+            cost=Money(amount=Decimal("100" if day == days[-1] else "10")),
+            alias="dc1",
+        )
+        for day in days
+    ]
+    events = (
+        SpendDigestDetector().detect(records)
+        + SpendSpikeDetector().detect(records)
+        + SpendForecastDetector().detect(records)
+        + BudgetDetector([BudgetRule(account="dc1", monthly_limit=Decimal("50"))]).detect(records)
+    )
+    assert {e.key.split(":")[2] for e in events} == {"digest", "spike", "forecast", "dc1"}
+    assert {e.cloud for e in events} == {Cloud.ONPREM}
+    spike = next(e for e in events if ":spike:" in e.key)
+    assert spike.key == "finops:spend:spike:dc1:onprem:vm"
+    assert spike.resource.cloud == Cloud.ONPREM

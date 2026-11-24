@@ -39,7 +39,9 @@ is read off the pod itself, never with a second api call:
   lands here too and gets its own name right, which is the half an operator reads.
 * **the strip is what licenses the "Deployment" claim**: with no hash label to match, the
   workload stays the ReplicaSet it says it is rather than a name we made up.
-* a pod with no owner — a static pod, a bare pod — is its own workload, kind `Pod`. A Job
+* a pod with no owner — a bare pod — is its own workload, kind `Pod`. so is a static
+  pod: a real kubelet's mirror pod is owned by its `Node`, and grouping by that owner would
+  fold etcd, the apiserver and the rest of a control plane into one fake workload. A Job
   stays a Job: rolling it up to its CronJob needs a second read, and the job name already
   carries the cronjob's.
 """
@@ -60,6 +62,7 @@ TEMPLATE_HASH = "pod-template-hash"
 REPLICA_SET = "ReplicaSet"
 DEPLOYMENT = "Deployment"
 BARE_POD = "Pod"
+NODE = "Node"  # the owner of a static pod's mirror, never a pod template
 
 _ALWAYS = "Always"
 
@@ -96,7 +99,7 @@ class Pod:
     def workload(self) -> WorkloadRef:
         """Which pod template this pod came out of — see the module docstring."""
         kind, name = self.owner, self.owner_name
-        if not name:
+        if not name or kind == NODE:
             return WorkloadRef(self.namespace, BARE_POD, self.name)
         if kind == REPLICA_SET:
             short = _strip_hash(name, self.template_hash)

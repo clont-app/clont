@@ -145,6 +145,15 @@ def test_a_tainted_control_plane_node_is_neither_capacity_nor_a_candidate():
     assert run(nodes, pods).findings == ()
 
 
+def test_the_node_count_is_over_the_nodes_the_percent_is_over():
+    master = node("master-1", taints=("node-role.kubernetes.io/control-plane",))
+    nodes = [master, *four_nodes()]
+    report = run(nodes, one_pod_each(nodes[1:]))
+    summary = report.findings[0].summary
+    assert "4 node vm(s) that take pods (plus 1 control plane)" in summary
+    assert "5 node vm(s)" not in summary
+
+
 def test_a_cordoned_node_cannot_be_dropped_and_holds_no_free_capacity():
     nodes = [node("kube-1", cordoned=True), node("kube-2")]
     pods = [pod("web", "kube-2", cpu="1", ram="4")]
