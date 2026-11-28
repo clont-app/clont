@@ -409,6 +409,8 @@ def test_a_released_volume_is_a_finding_of_its_own():
     assert "the deleted claim apps/gone" in finding.summary
     assert "(Retain)" in finding.summary
     assert "the data is still on the array" in finding.summary
+    assert "it is likely unused" in finding.summary
+    assert "before removing the pv" in finding.summary and "delete the pv" not in finding.summary
     assert report.released == 1
 
 

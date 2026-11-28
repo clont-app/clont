@@ -199,8 +199,9 @@ def _released(
                     f"{volume.name} is Released{where}: {_round(volume.gib)} GiB{was} that "
                     f"the reclaim policy{policy} kept. no claim, no pod and no vm holds it, "
                     f"so nothing else in either half of clont can see it — "
-                    f"{_priced(volume.gib, rate, region)}. the data is still on the array: "
-                    "delete the pv when it is not the restore you are keeping"
+                    f"{_priced(volume.gib, rate, region)}. it is likely unused, but the data "
+                    "is still on the array: check it is not a restore you are keeping "
+                    "before removing the pv"
                 ),
                 monthly=monthly,
                 gib=_round(volume.gib),
@@ -248,7 +249,7 @@ def _summary(
     size = f"{_round(gib)} GiB"
     priced = _priced(gib, rate, region)
     tail = (
-        "deleting it deletes the data — a statefulset scaled to zero looks exactly like "
+        "removing it removes the data — a statefulset scaled to zero looks exactly like "
         "this and wants its volumes back. the hypervisor can only see these blocks as "
         "unaccounted datastore space, so the site's gap hands them here rather than "
         "offering the same GiB back twice"

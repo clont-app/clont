@@ -120,7 +120,7 @@ def test_a_bound_claim_nothing_mounts_is_priced_off_the_pool_card():
     assert "30+ days old" in finding.summary
     assert "vsphere-csi" in finding.summary
     # the honest half: data, and what the hypervisor could see of it
-    assert "deleting it deletes the data" in finding.summary
+    assert "removing it removes the data" in finding.summary
     assert "unaccounted datastore space" in finding.summary
     assert report.gib_month == RATE
 

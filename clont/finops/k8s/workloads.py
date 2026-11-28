@@ -148,7 +148,8 @@ def advise(
         cpu, ram = fit
         open_pods = [pod for pod in group if pod.node not in closed]
         monthly, currency = _handback(open_pods, rates, cpu, ram)
-        if monthly < floor:
+        # a zero floor must not let a $0 shrink through, a master hands back nothing
+        if monthly <= 0 or monthly < floor:
             continue
         findings.append(
             WorkloadFinding(

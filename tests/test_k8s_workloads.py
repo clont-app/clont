@@ -217,6 +217,19 @@ def test_a_static_pod_on_a_tainted_master_hands_back_nothing():
     assert "take no pods" in report.summary()
 
 
+def test_a_master_shrink_is_no_finding_even_with_no_floor():
+    master = node(taints=("node-role.kubernetes.io/control-plane",))
+    pods = [pod("etcd-1", cpu="1", ram="1")]
+    report = advise(
+        match("lab", [master], [target()]),
+        pods,
+        {WEB: used("0.1", "0.1", replicas=1)},
+        records(),
+        tuning=FinOpsTuning(onprem_min_savings_usd=0.0),
+    )
+    assert report.findings == ()
+
+
 def test_a_daemonset_spanning_masters_is_priced_on_the_workers_only():
     master = node("kube-9", taints=("node-role.kubernetes.io/control-plane",))
     pods = [pod("web-1", cpu="1", ram="1"), pod("web-2", cpu="1", ram="1", node_name="kube-9")]
