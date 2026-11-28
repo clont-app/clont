@@ -72,6 +72,8 @@ class OnPremProvider:
         self._last: tuple[float, SiteInventory] | None = None
         self._browsed: tuple[float, SiteInventory] | None = None
         self._guests: list[tuple[str, Callable[[], GuestStorage]]] = []
+        # the other sites clont reads, a vcenter sharing an array with this one
+        self._peers: list[tuple[str, Callable[[], SiteInventory]]] = []
         # Datastore.Browse, checked once per run: datastores never to browse again, and
         # whether that is all of them
         self._browse_checked = False
@@ -201,6 +203,28 @@ class OnPremProvider:
                 out.append(reader())
             except Exception as exc:  # noqa: BLE001 - one guest is not the site
                 log.warning("%s: guest %s not reconciled: %s", self.alias, name, exc)
+        return out
+
+    def attach_peer(self, alias: str, reader: Callable[[], SiteInventory]) -> None:
+        """Register another site clont reads. wired by `bootstrap` for every pair.
+
+        a vcenter only names its own hosts as a datastore's mounts, so an array two
+        vcenters share looks private from either side. the peer's vms are what keep its
+        files live for datastore gc here
+        """
+        self._peers.append((alias, reader))
+
+    def peer_sites(self) -> list[tuple[str, SiteInventory | None]]:
+        """every peer's last pass, none for one whose read failed"""
+        out: list[tuple[str, SiteInventory | None]] = []
+        for alias, reader in self._peers:
+            try:
+                out.append((alias, reader()))
+            except Exception as exc:  # noqa: BLE001 - one peer is not the site
+                log.warning(
+                    "%s: peer site %s not read, gc doubts its files: %s", self.alias, alias, exc
+                )
+                out.append((alias, None))
         return out
 
     def regions(self) -> list[str]:

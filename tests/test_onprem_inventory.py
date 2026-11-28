@@ -862,3 +862,28 @@ def test_too_many_clone_events_is_no_verdict_rather_than_half_of_one(monkeypatch
 def test_no_template_means_no_event_read(monkeypatch):
     session, collectors, _ = _eventing(monkeypatch, events=[DvsCreatedEvent(1)])
     assert session.clone_events({}) is None and collectors == []
+
+
+def test_vms_a_host_or_datastore_names_but_the_read_never_returned_are_hidden():
+    hosts = {
+        "vim.HostSystem:h1": {
+            "name": "esx-01",
+            "hardware.cpuInfo.numCpuCores": 4,
+            "hardware.memorySize": 8 * 1024**3,
+            "datastore": ["vim.Datastore:d1"],
+            "vm": ["vim.VirtualMachine:v1", "vim.VirtualMachine:v8"],
+        }
+    }
+    datastores = {
+        "vim.Datastore:d1": {
+            "name": "ds1",
+            "summary.capacity": 100 * 1024**3,
+            "vm": ["vim.VirtualMachine:v1", "vim.VirtualMachine:v9"],
+        }
+    }
+    vms = {"vim.VirtualMachine:v1": {"name": "web", "runtime.host": "vim.HostSystem:h1"}}
+    site = build_site({}, hosts, datastores, vms)
+    assert site.hidden_vms == ("vim.VirtualMachine:v8", "vim.VirtualMachine:v9")
+    [ds] = site.datastores
+    assert ds.vms == ("vim.VirtualMachine:v1", "vim.VirtualMachine:v9")
+    assert ds.hidden_vms == ("vim.VirtualMachine:v9",)

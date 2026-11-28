@@ -18,7 +18,7 @@ from clont.core.models import Cloud, Period
 from clont.finops.base import FinOpsTuning
 from clont.finops.guests import GuestStorage
 from clont.finops.k8s.datastores import place
-from clont.finops.onprem import cns
+from clont.finops.onprem import cns, gc
 from clont.finops.onprem.config import OnPremSite
 from clont.finops.onprem.waste import OnPremWasteCollector
 from clont.providers.k8s.pvs import build_volumes
@@ -218,18 +218,50 @@ def test_a_volume_a_pv_points_at_is_live():
     assert leftovers(recs) == []
 
 
-def test_a_leftover_of_a_learned_cluster_is_one_finding_with_the_story():
+def test_a_learned_cluster_id_is_not_proof_and_gets_no_verdict(caplog):
+    # another cluster on the same csi cluster-id would look exactly like this
     inv = site([vol("v-live"), vol("v-gone", pv="pvc-9", pvc="db/data")],
                [fcd("v-live"), fcd("v-gone")])
-    [rec] = leftovers(advise(inv, guests=[lab("v-live")]))
+    assert leftovers(advise(inv, guests=[lab("v-live")])) == []
+    [line] = warnings(caplog)
+    assert "k8s-a" in line and "not mapped in inventory.cns_clusters" in line
+    assert "k8s-a looks like lab's" in line
+
+
+def test_a_leftover_of_a_mapped_and_learned_cluster_is_one_finding_with_the_story():
+    inv = site([vol("v-live"), vol("v-gone", pv="pvc-9", pvc="db/data")],
+               [fcd("v-live"), fcd("v-gone")])
+    [rec] = leftovers(advise(inv, guests=[lab("v-live")], mapping={"k8s-a": "lab"}))
     assert rec.resource.resource_id == "v-gone" and rec.resource.region == "prod"
     assert rec.approximate
     assert float(rec.estimated_savings.amount) == pytest.approx(20 * STORAGE_RATE, abs=0.01)
     text = rec.summary
-    for part in ("v-gone", "pvc-9", "san-01", "k8s-a", "lab", "learned from its pvs",
-                 "pvc db/data", "no pv there points at it", "cloud native storage",
-                 "never remove the vmdk"):
+    for part in ("v-gone", "pvc-9", "san-01", "k8s-a", "lab", "is likely unused",
+                 "mapped in inventory.cns_clusters", "its pvs hold most",
+                 "pvc db/data", "no pv there points at it", "same csi cluster-id",
+                 "cloud native storage", "never remove the vmdk"):
         assert part in text, part
+    assert "delete" not in text
+
+
+def test_a_second_cluster_on_the_same_id_is_never_a_leftover():
+    # lab is mapped, but cns says another vsphere user wrote v-other: a second cluster
+    other = vol("v-other")
+    for row in other["metadata"]["containerClusterArray"]:
+        row["vSphereUser"] = "csi-b"
+    inv = site([vol("v-live"), other], [fcd("v-live"), fcd("v-other")])
+    assert leftovers(advise(inv, guests=[lab("v-live")], mapping={"k8s-a": "lab"})) == []
+    verdict = cns.judge(inv, [lab("v-live")], FinOpsTuning(), NOW, mapping={"k8s-a": "lab"})
+    assert any("another vsphere user" in why for why in verdict.skipped)
+
+
+def test_pvs_of_two_clusters_on_one_id_is_no_verdict():
+    inv = site([vol("v-a"), vol("v-b"), vol("v-gone")], [fcd("v-a"), fcd("v-b"), fcd("v-gone")])
+    other = replace(lab("v-b"), source="lab2")
+    guests = [lab("v-a"), other]
+    assert leftovers(advise(inv, guests=guests, mapping={"k8s-a": "lab"})) == []
+    verdict = cns.judge(inv, guests, FinOpsTuning(), NOW, mapping={"k8s-a": "lab"})
+    assert verdict.skipped == {"pvs of more than one cluster hold volumes of its cluster id": 1}
 
 
 def test_a_leftover_of_a_config_mapped_cluster_needs_no_live_volume():
@@ -506,3 +538,55 @@ def test_no_cns_service_is_one_warning_and_no_verdict(monkeypatch, caplog):
     assert session.cns() is None and session.cns_failed
     [line] = warnings(caplog)
     assert "cns volumes unreadable" in line
+
+
+# gc's verdict on a datastore holds here too
+
+
+def test_a_datastore_gc_dropped_on_parity_is_not_judged_again(caplog):
+    # a 400 gib orphan breaks gc's bound on san-01: its graph is wrong there, so cns's is too
+    inv = site([vol("v-1")], [fcd("v-1"), _file("[san-01] scratch/huge-flat.vmdk", 400)])
+    recs = advise(inv, guests=[lab()], mapping={"k8s-a": "lab"})
+    assert leftovers(recs) == []
+    assert any("datastore gc parity failed on san-01" in line for line in warnings(caplog))
+    swept = gc.sweep(inv, FinOpsTuning(), NOW)
+    assert swept.unreliable == frozenset({DS})
+    verdict = cns.judge(inv, [lab()], FinOpsTuning(), NOW, mapping={"k8s-a": "lab"}, swept=swept)
+    assert verdict.skipped == {"its datastore can't be judged": 1}
+
+
+def test_a_datastore_gc_called_stale_is_skipped_not_a_cns_parity_bug(caplog):
+    stale = {DS: {**DATASTORES[DS], "summary.freeSpace": 1900 * GIB}}
+    built = build_site(CLUSTERS, HOSTS, stale, _vms())
+    inv = replace(
+        built,
+        files={DS: tuple(_live_files()) + (fcd("v-1"),)},
+        cns=CnsVolumes(volumes=cns_volumes([vol("v-1")]), read_at=NOW),
+    )
+    assert leftovers(advise(inv, guests=[lab()], mapping={"k8s-a": "lab"})) == []
+    assert not any("cns parity failed" in line for line in warnings(caplog))
+
+
+def test_a_volume_a_peer_sites_vm_has_attached_is_live():
+    swept = replace(
+        gc.sweep(site([vol("v-1")], [fcd("v-1")]), FinOpsTuning(), NOW),
+        owned=frozenset({"[san-01] fcd/v-1.vmdk"}),
+    )
+    inv = site([vol("v-1")], [fcd("v-1")])
+    verdict = cns.judge(inv, [lab()], FinOpsTuning(), NOW, mapping={"k8s-a": "lab"}, swept=swept)
+    assert verdict.leftovers == ()
+    assert verdict.skipped == {"attached to a vm": 1}
+
+
+def test_a_device_backing_counts_as_attached():
+    vms = _vms()
+    vms["vim.VirtualMachine:vm-10"]["config.hardware.device"] = [
+        {"key": 2001, "backing": {"fileName": "[san-01] fcd/v-1.vmdk"}}
+    ]
+    inv = site([vol("v-1")], [fcd("v-1")], vms=vms)
+    assert leftovers(advise(inv, guests=[lab()], mapping={"k8s-a": "lab"})) == []
+
+
+def test_the_vsphere_user_parses_off_the_container_cluster():
+    [volume] = cns_volumes([vol("v-1")])
+    assert volume.users == ("csi",)

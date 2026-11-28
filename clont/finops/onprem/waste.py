@@ -31,12 +31,14 @@ What the snapshot alone proves:
 * **an old vm snapshot** holds a delta that only grows, and slows every write. priced at
   the pool's storage rate on the size of its deltas, approximate because `layoutEx` sizes
   are what the files hold now. the advice is the snapshot manager, never the delta files:
-  removing those by hand breaks the chain
+  removing those by hand breaks the chain. a powered-off vm's or a template's committed
+  already holds its deltas, so there the snapshot line is $0 and the disk line has the money
 * **consolidation needed** is vcenter saying a delete left deltas behind. a risk, $0
-* **an orphaned vmdk / an unregistered vm folder** is the file list behind the storage
-  gap, when the role has `Datastore.Browse` (`gc.py`). priced at the datastore's pool
-  storage rate, approximate. whatever gc lists comes off `unaccounted-storage`, so the
-  same GiB is never priced twice, and the gap that's left is logs, isos and other files
+* **an orphaned vmdk / an unregistered vm** is the file list behind the storage gap, when
+  the role has `Datastore.Browse` (`gc.py`). priced at the datastore's pool storage rate,
+  approximate. whatever gc lists comes off `unaccounted-storage`, so the same GiB is never
+  priced twice, and the gap that's left is logs, isos and other files. the summary names
+  the files it judged and what gc could not rule out, never a folder to remove
 * **a cns leftover** is a vsphere csi volume whose cluster clont reads and whose pv is
   gone (`cns.py`), vcenter only. priced like an orphaned vmdk off its on-disk size, and
   it comes off `unaccounted-storage` the same way: a detached volume no pv claims is in
@@ -71,7 +73,7 @@ Three rules about the money:
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
@@ -103,6 +105,9 @@ _CENT = Decimal("0.01")
 _HUNDRED = Decimal(100)
 # less event history than this proves nothing about a template, so no "never cloned"
 CLONE_MIN_WINDOW_DAYS = 7
+# findings priced on a vm's whole committed storage, snapshot deltas included
+_WHOLE_DISK = ("stopped-vm", "template-disk", "orphan-vm")
+OLD_SNAPSHOT = "old-vm-snapshot"
 
 # what common backup tools name the snapshot they take, upper-cased. one left behind is a
 # job that failed to clean up, and the operator should hear which tool
@@ -121,7 +126,7 @@ _BACKUP_SNAPSHOTS = (
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """One thing to delete or switch off, priced per month."""
+    """One thing likely unused or oversized, priced per month."""
 
     kind: str
     resource_id: str
@@ -200,9 +205,10 @@ class OnPremWasteCollector:
                     now=now,
                     ds_rates=ds_rates,
                     cns_clusters=self._cns_clusters(),
+                    peers=self._peers(),
                 )
             )
-        return [self._rec(finding) for finding in _once(findings)]
+        return [self._rec(finding) for finding in _count_once(_once(findings))]
 
     def _site(self) -> SiteInventory:
         # the browsed pass when the provider has one, gc needs the file list
@@ -217,6 +223,10 @@ class OnPremWasteCollector:
         """
         ask = getattr(self._provider, "guest_storage", None)
         return list(ask()) if callable(ask) else []
+
+    def _peers(self) -> list[gc.Peer]:
+        ask = getattr(self._provider, "peer_sites", None)
+        return [gc.Peer(alias, inv) for alias, inv in ask()] if callable(ask) else []
 
     def _cns_clusters(self) -> dict[str, str]:
         inventory = getattr(self._provider.site, "inventory", None)
@@ -263,6 +273,24 @@ def _once(findings: Iterable[Finding]) -> list[Finding]:
             continue
         seen.add(key)
         out.append(finding)
+    return out
+
+
+def _count_once(findings: list[Finding]) -> list[Finding]:
+    """each byte priced once. a stopped vm, a template or an orphan vm is priced on its
+    whole committed, its snapshot deltas included, so an old snapshot of the same vm keeps
+    its line as a risk at $0"""
+    whole = {f.uid: f.kind for f in findings if f.kind in _WHOLE_DISK and f.uid}
+    out: list[Finding] = []
+    for f in findings:
+        if f.kind == OLD_SNAPSHOT and f.uid in whole and f.monthly > 0:
+            f = replace(
+                f,
+                monthly=Decimal(0),
+                summary=f"{f.summary}. its space is already priced in the {whole[f.uid]} "
+                "finding, so this one counts $0",
+            )
+        out.append(f)
     return out
 
 
@@ -346,7 +374,8 @@ def usage_findings(
             continue
         vcpu, ram_gib = fit
         saving = Decimal(vm.vcpu - vcpu) * cpu_rate + (vm.ram_gib - ram_gib) * ram_rate
-        if saving < floor:
+        # a zero floor must not let a $0 shrink through
+        if saving <= 0 or saving < floor:
             continue
         out.append(
             Finding(
@@ -406,12 +435,13 @@ def site_findings(
     now: datetime | None = None,
     ds_rates: dict[str, tuple[str, Decimal]] | None = None,
     cns_clusters: dict[str, str] | None = None,
+    peers: Iterable[gc.Peer] = (),
 ) -> list[Finding]:
     """The leftovers that belong to no pool, priced at the site's mean storage rate.
 
     `ds_rates` is datastore moref -> (pool key, $/GiB-month) for the gc and cns rows; a
     datastore no priced pool mounts falls back to the site rate. `cns_clusters` is
-    `inventory.cns_clusters`.
+    `inventory.cns_clusters`, `peers` the other sites clont reads.
     """
     floor = Decimal(str(tuning.onprem_min_savings_usd))
     now = now or datetime.now(UTC)
@@ -448,9 +478,10 @@ def site_findings(
                 resource_id=datastore.name,
                 region=_SITE,
                 summary=(
-                    f"no host mounts {datastore.name}, so none of its "
-                    f"{_gib(datastore.capacity_gib)} GiB can be used — unmount it, "
-                    "or give it to a cluster"
+                    f"{datastore.name} is likely unused: no host in this vcenter mounts it, "
+                    f"so none of its {_gib(datastore.capacity_gib)} GiB can be used here. "
+                    "check that no host outside this vcenter mounts it before unmounting "
+                    "it or giving it to a cluster"
                 ),
                 monthly=monthly,
                 approximate=True,
@@ -458,7 +489,7 @@ def site_findings(
             )
         )
 
-    swept = gc.sweep(site, tuning, now, keep=[p for g in guests for p in g.paths])
+    swept = gc.sweep(site, tuning, now, keep=[p for g in guests for p in g.paths], peers=peers)
     if swept is not None:
         out.extend(gc_findings(swept, ds_rates or {}, storage_rate, now, floor=floor))
 
@@ -527,15 +558,17 @@ def gc_findings(
         size = sum((g.size_gib for g in group), Decimal(0))
         shown = ", ".join(g.path for g in group[:5])
         more = f" and {len(group) - 5} more" if len(group) > 5 else ""
+        doubts = tuple(dict.fromkeys(d for g in group for d in g.doubts))
         out.append(
             Finding(
                 kind=gc.ORPHANED_VMDK,
                 resource_id=f"[{ds.name}] small-orphans",
                 region=region,
                 summary=(
-                    f"{len(group)} small disks on {ds.name} no vm lists in its layout, "
-                    f"~{_gib_fine(size)} GiB together: {shown}{more} — check nothing "
-                    "outside this vcenter uses them, then delete them in the datastore browser"
+                    f"{len(group)} small disks on {ds.name} are likely unused: no vm clont "
+                    f"can see lists them in its layout or devices, ~{_gib_fine(size)} GiB "
+                    f"together: {shown}{more}. {_doubt(doubts)}before removing them, "
+                    "check that no vm in another vcenter or outside clont's view uses them"
                 ),
                 monthly=size * rate,
                 approximate=True,
@@ -546,20 +579,24 @@ def gc_findings(
         region, rate = ds_rates.get(row.datastore.uid, (_SITE, storage_rate))
         size = row.size_gib
         age = _age(now - row.modified)
+        names = ", ".join(f.path.rsplit("/", 1)[-1] for f in row.files)
         if row.kind == gc.UNREGISTERED_VM:
             vmx = next(f.path for f in row.files if f.path.lower().endswith(".vmx"))
             summary = (
-                f"{row.path}/ holds {vmx.rsplit('/', 1)[-1]} and no vm in inventory points "
-                f"at it — an unregistered vm, {len(row.files)} file(s), "
-                f"~{_gib_fine(size)} GiB, last touched {age} ago. someone may have only "
-                "removed it from inventory: re-register or delete the folder"
+                f"{vmx} is likely an unregistered vm: no vm clont can see points at it. "
+                f"checked {len(row.files)} file(s) in {row.path}/, ~{_gib_fine(size)} GiB, "
+                f"last written {age} ago: {names}. {_doubt(row.doubts)}before removing "
+                f"them, check it isn't registered in another vcenter that shares "
+                f"{row.datastore.name}, or re-register it if it's needed. only these "
+                ".vmx / .vmdk files were checked, the folder's other files (isos, logs, "
+                "nvram) were not, so leave the folder itself alone"
             )
         else:
-            names = ", ".join(f.path.rsplit("/", 1)[-1] for f in row.files)
             summary = (
-                f"{row.path} is a disk no vm lists in its layout ({names}), "
-                f"~{_gib_fine(size)} GiB, last touched {age} ago — check nothing outside "
-                "this vcenter uses it, then delete it in the datastore browser"
+                f"{row.path} is likely unused: no vm clont can see lists it in its layout "
+                f"or devices ({names}), ~{_gib_fine(size)} GiB, last written {age} ago. "
+                f"{_doubt(row.doubts)}before removing it, check that no vm in another "
+                "vcenter or outside clont's view uses it"
             )
         out.append(
             Finding(
@@ -575,6 +612,11 @@ def gc_findings(
     return out
 
 
+def _doubt(doubts: Iterable[str]) -> str:
+    doubts = list(doubts)
+    return f"low confidence: {'; '.join(doubts)}. " if doubts else ""
+
+
 def cns_findings(
     verdict: cns.Verdict,
     ds_rates: dict[str, tuple[str, Decimal]],
@@ -587,7 +629,9 @@ def cns_findings(
     for row in verdict.leftovers:
         volume = row.volume
         region, rate = ds_rates.get(row.datastore.uid, (_SITE, storage_rate))
-        how = "learned from its pvs" if row.learned else "mapped in inventory.cns_clusters"
+        how = "mapped in inventory.cns_clusters" + (
+            ", and its pvs hold most of the id's volumes" if row.learned else ""
+        )
         recorded = [
             f"pv {', '.join(volume.named(cns.PV))}" if volume.named(cns.PV) else "",
             f"pvc {', '.join(volume.named(cns.PVC))}" if volume.named(cns.PVC) else "",
@@ -600,15 +644,16 @@ def cns_findings(
                 resource_id=volume.id,
                 region=region,
                 summary=(
-                    f"cns volume {volume.id}{name} on {row.datastore.name}, "
-                    f"~{_gib_fine(row.size_gib)} GiB on disk of "
-                    f"{_gib_fine(volume.capacity_gib)} GiB, belongs to container cluster "
+                    f"cns volume {volume.id}{name} on {row.datastore.name} is likely "
+                    f"unused: ~{_gib_fine(row.size_gib)} GiB on disk of "
+                    f"{_gib_fine(volume.capacity_gib)} GiB, container cluster "
                     f"{row.cluster} ({', '.join(row.owners)}, {how}) and no pv there "
-                    f"points at it any more — cns still records {said}. last written "
-                    f"{_age(now - row.modified)} ago. check nothing else uses it, then "
-                    "delete it through the cluster or in the vsphere client (cloud native "
-                    "storage > container volumes). never remove the vmdk by hand, cns "
-                    "keeps its own record of it"
+                    f"points at it any more. cns still records {said}, last written "
+                    f"{_age(now - row.modified)} ago. before removing it, check no other "
+                    "cluster runs with the same csi cluster-id and nothing else mounts it, "
+                    "then remove it through the cluster or in the vsphere client (cloud "
+                    "native storage > container volumes). never remove the vmdk by hand, "
+                    "cns keeps its own record of it"
                 ),
                 monthly=row.size_gib * rate,
                 approximate=True,
@@ -624,13 +669,18 @@ def _cns_log(verdict: cns.Verdict) -> None:
         ids = sorted(verdict.unmapped)
         count = sum(n for n, _ in verdict.unmapped.values())
         gib = sum((g for _, g in verdict.unmapped.values()), Decimal(0))
+        hint = "".join(
+            f". {cid} looks like {', '.join(names)}'s, its pvs hold most of it"
+            for cid, names in sorted(verdict.learned.items())
+        )
         log.warning(
-            "cns: %d volume(s), %s GiB, of container cluster id(s) %s no kubernetes "
-            "cluster clont reads owns — not judged. map them in inventory.cns_clusters "
-            "if they are yours",
+            "cns: %d volume(s), %s GiB, of container cluster id(s) %s not mapped in "
+            "inventory.cns_clusters — not judged. map them if they are yours and no "
+            "other cluster runs with the same csi cluster-id%s",
             count,
             _gib(gib),
             _names(tuple(ids)),
+            hint,
         )
     if verdict.skipped:
         log.info(
@@ -707,7 +757,8 @@ def _snapshot_summary(
     return (
         f"{vm.name} has {len(old)} snapshot(s) older than "
         f"{tuning.onprem_snapshot_max_days:g} days: {', '.join(parts)}, holding {held} — "
-        "delete them in the snapshot manager so vsphere consolidates the chain. never "
+        "they are likely no longer needed. check no backup or change still relies on them, "
+        "then remove them in the snapshot manager so vsphere consolidates the chain. never "
         "remove the delta files by hand, that breaks the disk"
     )
 

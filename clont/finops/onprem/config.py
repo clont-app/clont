@@ -123,8 +123,8 @@ class InventoryConfig(_Model):
     # the waste pass lists vmdk/vmx files for datastore gc. needs Datastore.Browse, and
     # without it the pass warns and the storage gap stays a size. false skips the tasks
     browse: bool = True
-    # cns container cluster id -> the `kubernetes:` cluster name it is. only needed for a
-    # cluster clont can't learn from its own pvs, e.g. one with every pv gone
+    # cns container cluster id -> the `kubernetes:` cluster name it is. the only proof
+    # `cns-leftover` takes, map an id only if no other cluster runs with it
     cns_clusters: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")

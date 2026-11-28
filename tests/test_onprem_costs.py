@@ -492,6 +492,25 @@ def test_a_guest_that_cannot_be_read_is_dropped_not_raised():
     assert [held.source for held in provider.guest_storage()] == ["lab"]
 
 
+def test_a_peer_site_is_read_and_a_failed_one_is_none():
+    provider, _, _ = provider_with(site_inventory())
+    other = site_inventory()
+    provider.attach_peer("dc2", lambda: other)
+    provider.attach_peer("dc3", lambda: 1 / 0)
+    assert provider.peer_sites() == [("dc2", other), ("dc3", None)]
+
+
+def test_bootstrap_links_every_site_to_the_others_and_the_ones_that_failed():
+    from clont.agent.bootstrap import _link_peers
+
+    a, _, _ = provider_with(site_inventory())
+    b, _, _ = provider_with(site_inventory())
+    b.alias = "dc2"
+    _link_peers([a, b], ["dc3"])
+    assert [alias for alias, _ in a.peer_sites()] == ["dc2", "dc3"]
+    assert [inv is None for _, inv in b.peer_sites()] == [False, True]
+
+
 def test_a_site_with_no_inventory_block_is_not_a_provider():
     with pytest.raises(ConfigError, match="no inventory block"):
         OnPremProvider("dc1", OnPremSite(**CARD))

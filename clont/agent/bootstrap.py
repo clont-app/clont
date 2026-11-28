@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import clont.finops.aws
 import clont.monitoring.aws
 from clont import channels
 from clont.agent.runner import Agent
 from clont.api.uplink import ApiUplink
 from clont.core.config import AWSConfig, Config, MetricsConfig
+from clont.core.errors import ConfigError
 from clont.core.logging import get_logger
 from clont.events.models import Event
 from clont.finops.aws import cur_setup
@@ -108,6 +111,7 @@ def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
     as aws: one unreachable vcenter does not take the rest of the floor down.
     """
     providers: list[Provider] = []
+    down: list[str] = []
     for alias, site in sites.items():
         if site.inventory is None:
             log.warning("onprem %s: priced but no inventory block, nothing will be collected", alias)
@@ -117,9 +121,32 @@ def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
             provider.authenticate()
         except Exception as exc:  # noqa: BLE001 - isolate one bad site
             log.warning("skipping onprem site %s: %s", alias, exc)
+            down.append(alias)
             continue
         providers.append(provider)
+    _link_peers(providers, down)
     return providers
+
+
+def _link_peers(providers: list[Provider], down: list[str]) -> None:
+    """every site sees the others' vms, so an array two vcenters share keeps both sides'
+    files live in datastore gc. a site that didn't come up is a peer that can't be read"""
+    for provider in providers:
+        attach = getattr(provider, "attach_peer", None)
+        if attach is None:
+            continue
+        for other in providers:
+            if other is not provider:
+                attach(other.alias, other.inventory)
+        for alias in down:
+            attach(alias, _unreachable(alias))
+
+
+def _unreachable(alias: str) -> Callable[[], object]:
+    def read() -> object:
+        raise ConfigError(f"onprem site {alias} did not come up")
+
+    return read
 
 
 def _tuning(config: Config) -> FinOpsTuning:

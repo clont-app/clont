@@ -179,6 +179,16 @@ def test_a_vm_already_near_the_target_yields_nothing():
     assert "idle-vm" not in found
 
 
+def test_a_zero_saving_rightsize_is_dropped_even_with_no_floor():
+    # free iron: a card that charges nothing for cpu or ram makes every shrink worth $0
+    site = OnPremSite(
+        rate_card={"hardware_amortization": 7300},
+        weights={"cpu": 0.0, "ram": 0.0, "storage": 1.0},
+    )
+    found, _ = advise(measured(40, 50), FinOpsTuning(onprem_min_savings_usd=0.0), site=site)
+    assert "rightsize-vm" not in found
+
+
 def test_a_vm_is_never_both_idle_and_oversized():
     found, _ = advise(measured(2, 10))
     assert "rightsize-vm" not in found
@@ -571,6 +581,8 @@ def test_an_unmounted_datastore_and_an_orphan_vm_land_at_the_site():
     )
     assert found["orphan-vm"].resource.resource_id == "lost-01"
     assert found["orphan-vm"].resource.region == "site"
+    text = found["unmounted-datastore"].summary
+    assert "old-array is likely unused" in text and "before unmounting" in text
 
 
 def test_the_savings_floor_silences_the_small_stuff():
@@ -665,6 +677,7 @@ def test_an_old_snapshot_is_priced_on_its_delta_at_the_pool_rate():
     # the chain breaks if someone removes the deltas by hand
     assert "snapshot manager" in snap.summary
     assert "never remove the delta files" in snap.summary
+    assert "likely no longer needed" in snap.summary and "delete" not in snap.summary
 
 
 def test_a_young_snapshot_is_no_finding():
@@ -717,6 +730,38 @@ def test_consolidation_needed_is_a_risk_at_zero():
     assert risk.resource.resource_id == "app-01"
     assert "consolidate" in risk.summary
     assert "consolidation-needed" not in advise()[0]
+
+
+def _stopped_snapped(**extra):
+    return {**_snapped(**extra), "runtime.powerState": "poweredOff"}
+
+
+@pytest.mark.parametrize("template", [False, True])
+def test_a_stopped_vms_old_snapshot_is_not_priced_twice(template):
+    props = _stopped_snapped(**({"config.template": True} if template else {}))
+    _, recs = advise(_with(props))
+    app = {r.kind: r for r in recs if r.resource.resource_id == "app-01"}
+    disk = app["template-disk" if template else "stopped-vm"]
+    snap = app["old-vm-snapshot"]
+    # the committed 60 gib already holds the 20 gib delta
+    assert float(disk.estimated_savings.amount) == pytest.approx(60 * STORAGE_RATE, abs=0.01)
+    assert snap.estimated_savings.amount == Decimal("0.00")
+    assert f"already priced in the {disk.kind} finding" in snap.summary
+    total = sum(float(r.estimated_savings.amount) for r in app.values())
+    assert total == pytest.approx(60 * STORAGE_RATE, abs=0.01)
+
+
+def test_a_running_vms_old_snapshot_keeps_its_money():
+    found, _ = advise(_with(_snapped()))
+    assert float(found["old-vm-snapshot"].estimated_savings.amount) > 0
+
+
+def test_an_orphan_vms_snapshot_is_not_priced_twice():
+    vms = {**VMS, "vim.VirtualMachine:vm-99": {**_snapped(), "name": "lost-01"}}
+    vms["vim.VirtualMachine:vm-99"].pop("runtime.host")
+    found, _ = advise(inventory(vms=vms))
+    assert found["old-vm-snapshot"].estimated_savings.amount == Decimal("0.00")
+    assert float(found["orphan-vm"].estimated_savings.amount) > 0
 
 
 def test_an_orphan_vms_snapshot_lands_at_the_site():

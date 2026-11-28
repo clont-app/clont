@@ -221,34 +221,52 @@ the disk it **occupies**, never the thin promise.
 | `zombie-host` | powered on, in the cluster, carrying no load |
 | `powered-off-host` | still in the capex and still licensed, so still billed |
 | `unaccounted-storage` | datastore space no vm claims — isos, orphaned vmdks, dead folders |
-| `unmounted-datastore` | an array no host mounts, so none of it can be used |
+| `unmounted-datastore` | an array no host in this vcenter mounts, likely unused. check no host outside it does first |
 | `orphan-vm` | vcenter lists it on no host, usually a failed migration |
 | `thin-overcommit` | a risk, not a saving: reports $0 and what the promises add up to |
-| `old-vm-snapshot` | snapshots older than `onprem_snapshot_max_days` (3), priced on their deltas. names backup leftovers; fix is the snapshot manager, never the delta files |
+| `old-vm-snapshot` | snapshots older than `onprem_snapshot_max_days` (3), priced on their deltas. names backup leftovers; fix is the snapshot manager, never the delta files. on a powered-off vm or a template it's $0, the disk line already holds those GiB |
 | `consolidation-needed` | a risk, $0: a snapshot delete left deltas behind, they grow and slow writes |
-| `orphaned-vmdk` | a disk no vm lists in its layout, older than `onprem_gc_min_age_days` (7). descriptor and extents as one finding. small ones under the savings floor fold into one `small-orphans` row per datastore. needs `Datastore.Browse` |
-| `unregistered-vm` | a folder with a `.vmx` no inventory vm points at, the whole folder as one. re-register or delete. needs `Datastore.Browse` |
-| `cns-leftover` | vcenter only: a vsphere csi volume (cns container volume, under `fcd/`) whose container cluster clont reads and holds no pv for it any more — the on-prem `eks-leftover`. names the volume id, name, datastore, cluster id and the pv / pvc cns still records. priced off its on-disk size, comes off `unaccounted-storage`. delete it through the cluster or vsphere client → cloud native storage → container volumes, never the vmdk. needs `Cns.Searchable` and `Datastore.Browse` (its age) |
+| `orphaned-vmdk` | a disk no vm clont can see lists in its layout or devices, older than `onprem_gc_min_age_days` (7), likely unused. descriptor and extents as one finding. small ones under the savings floor fold into one `small-orphans` row per datastore. needs `Datastore.Browse` |
+| `unregistered-vm` | a `.vmx` no vm clont can see points at, plus the disks next to it, likely an unregistered vm. lists the files it checked and never the folder: the browse sees only `.vmx` / `.vmdk`, so isos, logs and nvram there were not checked. re-register it if it's needed, or check it isn't another vcenter's. needs `Datastore.Browse` |
+| `cns-leftover` | vcenter only: a vsphere csi volume (cns container volume, under `fcd/`) of a cluster id mapped in `inventory.cns_clusters`, whose cluster holds no pv for it any more, likely unused — the on-prem `eks-leftover`. names the volume id, name, datastore, cluster id and the pv / pvc cns still records. priced off its on-disk size, comes off `unaccounted-storage`. check no other cluster runs with the same csi cluster-id, then remove it through the cluster or vsphere client → cloud native storage → container volumes, never the vmdk. needs `Cns.Searchable` and `Datastore.Browse` (its age) |
 
-gc stays conservative: a datastore mounted by a host outside the pass, vsan /
-vvol, `.fcd` / `catalog` / `kubevols` (csi owns those), isos and `onprem_gc_keep`
-paths are all live. whatever gc lists comes off `unaccounted-storage`, so a GiB
+every gc / cns summary says the resource is likely unused, what was checked and
+what to verify before removing it. none of them ever says delete.
+
+gc stays conservative: a datastore mounted by a host outside the pass, one that
+names vms clont's login can't read (a folder outside the role), vsan / vvol,
+`.fcd` / `catalog` / `kubevols` (csi owns those), isos and `onprem_gc_keep`
+paths are all live. so is any file a vm's device backs onto (a mounted iso, a
+disk the layout skipped), and its folder.
+
+a vcenter only lists its own hosts as a datastore's mounts, so a second vcenter
+on the same array is invisible from here. configure it as another `onprem:`
+site and its vms keep their files live on the shared array (matched by
+datastore url, the names may differ). what gc still can't rule out — vms on a
+host the login can't read, a peer site that didn't answer, an unregistered vmx
+that could name a loose disk — is spelled out in the finding as `low
+confidence: …`. whatever gc lists comes off `unaccounted-storage`, so a GiB
 is never priced twice, and if gc ever lists more than the gap on a datastore its
 rows are dropped as a clont bug. esxi refreshes a running vm's layout minutes
 after the datastore's free space, so a vm that just grew would read as space
 nobody holds: when the layout is more than `onprem_layout_max_lag_minutes` (10)
 behind, that datastore is all-live for gc and left out of `unaccounted-storage`,
-and the summary says so. rerun after a few minutes, or
-`vim-cmd hostsvc/datastore/refresh`.
+and the summary says so. a running vm with no layout time on a datastore that
+has a free-space time is the same, its lag unknown. rerun after a few minutes,
+or `vim-cmd hostsvc/datastore/refresh`.
 
 `cns-leftover` is just as careful. a cluster id belongs to a cluster clont reads
-when `inventory.cns_clusters` maps it, or when that cluster's pvs point at at
-least half of its volumes. live, no verdict: any pv of any cluster points at the
+only when `inventory.cns_clusters` maps it: two clusters with the same csi
+`cluster-id` look exactly alike from cns, so the other one's live volumes would
+read as leftovers. an id whose pvs point at most of its volumes is only named in
+the warning as a hint to map it. a mapped id is still skipped when pvs of a
+second cluster hold some of its volumes, or a volume was written by a vsphere
+user the cluster's own volumes never were. live, no verdict: any pv of any cluster points at the
 volume (handle, in-tree path or the pv name cns recorded), a cluster id nobody
 owns (one warning with the count, GiB and ids), no cluster recorded, supervisor /
 guest cluster flavors, a cluster whose pv list wasn't read, file volumes,
 anything attached to a vm, a disk the browse didn't date or touched inside
-`onprem_gc_min_age_days`, and datastores gc wouldn't judge either.
+`onprem_gc_min_age_days`, and datastores gc wouldn't judge or dropped either.
 
 two things that keep the numbers honest. **per-cluster findings are priced on
 your own card, so they're exact** (`approximate=False`, which no aws finding
@@ -291,7 +309,7 @@ only nodes and pods are needed to price the cluster.
 | `underrequested-workload` | ram working set over the request — $0, the pod first in line to be killed |
 | `unmounted-pvc` | a bound claim no pod references |
 | `abandoned-namespace` | no pod at all, live or pending, still holding claims |
-| `released-pv` | the claim is gone and `reclaimPolicy: Retain` kept the volume |
+| `released-pv` | the claim is gone and `reclaimPolicy: Retain` kept the volume, likely unused. check it isn't a restore you're keeping |
 
 two notes worth having. a `rightsize-workload` offers back **capacity, not
 cash** — shrinking a request moves money into `(unrequested)`, the invoice only

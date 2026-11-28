@@ -7,25 +7,28 @@ deleted cluster, a `Retain` pv someone deleted, a provisioning that failed half-
 still records it, with the container cluster it came from and the pv/pvc names it had.
 
 the join is the csi `volumeHandle`, which *is* the cns volume id. a cluster id belongs to
-a known cluster when:
-
-* `inventory.cns_clusters` maps it to a `kubernetes:` name, or
-* clont learns it: the cluster's own pvs point at at least half of that id's volumes.
-  only single-cluster volumes teach anything, a shared one names its other owners too
+a known cluster only when `inventory.cns_clusters` maps it to a `kubernetes:` name. two
+clusters can run with the same csi `cluster-id` (a copied config), and then the other
+one's live volumes look exactly like this one's leftovers: no pv here points at them. so
+learning is not proof. clont still learns, a cluster whose pvs point at at least half of
+an id's volumes, but a learned-only id is logged and never judged
 
 conservative all the way, a false "garbage" deletes someone's data. live, no verdict:
 
 * any pv of any read cluster points at it, by handle, by in-tree path or by the pv name
   cns recorded
-* a cluster id nobody maps or learns, a volume with no cluster at all, a supervisor or
-  guest cluster flavor (they pass volumes around by pvc name, a handle never matches)
+* a cluster id nobody maps, a volume with no cluster at all, a supervisor or guest
+  cluster flavor (they pass volumes around by pvc name, a handle never matches)
+* written by a vsphere user the mapped cluster's own volumes never were: a second cluster
+  on the same id
 * the owning cluster's pv list wasn't read (a failed read is not an empty one)
 * a file volume, or a block one with no disk path: nothing to date or check it by
 * attached to a vm (its disk is in a layout), or a vm with no layout could hold it
 * its disk wasn't in the browse, so its age is unknown, or it was written inside
   `onprem_gc_min_age_days`
-* its datastore is one gc wouldn't judge (mounted outside the pass, vsan/vvol, stale
-  layout), or the leftovers there would be more than the space nobody claims
+* its datastore is one gc wouldn't judge or dropped (mounted outside the pass, hidden vms,
+  vsan/vvol, stale layout or free space, failed parity), or the leftovers there would be
+  more than the space nobody claims
 """
 
 from __future__ import annotations
@@ -67,14 +70,16 @@ class Leftover:
     datastore: Datastore
     size_gib: Decimal            # on disk, off the browse
     modified: datetime
-    learned: bool = True         # false when only the config mapped the cluster
+    learned: bool = False        # the pvs back the mapping up, most of the id is theirs
 
 
 @dataclass(frozen=True, slots=True)
 class Verdict:
     leftovers: tuple[Leftover, ...] = ()
-    # cluster id -> (volumes, gib) of ids no known cluster owns
+    # cluster id -> (volumes, gib) of ids not mapped in `inventory.cns_clusters`
     unmapped: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
+    # of those, cluster id -> the clusters whose pvs hold most of it, a hint for the log
+    learned: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # why other candidates got no verdict, one line each, for the log
     skipped: dict[str, int] = field(default_factory=dict)
 
@@ -103,7 +108,10 @@ def judge(
     volumes = site.cns.volumes
     by_name = {g.source: g for g in guests}
     index = [_Index(g) for g in guests]
-    owners = _owners(volumes, index, mapping or {})
+    mapping = mapping or {}
+    mapped = set(mapping)
+    owners = _owners(volumes, index, mapping)
+    users, holders = _users(volumes, index)
 
     skipped: dict[str, int] = {}
     unmapped: dict[str, tuple[int, Decimal]] = {}
@@ -121,11 +129,14 @@ def judge(
         if not volume.clusters:
             skip("no container cluster recorded")
             continue
-        loose = [c for c in volume.clusters if c not in owners]
+        loose = [c for c in volume.clusters if c not in mapped]
         if loose:
             for cid in loose:
                 count, gib = unmapped.get(cid, (0, Decimal(0)))
                 unmapped[cid] = (count + 1, gib + volume.capacity_gib)
+            continue
+        if any(len(holders.get(c, set()) | {mapping[c]}) > 1 for c in volume.clusters):
+            skip("pvs of more than one cluster hold volumes of its cluster id")
             continue
         names = tuple(sorted({n for c in volume.clusters for n in owners[c][0]}))
         if any(n not in by_name for n in names):
@@ -134,16 +145,25 @@ def judge(
         if any(by_name[n].handles is None for n in names):
             skip("its cluster's pv list was not read")
             continue
+        theirs = {u for c in volume.clusters for u in users.get(c, ())}
+        if volume.users and theirs and not set(volume.users) <= theirs:
+            skip("written by another vsphere user, a second cluster may share the id")
+            continue
         candidates.append((volume, volume.clusters[0], names))
 
     leftovers = _place(site, candidates, owners, tuning, now, swept, skip)
-    return Verdict(leftovers=tuple(leftovers), unmapped=unmapped, skipped=skipped)
+    hints = {
+        cid: tuple(sorted(owners[cid][0])) for cid in unmapped if cid in owners
+    }
+    return Verdict(
+        leftovers=tuple(leftovers), unmapped=unmapped, learned=hints, skipped=skipped
+    )
 
 
 def _owners(
     volumes: Iterable[CnsVolume], index: list[_Index], mapping: dict[str, str]
 ) -> dict[str, tuple[set[str], bool]]:
-    """cluster id -> (clont cluster names, learned?). config and learning both count."""
+    """cluster id -> (clont cluster names, learned?). only a mapped id is ever judged."""
     total: dict[str, int] = {}
     hits: dict[str, dict[str, int]] = {}
     for volume in volumes:
@@ -166,6 +186,23 @@ def _owners(
     return out
 
 
+def _users(
+    volumes: Iterable[CnsVolume], index: list[_Index]
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """cluster id -> vsphere users on the volumes read clusters' pvs still hold, and
+    cluster id -> the clusters holding them"""
+    users: dict[str, set[str]] = {}
+    holders: dict[str, set[str]] = {}
+    for volume in volumes:
+        held = {i.source for i in index if i.by_handle(volume)}
+        if not held:
+            continue
+        for cid in volume.clusters:
+            users.setdefault(cid, set()).update(volume.users)
+            holders.setdefault(cid, set()).update(held)
+    return users, holders
+
+
 def _place(
     site: SiteInventory,
     candidates: list[tuple[CnsVolume, str, tuple[str, ...]]],
@@ -182,6 +219,12 @@ def _place(
     by_ds_name = {gc._key(ds.name): ds for ds in site.datastores}
     vms = site.vms()
     attached = {gc._norm(gc._descriptor(f.path)) for vm in vms for f in vm.files}
+    attached |= {gc._norm(gc._descriptor(p)) for vm in vms for p in vm.device_files}
+    if swept is not None:
+        # a peer site's vms, matched by url
+        attached |= {gc._norm(gc._descriptor(p)) for p in swept.owned}
+    # gc's own verdict: a datastore it refused or dropped is no better here
+    rejected = swept.unreliable if swept is not None else frozenset()
     # a vm with no layout could have any of these attached
     blind_all = any(not vm.files and not vm.datastores for vm in vms)
     blind = {uid for vm in vms if not vm.files for uid in vm.datastores}
@@ -204,7 +247,13 @@ def _place(
         if disk in attached:
             skip("attached to a vm")
             continue
-        if blind_all or ds.uid in blind or ds.uid in lagging or gc._not_judged(ds, dead):
+        if (
+            blind_all
+            or ds.uid in blind
+            or ds.uid in lagging
+            or ds.uid in rejected
+            or gc._not_judged(ds, dead)
+        ):
             skip("its datastore can't be judged")
             continue
         files = [f for f in site.files.get(ds.uid, ()) if gc._norm(gc._descriptor(f.path)) == disk]

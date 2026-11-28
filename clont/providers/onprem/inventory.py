@@ -88,6 +88,10 @@ class Datastore:
     unseen_hosts: tuple[str, ...] = ()
     # `info.timestamp`, when hostd last refreshed free space
     free_at: datetime | None = None
+    # morefs of every vm with a file on it, per `Datastore.vm`
+    vms: tuple[str, ...] = ()
+    # the ones of those the vm read never returned: a folder this login can't see
+    hidden_vms: tuple[str, ...] = ()
 
     @property
     def overcommit(self) -> Decimal:
@@ -150,6 +154,9 @@ class Vm:
     # when `layoutEx` / `summary.storage` were last refreshed, the older of the two,
     # a running vm's lags its datastores' free space by minutes, sometimes far more
     layout_at: datetime | None = None
+    # every datastore path a device backs onto: disks, cdrom isos, floppies, serial files
+    # layoutEx leaves out a mounted iso, this doesn't
+    device_files: tuple[str, ...] = ()
 
     @property
     def running(self) -> bool:
@@ -374,6 +381,9 @@ class CnsVolume:
     clusters: tuple[str, ...] = ()  # container cluster ids, the array when there is one
     flavor: str = ""
     entities: tuple[CnsEntity, ...] = ()
+    # the vsphere users the csi driver wrote it as. two clusters on one cluster id
+    # usually differ here, and that is the only trace of them cns keeps
+    users: tuple[str, ...] = ()
 
     @property
     def capacity_gib(self) -> Decimal:
@@ -411,6 +421,7 @@ def cns_volumes(items: object) -> tuple[CnsVolume, ...]:
         rows = array or [_dict(meta.get("containerCluster"))]
         clusters = [_text(c.get("clusterId")) for c in rows]
         flavors = {_text(c.get("clusterFlavor")).upper() for c in rows} - {""}
+        users = [_text(c.get("vSphereUser")).lower() for c in rows]
         backing = _dict(item.get("backingObjectDetails"))
         kind = _text(item.get("volumeType")).lower()
         if kind not in (BLOCK, FILE):
@@ -429,6 +440,7 @@ def cns_volumes(items: object) -> tuple[CnsVolume, ...]:
                 disk_path=_text(backing.get("backingDiskPath")),
                 clusters=tuple(dict.fromkeys(c for c in clusters if c)),
                 flavor=flavor,
+                users=tuple(dict.fromkeys(u for u in users if u)),
                 entities=tuple(
                     _cns_entity(e) for e in _items(meta.get("entityMetadata"))
                     if isinstance(e, dict)
@@ -473,6 +485,9 @@ class SiteInventory:
     # vcenter's cns volumes. none on a host agent (no cns), when not asked or the read
     # failed, and then no volume gets a verdict
     cns: CnsVolumes | None = None
+    # vm morefs a host or a datastore names that the vm read never returned, i.e. vms in
+    # folders this login can't see. their files are nobody's as far as gc can tell
+    hidden_vms: tuple[str, ...] = ()
 
     def pool(self, key: str) -> Pool | None:
         return next((pool for pool in self.pools if pool.key == key or pool.name == key), None)
@@ -502,11 +517,11 @@ def build_site(
     dc_of = _datacenter_index(ancestry or {}, datacenters or {})
     host_objects = {host_id: _host(host_id, props) for host_id, props in hosts.items()}
     host_names = {host_id: host.name for host_id, host in host_objects.items()}
+    vm_objects = {vm_id: _vm(vm_id, props, host_names) for vm_id, props in vms.items()}
     ds_objects = {
-        ds_id: _seen_by(_datastore(ds_id, props), host_objects)
+        ds_id: _seen_by(_datastore(ds_id, props), host_objects, vm_objects)
         for ds_id, props in datastores.items()
     }
-    vm_objects = {vm_id: _vm(vm_id, props, host_names) for vm_id, props in vms.items()}
 
     # (name, kind, datacenter, host ids) — membership first, objects once it is settled,
     # because "is this datastore shared" can only be answered across all pools
@@ -558,6 +573,7 @@ def build_site(
 
     mounted = {ds_id for props in hosts.values() for ds_id in _refs(props.get("datastore"))}
     placed = {vm_id for props in hosts.values() for vm_id in _refs(props.get("vm"))}
+    named = placed | {vm_id for ds in ds_objects.values() for vm_id in ds.vms}
     return SiteInventory(
         pools=pools,
         orphan_vms=tuple(vm for vm_id, vm in vm_objects.items() if vm_id not in placed),
@@ -568,6 +584,7 @@ def build_site(
             )
         ),
         datastores=tuple(ds_objects.values()),
+        hidden_vms=tuple(sorted(named - set(vm_objects))),
     )
 
 
@@ -692,6 +709,7 @@ def _datastore(ds_id: str, props: dict[str, object]) -> Datastore:
         url=_text(props.get("summary.url")) or None,
         mount_hosts=tuple(_mount_hosts(props.get("host"))),
         free_at=_when(props.get("info.timestamp")),
+        vms=tuple(_refs(props.get("vm"))),
     )
 
 
@@ -727,12 +745,31 @@ def _vm(vm_id: str, props: dict[str, object], host_names: dict[str, str]) -> Vm:
             _when(props.get("layoutEx.timestamp")),
             _when(props.get("summary.storage.timestamp")),
         ),
+        device_files=_device_files(props.get("config.hardware.device")),
     )
 
 
-def _seen_by(datastore: Datastore, hosts: dict[str, Host]) -> Datastore:
+def _seen_by(datastore: Datastore, hosts: dict[str, Host], vms: dict[str, Vm]) -> Datastore:
     unseen = tuple(host for host in datastore.mount_hosts if host not in hosts)
-    return replace(datastore, unseen_hosts=unseen) if unseen else datastore
+    hidden = tuple(vm for vm in datastore.vms if vm not in vms)
+    if not unseen and not hidden:
+        return datastore
+    return replace(datastore, unseen_hosts=unseen, hidden_vms=hidden)
+
+
+def _device_files(value: object) -> tuple[str, ...]:
+    """every `backing.fileName` on a vm's devices, a disk's parent chain included"""
+    out: list[str] = []
+    for device in _items(value):
+        backing = device.get("backing") if isinstance(device, dict) else None
+        seen = 0
+        while isinstance(backing, dict) and seen < 64:
+            name = _text(backing.get("fileName"))
+            if name.startswith("["):
+                out.append(name)
+            backing = backing.get("parent")
+            seen += 1
+    return tuple(dict.fromkeys(out))
 
 
 def _vm_files(value: object) -> tuple[VmFile, ...]:

@@ -82,6 +82,8 @@ DATASTORE_PATHS = (
     "host",
     # when free space was last refreshed, a running vm's layout is judged against it
     "info.timestamp",
+    # every vm with a file on it, one this login can't read shows up as a bare moref
+    "vm",
 )
 VM_PATHS = (
     "name",
@@ -107,6 +109,8 @@ VM_PATHS = (
     "config.files.vmPathName",
     # the datastores a vm uses, so a vm with no layout blinds only those
     "datastore",
+    # device backings: a mounted iso is in no layout, and gc must not call it nobody's
+    "config.hardware.device",
 )
 FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)

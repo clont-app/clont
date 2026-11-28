@@ -85,8 +85,11 @@ with the rest. it only gives up if *no* account authenticates.
   `browse` (default `true` — the daily waste pass lists vmdk/vmx files for
   datastore gc, which needs `Datastore.Browse`; without the grant it warns and the
   storage gap stays a size, `false` skips the browse tasks) and `cns_clusters`
-  (cns container cluster id -> `kubernetes:` cluster name, for `cns-leftover`
-  when clont can't learn the id from the cluster's own pvs).
+  (cns container cluster id -> `kubernetes:` cluster name, required for
+  `cns-leftover`: map an id only if no other cluster runs with it, clont can't
+  tell two clusters with one csi `cluster-id` apart). every other `onprem:` site
+  is read as a peer, so a datastore two vcenters share keeps both sides' files
+  live in datastore gc.
   leaving `inventory` out is fine: the site is priced and idle, which is the
   normal state while the read-only account is still being granted.
 

@@ -237,6 +237,16 @@ def test_the_tree_turns_into_findings_input(session):
     assert vm.vmx_path and vm.files and not vm.consolidation_needed
 
 
+def test_device_backings_and_datastore_vms_come_back(session):
+    site = session.site()
+    vm = next(vm for vm in site.vms() if vm.name == SNAP_VM)
+    # the disk's descriptor at least, the same file layoutEx names
+    assert any(p.endswith(".vmdk") for p in vm.device_files)
+    ds = next(ds for ds in site.datastores if ds.name == DS)
+    assert vm.uid in ds.vms
+    assert ds.hidden_vms == () and site.hidden_vms == ()
+
+
 def test_a_snapshot_starts_a_delta_disk(session):
     props = _vm_props(session, SNAP_VM)
     if all(len(disk["chain"]) == 1 for disk in props["layoutEx.disk"]):

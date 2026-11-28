@@ -132,10 +132,11 @@ class FakeProvider:
     cloud = Cloud.ONPREM
     alias = "dc1"
 
-    def __init__(self, inv, guests=()):
+    def __init__(self, inv, guests=(), peers=()):
         self.site = OnPremSite(**CARD)
         self._inventory = inv
         self._guests = list(guests)
+        self._peers = list(peers)
 
     def inventory(self, *, refresh: bool = False):
         return self._inventory
@@ -143,10 +144,13 @@ class FakeProvider:
     def guest_storage(self):
         return self._guests
 
+    def peer_sites(self):
+        return self._peers
 
-def advise(inv, tuning=None, guests=()):
-    recs = OnPremWasteCollector(FakeProvider(inv, guests), tuning).recommendations(PERIOD)
-    return recs
+
+def advise(inv, tuning=None, guests=(), peers=()):
+    provider = FakeProvider(inv, guests, peers)
+    return OnPremWasteCollector(provider, tuning).recommendations(PERIOD)
 
 
 def by_kind(recs, kind):
@@ -214,8 +218,11 @@ def test_an_orphaned_vmdk_is_priced_at_its_pool_and_names_its_path():
     assert rec.approximate is True
     assert float(rec.estimated_savings.amount) == pytest.approx(40 * STORAGE_RATE, abs=0.01)
     assert "big-flat.vmdk" in rec.summary
-    assert "no vm lists" in rec.summary
+    assert "is likely unused" in rec.summary
+    assert "no vm clont can see lists it" in rec.summary
+    assert "before removing it, check" in rec.summary
     assert "30 days" in rec.summary
+    assert "delete" not in rec.summary and "low confidence" not in rec.summary
 
 
 # unregistered-vm
@@ -238,13 +245,19 @@ def test_a_folder_with_a_vmx_nobody_points_at_is_one_unregistered_vm():
     assert result.garbage[0].size_gib == 40
 
 
-def test_an_unregistered_vm_says_re_register_or_delete():
+def test_an_unregistered_vm_lists_its_files_and_never_the_folder():
     recs = advise(site(_ghost()))
     assert by_kind(recs, "orphaned-vmdk") == []
     [rec] = by_kind(recs, "unregistered-vm")
     assert rec.resource.resource_id == "[san-01] ghost"
-    assert "ghost.vmx" in rec.summary
-    assert "re-register or delete" in rec.summary
+    text = rec.summary
+    for name in ("ghost.vmx", "ghost.vmdk", "ghost-flat.vmdk", "ghost_1.vmdk", "ghost_1-flat.vmdk"):
+        assert name in text, name
+    assert "is likely an unregistered vm" in text
+    assert "another vcenter that shares san-01" in text
+    assert "re-register it if it's needed" in text
+    assert "leave the folder itself alone" in text
+    assert "delete" not in text and "remove the folder" not in text
     assert float(rec.estimated_savings.amount) == pytest.approx(40 * STORAGE_RATE, abs=0.01)
 
 
@@ -606,9 +619,28 @@ def test_a_lag_under_the_threshold_is_not_stale():
     assert DS in gc.stale(built, FinOpsTuning(onprem_layout_max_lag_minutes=5))
 
 
-@pytest.mark.parametrize("which", ["vm", "datastore", "both"])
-def test_a_missing_timestamp_is_never_stale(which):
-    vms = _vms() if which in ("vm", "both") else _lagging_vms(25)
+def test_a_running_vm_with_no_layout_time_is_an_unknown_lag():
+    # the datastore says when it read free space, the vm doesn't: its lag can't be ruled out
+    built = site([_file("[san-01] scratch/x.vmdk", 4)], datastores=_fresh_ds(), vms=_vms())
+    assert gc.stale(built, FinOpsTuning()) == {DS: [("app-01", None)]}
+    result = gc.sweep(built, FinOpsTuning(), NOW)
+    assert result.garbage == () and result.judged == ()
+    assert "no layout time for running app-01" in result.reasons["san-01"]
+    assert "unknown" in result.reasons["san-01"]
+    recs = advise(built)
+    assert by_kind(recs, "orphaned-vmdk") == []
+    assert by_kind(recs, "unaccounted-storage") == []
+
+
+def test_a_powered_off_vm_with_no_layout_time_is_not_stale():
+    vms = _vms(**{"vim.VirtualMachine:vm-10": _vm("app-01", 60, powered="poweredOff")})
+    built = site(datastores=_fresh_ds(), vms=vms)
+    assert gc.stale(built, FinOpsTuning()) == {}
+
+
+@pytest.mark.parametrize("which", ["datastore", "both"])
+def test_a_datastore_with_no_free_time_is_never_stale(which):
+    vms = _vms() if which == "both" else _lagging_vms(25)
     datastores = _ds() if which in ("datastore", "both") else _fresh_ds()
     built = site(datastores=datastores, vms=vms)
     assert gc.stale(built, FinOpsTuning()) == {}
@@ -646,3 +678,189 @@ def test_a_cluster_path_handed_over_by_the_guest_is_not_garbage():
     guest = GuestStorage(source="lab", detached_gib=Decimal(8), volumes=1, paths=("[san-01] myvols/pvc-7.vmdk",))
     recs = advise(site(rows), guests=[guest])
     assert by_kind(recs, "orphaned-vmdk") == []
+
+
+# another vcenter on the same array, and vms this login can't see
+
+URL = "ds:///vmfs/volumes/5f0e-san01/"
+
+
+def _peer(vms, name="shared-san", alias="dc2", url=URL):
+    """a second vcenter mounting the same array under its own name"""
+    host = {**HOSTS["vim.HostSystem:host-1"], "name": "esx-b1", "vm": list(vms)}
+    ds = {DS: {**_ds()[DS], "name": name, "summary.url": url}}
+    return gc.Peer(alias, build_site(CLUSTERS, {"vim.HostSystem:host-1": host}, ds, vms))
+
+
+def _theirs(name, powered="poweredOff"):
+    vm = _vm(name, 30, powered=powered)
+    # the peer names the array its own way, the url is the same
+    return {
+        **vm,
+        "config.files.vmPathName": f"[shared-san] {name}/{name}.vmx",
+        "layoutEx.file": [
+            {**f, "name": f["name"].replace("[san-01]", "[shared-san]")}
+            for f in vm["layoutEx.file"]
+        ],
+    }
+
+
+def _foreign(name="b-db"):
+    return [
+        _file(f"[san-01] {name}/{name}.vmx"),
+        _file(f"[san-01] {name}/{name}.vmdk"),
+        _file(f"[san-01] {name}/{name}-flat.vmdk", 30),
+    ]
+
+
+def _with_url(**extra):
+    return _ds(**{"summary.url": URL, **extra})
+
+
+def test_a_peer_vcenters_powered_off_vm_is_live_on_a_shared_array():
+    built = site(_foreign(), datastores=_with_url())
+    # alone, it looks exactly like an unregistered vm
+    assert paths(gc.sweep(built, FinOpsTuning(), NOW)) == [("unregistered-vm", "[san-01] b-db")]
+    peer = _peer({"vim.VirtualMachine:vm-50": _theirs("b-db")})
+    result = gc.sweep(built, FinOpsTuning(), NOW, peers=[peer])
+    assert result.garbage == ()
+    assert "[san-01] b-db/b-db-flat.vmdk" in result.owned
+
+
+def test_a_peer_on_another_array_keeps_nothing_here():
+    built = site(_foreign(), datastores=_with_url())
+    peer = _peer({"vim.VirtualMachine:vm-50": _theirs("b-db")}, url="ds:///vmfs/volumes/other/")
+    assert paths(gc.sweep(built, FinOpsTuning(), NOW, peers=[peer])) == [
+        ("unregistered-vm", "[san-01] b-db")
+    ]
+
+
+def test_a_peer_that_could_not_be_read_makes_every_finding_low_confidence():
+    built = site(_foreign(), datastores=_with_url())
+    [row] = gc.sweep(built, FinOpsTuning(), NOW, peers=[gc.Peer("dc2", None)]).garbage
+    assert row.doubts == ("site dc2 could not be read, its vms could use it",)
+    recs = advise(built, peers=[("dc2", None)])
+    [rec] = by_kind(recs, "unregistered-vm")
+    assert "low confidence: site dc2 could not be read" in rec.summary
+
+
+def test_the_collector_asks_the_provider_for_its_peers():
+    built = site(_foreign(), datastores=_with_url())
+    peer = _peer({"vim.VirtualMachine:vm-50": _theirs("b-db")})
+    assert by_kind(advise(built, peers=[(peer.alias, peer.site)]), "unregistered-vm") == []
+
+
+def test_a_datastore_naming_vms_the_login_cant_read_is_all_live():
+    # `Datastore.vm` hands back a moref the vm read never returned: a folder outside the role
+    datastores = _ds(vm=["vim.VirtualMachine:vm-10", "vim.VirtualMachine:vm-99"])
+    built = site(_foreign(), datastores=datastores)
+    assert built.datastores[0].hidden_vms == ("vim.VirtualMachine:vm-99",)
+    result = gc.sweep(built, FinOpsTuning(), NOW)
+    assert result.garbage == () and result.judged == ()
+    assert "1 vm(s) with files on it are hidden" in result.reasons["san-01"]
+    assert DS in result.unreliable
+
+
+def test_vms_hidden_on_a_host_make_the_findings_low_confidence():
+    hosts = {
+        "vim.HostSystem:host-1": {
+            **HOSTS["vim.HostSystem:host-1"],
+            "vm": [*HOSTS["vim.HostSystem:host-1"]["vm"], "vim.VirtualMachine:vm-99"],
+        }
+    }
+    built = site(_foreign(), hosts=hosts)
+    assert built.hidden_vms == ("vim.VirtualMachine:vm-99",)
+    [rec] = by_kind(advise(built), "unregistered-vm")
+    assert "low confidence: 1 vm(s) on this site are hidden from clont's login" in rec.summary
+
+
+def test_a_stray_vmx_anywhere_lowers_an_orphans_confidence():
+    rows = [
+        *_ghost(),
+        _file("[san-01] scratch/big.vmdk"),
+        _file("[san-01] scratch/big-flat.vmdk", 4),
+    ]
+    by_path = {g.path: g for g in swept(rows).garbage}
+    assert by_path["[san-01] scratch/big.vmdk"].doubts == (
+        "an unregistered vmx ([san-01] ghost/ghost.vmx) could still name it",
+    )
+    assert by_path["[san-01] ghost"].doubts == ()
+
+
+# device backings: what layoutEx doesn't list
+
+
+def _cdrom(path):
+    return {"key": 3000, "backing": {"fileName": path}}
+
+
+def test_device_backings_are_read_parents_included():
+    vm = {
+        **_vm("app-01", 60),
+        "config.hardware.device": [
+            _cdrom("[san-01] iso/ubuntu.iso"),
+            {"key": 2000, "backing": {"fileName": "[san-01] app-01/app-01.vmdk",
+                                      "parent": {"fileName": "[san-01] base/base.vmdk"}}},
+            {"key": 4000, "backing": {"deviceName": "/dev/cdrom"}},
+            {"key": 4001},
+        ],
+    }
+    built = site(vms=_vms(**{"vim.VirtualMachine:vm-10": vm}))
+    app = next(v for v in built.vms() if v.name == "app-01")
+    assert app.device_files == (
+        "[san-01] iso/ubuntu.iso",
+        "[san-01] app-01/app-01.vmdk",
+        "[san-01] base/base.vmdk",
+    )
+
+
+def test_a_disk_only_a_device_names_is_live():
+    vm = {**_vm("app-01", 60), "config.hardware.device": [
+        {"key": 2001, "backing": {"fileName": "[san-01] data/extra.vmdk"}}
+    ]}
+    rows = [_file("[san-01] data/extra.vmdk"), _file("[san-01] data/extra-flat.vmdk", 9)]
+    assert swept(rows, vms=_vms(**{"vim.VirtualMachine:vm-10": vm})).garbage == ()
+
+
+def test_an_iso_a_live_vm_mounts_keeps_an_unregistered_folder():
+    # the browse lists no iso, so "the folder" would have taken app-01's cdrom with it
+    vm = {**_vm("app-01", 60), "config.hardware.device": [_cdrom("[san-01] ghost/tools.iso")]}
+    result = swept(_ghost(), vms=_vms(**{"vim.VirtualMachine:vm-10": vm}))
+    assert result.garbage == ()
+
+
+def test_an_unregistered_vm_is_only_the_files_gc_listed():
+    [row] = swept(_ghost()).garbage
+    assert sorted(f.path.rsplit("/", 1)[-1] for f in row.files) == [
+        "ghost-flat.vmdk", "ghost.vmdk", "ghost.vmx", "ghost_1-flat.vmdk", "ghost_1.vmdk",
+    ]
+
+
+def test_no_gc_finding_tells_anyone_to_delete_anything():
+    rows = [
+        *_ghost(),
+        _file("[san-01] scratch/big.vmdk"),
+        _file("[san-01] scratch/big-flat.vmdk", 40),
+        _file("[san-01] tiny/a.vmdk"),
+        _file("[san-01] tiny/b.vmdk"),
+    ]
+    recs = [r for r in advise(site(rows)) if r.kind in ("orphaned-vmdk", "unregistered-vm")]
+    assert {r.resource.resource_id for r in recs} == {
+        "[san-01] ghost", "[san-01] scratch/big.vmdk", "[san-01] small-orphans",
+    }
+    for rec in recs:
+        text = rec.summary.lower()
+        assert "likely" in text and "before removing" in text, rec.summary
+        assert "delete" not in text and "remove the folder" not in text, rec.summary
+
+
+def test_a_peer_hiding_vms_on_a_shared_array_lowers_confidence():
+    built = site(_foreign("old-x"), datastores=_with_url())
+    peer = _peer({"vim.VirtualMachine:vm-50": _theirs("b-db")})
+    hidden = replace(peer.site, hidden_vms=("vim.VirtualMachine:vm-77",))
+    [row] = gc.sweep(built, FinOpsTuning(), NOW, peers=[gc.Peer("dc2", hidden)]).garbage
+    assert row.doubts == ("1 vm(s) on site dc2 are hidden from clont's login, they could use it",)
+    elsewhere = _peer({}, url="ds:///vmfs/volumes/other/")
+    hidden = replace(elsewhere.site, hidden_vms=("vim.VirtualMachine:vm-77",))
+    [row] = gc.sweep(built, FinOpsTuning(), NOW, peers=[gc.Peer("dc2", hidden)]).garbage
+    assert row.doubts == ()
