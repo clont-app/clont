@@ -104,9 +104,10 @@ endpoint) and flags the ones whose pv is gone from a cluster it reads
 the same `clont-ro` role, on the vcenter root. the age comes off the browse, so
 `Datastore.Browse` is needed too. without it: one warning, no verdict.
 
-clont learns which cns cluster id is which cluster from the pvs. a cluster whose
-pvs are mostly gone teaches nothing, so map it by hand (cluster id is the csi
-config's `cluster-id`, or what vsphere client → cloud native storage shows):
+only mapped cluster ids get a verdict. an id clont only sees on the pvs goes in the
+warning with a hint, since two clusters can run with the same id. map an id only
+when no other cluster uses it (cluster id is the csi config's `cluster-id`, or what
+vsphere client → cloud native storage shows):
 
 ```yaml
 onprem:
@@ -211,7 +212,7 @@ CLONT_CONFIG=./clont.yaml clont run --once --summary -
 one cycle, a summary to the screen, then it exits:
 
 ```
-clont scan summary (2026-11-09T10:21:04+00:00, clont 0.4.1)
+clont scan summary (2026-11-09T10:21:04+00:00, clont 0.5.0)
 accounts:   dc1
 duration:   22.7s
 
@@ -243,7 +244,7 @@ read it in this order:
 docker run -d --name clont --restart unless-stopped \
   -v $PWD/clont.yaml:/etc/clont/clont.yaml:ro \
   -e DC1_VSPHERE_PASSWORD='...' \
-  ghcr.io/clont-app/clont:0.4.1
+  ghcr.io/clont-app/clont:0.5.0
 docker logs -f clont
 ```
 

@@ -1,6 +1,6 @@
 # changelog
 
-## unreleased
+## 0.5.0
 
 ### upgrading
 
@@ -31,12 +31,24 @@
 - datastore browse paths come out in the `layoutEx` form whatever the host
   answers (`[ds]/vm` from vcsim, `[ds] vm/` from esxi)
 - on-prem `cns-leftover` (vcenter only, `Cns.Searchable`): csi volumes whose cluster
-  clont reads and holds no pv for them, cluster ids learned or mapped in
-  `inventory.cns_clusters`
+  clont reads and holds no pv for them. only cluster ids mapped in
+  `inventory.cns_clusters` get a verdict, a learned id goes in the warning
+- gc findings say a resource is likely unused and what to check before removing it,
+  never "delete". `unregistered-vm` lists the files it checked, never the folder
+- files of vms on other configured `onprem:` sites and files a live vm's devices
+  point at (mounted isos) are live. vms the login can't read make a datastore
+  all-live or the findings `low confidence`. a site with no `inventory:` block
+  counts as one that could not be read
 - `template-disk` on a vcenter says when the template was last cloned, or that it
   wasn't over the event history vcenter still holds. no verdict on esxi or a failed read
 
 ### fixes
+
+- an `old-vm-snapshot` on a vm already priced as stopped, template or orphan is a
+  $0 risk, not counted twice
+- rightsize findings with $0 savings are dropped
+- cns skips datastores gc refused or called stale
+- a running vm with no layout time is an unknown lag, not never-stale
 
 - on-prem: a running vm whose `layoutEx` is over `onprem_layout_max_lag_minutes` (10)
   older than its datastore's free space no longer reads as `unaccounted-storage`, and
