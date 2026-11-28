@@ -89,7 +89,8 @@ with the rest. it only gives up if *no* account authenticates.
   `cns-leftover`: map an id only if no other cluster runs with it, clont can't
   tell two clusters with one csi `cluster-id` apart). every other `onprem:` site
   is read as a peer, so a datastore two vcenters share keeps both sides' files
-  live in datastore gc.
+  live in datastore gc. a site with no `inventory` (or one that didn't come up)
+  is a peer clont can't read, so gc findings say low confidence.
   leaving `inventory` out is fine: the site is priced and idle, which is the
   normal state while the read-only account is still being granted.
 

@@ -71,6 +71,8 @@ class OnPremProvider:
         self._clock = clock
         self._last: tuple[float, SiteInventory] | None = None
         self._browsed: tuple[float, SiteInventory] | None = None
+        # what a peer's gc needs: vms with their devices, no browse, no perf
+        self._peer_pass: tuple[float, SiteInventory] | None = None
         self._guests: list[tuple[str, Callable[[], GuestStorage]]] = []
         # the other sites clont reads, a vcenter sharing an array with this one
         self._peers: list[tuple[str, Callable[[], SiteInventory]]] = []
@@ -121,6 +123,7 @@ class OnPremProvider:
         and must not wait on one. `inventory.browse: false` makes this `inventory()`.
         """
         if not self._config.browse or self._browse_off:
+            # gc won't run on this site, but a peer's gc may still want our vms
             return self.inventory()
         if self._browsed is not None and self._clock() - self._browsed[0] < self._ttl:
             return self._browsed[1]
@@ -133,6 +136,7 @@ class OnPremProvider:
                 clones=not self._clones_off,
                 # cns volumes are judged against the clusters' pvs, none attached -> no read
                 cns=bool(self._guests) and not self._cns_off,
+                devices=True,
             )
             self._clones_off = self._clones_off or session.clones_failed
             self._cns_off = self._cns_off or session.cns_failed
@@ -141,6 +145,18 @@ class OnPremProvider:
         now = self._clock()
         self._browsed = (now, site)
         self._last = (now, site)
+        return site
+
+    def peer_inventory(self) -> SiteInventory:
+        """our vms with their device backings, for another site's gc. the browsed pass
+        when it's fresh, else its own short one with no browse and no perf"""
+        now = self._clock()
+        for cached in (self._browsed, self._peer_pass):
+            if cached is not None and now - cached[0] < self._ttl:
+                return cached[1]
+        with self._session() as session:
+            site = session.site(devices=True)
+        self._peer_pass = (self._clock(), site)
         return site
 
     def _check_browse(self, session: VsphereInventory) -> None:

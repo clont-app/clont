@@ -145,6 +145,8 @@ def sweep(
         return None
     # datastore moref -> vms with no layout on it, their files could be any of its files
     by_name = {_key(ds.name): ds.uid for ds in site.datastores}
+    peers = list(peers)
+    hidden_there = _peer_hidden(peers)
     blind: dict[str, list[str]] = {}
     for vm in vms:
         if not vm.files:
@@ -153,7 +155,6 @@ def sweep(
             for uid in {*vm.datastores, *([home] if home else [])}:
                 blind.setdefault(uid, []).append(vm.name)
 
-    peers = list(peers)
     owned = _owned(site, peers)
     doubts = _site_doubts(site, peers)
     strays = _strays(site, owned)
@@ -172,6 +173,9 @@ def sweep(
         if ds.uid not in site.files:
             continue
         why = _not_judged(ds, dead)
+        if not why and ds.url and _url(ds.url) in hidden_there:
+            alias, count = hidden_there[_url(ds.url)]
+            why = f"{count} vm(s) of site {alias} with files on it are hidden from that login"
         if not why and ds.uid in blind:
             why = f"no layoutEx for {_few(blind[ds.uid])}"
         if not why and ds.uid in lagging:
@@ -375,6 +379,19 @@ def _owned(site: SiteInventory, peers: list[Peer]) -> set[str]:
                 theirs, rest = _split(path)
                 for name in names.get(_key(theirs), ()):
                     out.add(_norm(f"[{name}] {rest}"))
+    return out
+
+
+def _peer_hidden(peers: list[Peer]) -> dict[str, tuple[str, int]]:
+    """datastore url -> (peer, count) for a peer's datastores naming vms its login can't
+    read, the same as our own hidden vms once the array is shared"""
+    out: dict[str, tuple[str, int]] = {}
+    for peer in peers:
+        if peer.site is None:
+            continue
+        for ds in peer.site.datastores:
+            if ds.url and ds.hidden_vms:
+                out.setdefault(_url(ds.url), (peer.alias, len(ds.hidden_vms)))
     return out
 
 

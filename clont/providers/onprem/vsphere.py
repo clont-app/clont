@@ -109,9 +109,10 @@ VM_PATHS = (
     "config.files.vmPathName",
     # the datastores a vm uses, so a vm with no layout blinds only those
     "datastore",
-    # device backings: a mounted iso is in no layout, and gc must not call it nobody's
-    "config.hardware.device",
 )
+# the gc pass only: a mounted iso is in no layout, and gc must not call it nobody's. every
+# vm's full device list is too much for the hourly cost pass
+GC_VM_PATHS = (*VM_PATHS, "config.hardware.device")
 FOLDER_PATHS = ("name", "parent")
 DATACENTER_PATHS = ("name",)
 
@@ -251,6 +252,7 @@ class VsphereInventory:
         browse_skip: frozenset[str] = frozenset(),
         clones: bool = False,
         cns: bool = False,
+        devices: bool = False,
     ) -> SiteInventory:
         """One full pass: clusters, hosts, datastores, vms, and the datacenter they sit in.
 
@@ -260,13 +262,14 @@ class VsphereInventory:
         a site with no counter history still has a bill to report.
 
         `clones` reads vcenter's clone events for the templates, see `clone_events()`,
-        and `cns` its container volumes, see `cns()`.
+        and `cns` its container volumes, see `cns()`. `devices` adds every vm's device
+        backings, for gc.
         """
         vim = self._require_vim()
         compute = self.properties(vim.ComputeResource, COMPUTE_PATHS)
         hosts = self.properties(vim.HostSystem, HOST_PATHS)
         datastores = self.properties(vim.Datastore, DATASTORE_PATHS)
-        vms = self.properties(vim.VirtualMachine, VM_PATHS)
+        vms = self.properties(vim.VirtualMachine, GC_VM_PATHS if devices else VM_PATHS)
         # only to qualify a pool name: two datacenters may each hold a "prod" cluster
         folders = self.properties(vim.Folder, FOLDER_PATHS)
         datacenters = self.properties(vim.Datacenter, DATACENTER_PATHS)

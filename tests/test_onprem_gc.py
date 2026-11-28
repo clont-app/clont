@@ -864,3 +864,23 @@ def test_a_peer_hiding_vms_on_a_shared_array_lowers_confidence():
     hidden = replace(elsewhere.site, hidden_vms=("vim.VirtualMachine:vm-77",))
     [row] = gc.sweep(built, FinOpsTuning(), NOW, peers=[gc.Peer("dc2", hidden)]).garbage
     assert row.doubts == ()
+
+
+def test_a_shared_array_the_peers_login_sees_hidden_vms_on_is_not_judged():
+    # peer b hides a powered-off vm owning [shared-san] x/x.vmdk: on our side it's san-01
+    built = site(
+        [_file("[san-01] x/x.vmdk"), _file("[san-01] x/x-flat.vmdk", 20)],
+        datastores=_with_url(),
+    )
+    assert paths(gc.sweep(built, FinOpsTuning(), NOW)) == [("orphaned-vmdk", "[san-01] x/x.vmdk")]
+    peer = _peer({}, alias="b")
+    [ds] = peer.site.datastores
+    hidden = replace(
+        peer.site, datastores=(replace(ds, hidden_vms=("vim.VirtualMachine:vm-77",)),)
+    )
+    result = gc.sweep(built, FinOpsTuning(), NOW, peers=[gc.Peer("b", hidden)])
+    assert result.garbage == () and result.judged == ()
+    assert "1 vm(s) of site b with files on it are hidden" in result.reasons["san-01"]
+    assert DS in result.unreliable
+    recs = advise(built, peers=[("b", hidden)])
+    assert by_kind(recs, "orphaned-vmdk") == []

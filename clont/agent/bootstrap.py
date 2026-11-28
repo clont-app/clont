@@ -115,6 +115,8 @@ def _onprem_providers(sites: dict[str, OnPremSite]) -> list[Provider]:
     for alias, site in sites.items():
         if site.inventory is None:
             log.warning("onprem %s: priced but no inventory block, nothing will be collected", alias)
+            # its arrays may be ours too, and nothing says what's on them
+            down.append(alias)
             continue
         provider = OnPremProvider(alias, site)
         try:
@@ -137,7 +139,8 @@ def _link_peers(providers: list[Provider], down: list[str]) -> None:
             continue
         for other in providers:
             if other is not provider:
-                attach(other.alias, other.inventory)
+                read = getattr(other, "peer_inventory", None) or other.inventory
+                attach(other.alias, read)
         for alias in down:
             attach(alias, _unreachable(alias))
 

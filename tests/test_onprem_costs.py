@@ -384,8 +384,10 @@ class FakeSession:
         browse_skip=frozenset(),
         clones=False,
         cns=False,
+        devices=False,
     ):
         self._windows.append(usage_window_days)
+        self.devices = devices
         self.clones_asked = clones
         self.cns_asked = cns
         self.cns_failed = cns and getattr(self, "fail_cns", False)
@@ -498,6 +500,42 @@ def test_a_peer_site_is_read_and_a_failed_one_is_none():
     provider.attach_peer("dc2", lambda: other)
     provider.attach_peer("dc3", lambda: 1 / 0)
     assert provider.peer_sites() == [("dc2", other), ("dc3", None)]
+
+
+def test_the_cost_pass_never_reads_device_lists():
+    from clont.providers.onprem.vsphere import GC_VM_PATHS, VM_PATHS
+
+    assert "config.hardware.device" not in VM_PATHS
+    assert "config.hardware.device" in GC_VM_PATHS
+    provider, _, _ = provider_with(site_inventory())
+    provider.inventory()
+    assert provider.sessions[-1].devices is False
+
+
+def test_the_gc_and_peer_passes_read_device_lists():
+    provider, _, _ = provider_with(site_inventory())
+    provider.browsed_inventory()
+    assert provider.sessions[-1].devices is True
+    # a fresh browsed pass serves the peer, no second login
+    count = len(provider.sessions)
+    provider.peer_inventory()
+    assert len(provider.sessions) == count
+    other, _, _ = provider_with(site_inventory())
+    other.peer_inventory()
+    assert other.sessions[-1].devices is True and other.sessions[-1].browsed is False
+
+
+def test_a_site_with_no_inventory_block_is_an_unreadable_peer():
+    from clont.agent.bootstrap import _onprem_providers
+
+    sites = {"dc1": OnPremSite(inventory=INVENTORY, **CARD), "dc9": OnPremSite(**CARD)}
+    original = OnPremProvider.authenticate
+    OnPremProvider.authenticate = lambda self: None
+    try:
+        [provider] = _onprem_providers(sites)
+    finally:
+        OnPremProvider.authenticate = original
+    assert provider.peer_sites() == [("dc9", None)]
 
 
 def test_bootstrap_links_every_site_to_the_others_and_the_ones_that_failed():

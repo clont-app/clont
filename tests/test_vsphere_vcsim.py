@@ -238,7 +238,9 @@ def test_the_tree_turns_into_findings_input(session):
 
 
 def test_device_backings_and_datastore_vms_come_back(session):
-    site = session.site()
+    # the cost pass asks for no devices, the gc pass does
+    assert all(not vm.device_files for vm in session.site().vms())
+    site = session.site(devices=True)
     vm = next(vm for vm in site.vms() if vm.name == SNAP_VM)
     # the disk's descriptor at least, the same file layoutEx names
     assert any(p.endswith(".vmdk") for p in vm.device_files)
